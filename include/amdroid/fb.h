@@ -15,3 +15,4 @@ void fb_swap(void); /* if double buffered */
 void fb_rect(u32 x,u32 y,u32 w,u32 h,u32 color); /* outline */
 
 #endif
+void fb_scroll_up(u32 dy, u32 bg); /* scroll the back buffer up by dy rows */

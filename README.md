@@ -16,6 +16,31 @@ emulators (QEMU) and real hardware (BIOS and UEFI via GRUB).
 - Interactive shell
 - Built-in Fuss interpreter (`fuss <file.fas>`), with floating point
 
+## Operating system features (added in this round)
+
+- **Processes:** ring-3 user programs in their own address spaces, preemptive
+  round-robin scheduling of user processes, and system calls via `int 0x80`
+  (write, exit, yield, getpid, ticks). Commands: `run <file> [&]`, `ps`, `kill`,
+  `userdemo`.
+- **Programs:** static ELF64 executables are loaded from the disk (`run`), and
+  `install a.b.c.d port /path NAME` downloads a program over HTTP onto the disk.
+- **Disk:** FAT32 read/write in the root and read-only subdirectories, with
+  crash-safe overwrites; read-only ext2 on the secondary IDE drive (`ext2ls`,
+  `ext2cat`).
+- **Terminal:** a framebuffer text console with scrollback (PgUp/PgDn), a line
+  editor with history, cursor keys and tab completion, Shift and Ctrl keys.
+- **Accounts:** `USERS.DB` (SHA-256 with salt) and `PERMS.DB` (owner and mode per
+  file). Commands: `login`, `whoami`, `adduser`, `passwd`, `chmod`.
+- **Hardware:** RTC (`date`), PCI (`lspci`), Intel HD Audio output (`beep`),
+  e1000 and virtio-net with ARP, IPv4, ICMP (`ping`), UDP, and a TCP client
+  (`wget`), and an xHCI USB controller with HID boot keyboards.
+
+Still missing: a file system on USB disks (the USB disk is reachable at block
+level only), USB hubs deeper than one level and the rest of the USB device
+classes, audio input, dynamic linking for ELF programs, signals, journaling for
+FAT32 writes (a crash in the middle of a directory update can still lose data),
+and TCP congestion control (sends are stop-and-wait).
+
 ## Build
 
 Requirements: gcc, nasm/as, ld, grub-mkrescue, xorriso, qemu (optional).

@@ -39,15 +39,46 @@ C_SRCS = \
  src/kernel/fuss/front.c \
  src/kernel/fuss/eval.c \
  src/kernel/fuss/lib.c \
- src/kernel/fuss/run.c
+ src/kernel/fuss/run.c \
+ src/kernel/fuss/gc.c \
+ src/kernel/gdt.c \
+ src/kernel/memory/vm.c \
+ src/kernel/userdemo.c \
+ src/kernel/elf.c \
+ src/kernel/drivers/rtc.c \
+ src/kernel/drivers/fbcon.c \
+ src/kernel/auth.c \
+ src/kernel/fs/ext2.c \
+ src/kernel/drivers/pci.c \
+ src/kernel/drivers/hda.c \
+ src/kernel/drivers/e1000.c \
+ src/kernel/drivers/virtio_net.c \
+ src/kernel/drivers/xhci.c \
+ src/kernel/net/nic.c \
+ src/kernel/net/net.c \
+ src/kernel/crypto/sha256.c
 
 ASM_SRCS = \
  src/boot/boot.asm \
- src/boot/isr_stubs.asm
+ src/boot/isr_stubs.asm \
+ src/user/hello.asm \
+ src/user/busy.asm
 
 OBJS = $(C_SRCS:.c=.o) $(ASM_SRCS:.asm=.o)
 
 all: $(ISO)
+
+# Programs for the disk (run them with `run NAME.ELF` in the OS).
+USER_PROGS = hello spin cat echo fwrite whoami sigtest
+USER_ELFS = $(addprefix out/user/,$(addsuffix .elf,$(USER_PROGS)))
+
+userprogs: $(USER_ELFS)
+
+out/user/%.elf: src/user/c/%.c src/user/c/ulib.c src/user/c/ulib.h src/user/c/linker.ld
+	@mkdir -p out/user
+	$(CC) -std=gnu11 -ffreestanding -O2 -fno-stack-protector -fno-pie -mno-red-zone -m64 -Wall -c src/user/c/ulib.c -o out/user/ulib.o
+	$(CC) -std=gnu11 -ffreestanding -O2 -fno-stack-protector -fno-pie -mno-red-zone -m64 -Wall -c $< -o out/user/$*.o
+	$(LD) -T src/user/c/linker.ld -nostdlib -static -o $@ out/user/ulib.o out/user/$*.o
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -77,4 +108,4 @@ run: $(ISO)
 run-hd: $(KERNEL)
 	qemu-system-x86_64 -kernel $(KERNEL) -serial stdio -m 256M
 
-.PHONY: all clean run run-hd
+.PHONY: all clean run run-hd userprogs

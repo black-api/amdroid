@@ -33,17 +33,16 @@ isr_common:
     pushq %r13
     pushq %r14
     pushq %r15
-    # Save the SSE/x87 state: the interrupted code may be in the middle of
-    # floating-point work, and C handlers may use xmm registers.
-    movq %rsp, %rbx          # rbx = GPR frame (callee-saved; restored by popq)
-    subq $528, %rsp
-    andq $-16, %rsp
-    movq %rsp, %r12          # r12 = fxsave area (callee-saved across the call)
+    # Save the SSE/x87 state of the interrupted task into its fxsave area.
+    movq cur_fx_ptr(%rip), %r12
     fxsave (%r12)
-    movq %rbx, %rdi          # pointer to frame
-    call isr_handler
+    movq %rsp, %rdi            # frame: argument for isr_handler
+    andq $-16, %rsp            # C code expects a 16-byte aligned stack
+    call isr_handler           # returns the frame to resume (maybe another task's)
+    movq %rax, %rsp
+    # Restore the SSE state of the task we are resuming.
+    movq cur_fx_ptr(%rip), %r12
     fxrstor (%r12)
-    movq %rbx, %rsp
     popq %r15
     popq %r14
     popq %r13
@@ -59,7 +58,7 @@ isr_common:
     popq %rcx
     popq %rbx
     popq %rax
-    addq $16, %rsp   # error code + vector
+    addq $16, %rsp             # drop vector and error code
     iretq
 
 # Generate stubs for 0..31 (exceptions) and 32..47 (IRQs)
@@ -118,42 +117,7 @@ ISR_NOERR 45
 ISR_NOERR 46
 ISR_NOERR 47
 
-# Syscall vector 128
-.global isr_128
-isr_128:
-    pushq $0
-    pushq $128
-    pushq %rax
-    pushq %rbx
-    pushq %rcx
-    pushq %rdx
-    pushq %rsi
-    pushq %rdi
-    pushq %rbp
-    pushq %r8
-    pushq %r9
-    pushq %r10
-    pushq %r11
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
-    movq %rsp, %rdi
-    call syscall_handler
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %r11
-    popq %r10
-    popq %r9
-    popq %r8
-    popq %rbp
-    popq %rdi
-    popq %rsi
-    popq %rdx
-    popq %rcx
-    popq %rbx
-    popq %rax
-    addq $16, %rsp
-    iretq
+# syscall (int 0x80) and yield (int 0x81)
+ISR_NOERR 128
+ISR_NOERR 129
+

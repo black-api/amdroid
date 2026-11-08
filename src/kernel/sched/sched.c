@@ -1,123 +1,302 @@
+/* sched.c — process table and round-robin scheduler.
+ *
+ * Every process keeps its saved interrupt frame on its own kernel stack. A
+ * switch means returning a different frame from the interrupt handler; the
+ * stub in isr_stubs.asm restores registers from that frame and iretq's into
+ * whichever process it belongs to. */
 #include "amdroid/sched.h"
 #include "amdroid/heap.h"
 #include "amdroid/console.h"
+#include "amdroid/gdt.h"
+#include "amdroid/vm.h"
+#include "amdroid/syscall.h"
+#include "amdroid/net.h"
 #include "amdroid/types.h"
+#include <string.h>
 
-#define MAX_TASKS 16
-#define TASK_STACK_SIZE (16*1024)
+#define KSTACK_SIZE (16 * 1024)
+#define FRAME_WORDS 22      /* see isr_stubs.asm: 15 GPRs, vector, error, iret frame */
 
-typedef enum { TASK_UNUSED, TASK_READY, TASK_RUNNING, TASK_DEAD } task_state_t;
+enum { P_FREE, P_READY, P_RUNNING, P_BLOCKED, P_ZOMBIE };
 
-typedef struct task {
-    int id;
+typedef struct proc {
+    int pid;
+    int state;
     char name[32];
-    task_state_t state;
-    void *stack;
-    void *sp;        /* saved stack pointer */
-    task_fn_t fn;
-} task_t;
+    u64 *krsp;                  /* saved interrupt frame */
+    u8 *kstack;
+    u64 kstack_top;
+    u64 cr3;
+    int exit_code;
+    int detached;               /* reaped automatically when it exits */
+    int uid;                    /* who the process runs as */
+    u32 sig_pending;            /* bit n = signal n waiting */
+    u64 sig_handler[NSIG];      /* 0 = default, 1 = ignore, else a user function */
+    u8 fx[512] __attribute__((aligned(16)));   /* saved SSE/x87 state */
+} proc_t;
 
-static task_t tasks[MAX_TASKS];
-static int current = -1;
-static int task_count = 0;
+static proc_t procs[MAX_PROCS];
+static int cur = 0;
+static u64 kernel_cr3;
+static u64 loaded_cr3;
 
-/* context switch in C using inline asm? We'll implement yield by longjmp-like.
-   Since cooperative, we can use setjmp/longjmp if available. gcc provides __builtin_setjmp? 
-   Use manual: save rsp/rbp into task, restore next. */
+/* read by isr_stubs.asm: where the current process's SSE state is kept */
+u8 *cur_fx_ptr;
 
-/* We'll implement switch via inline assembly */
-static void switch_context(task_t *from, task_t *to){
-    /* save current registers into from->sp */
-    void *sp;
-    __asm__ volatile(
-        "mov %%rsp, %0\n"
-        : "=r"(sp)
-    );
-    from->sp = sp;
-    /* restore */
-    __asm__ volatile(
-        "mov %0, %%rsp\n"
-        :
-        : "r"(to->sp)
-    );
-    /* Note: this is a naive switch; function return addresses handled by stack.
-       We need each new task to start by calling its function. Handle in spawn. */
-}
-
-/* Instead, implement tasks as functions that run and never return, with their own stack.
-   Spawn sets up stack with a trampoline. */
-
-static void task_trampoline(void){
-    /* current task's fn */
-    int id = current;
-    tasks[id].fn();
-    tasks[id].state = TASK_DEAD;
-    sched_yield();
-    for(;;) __asm__ volatile("hlt");
-}
+static inline void yield_now(void){ __asm__ volatile("int $0x81"); }
 
 void sched_init(void){
-    for(int i=0;i<MAX_TASKS;i++){ tasks[i].state=TASK_UNUSED; tasks[i].stack=NULL; }
-    /* task 0 = idle/main, will be set by sched_start */
+    memset(procs, 0, sizeof procs);
+    procs[0].pid = 0;
+    procs[0].state = P_RUNNING;
+    strcpy(procs[0].name, "kernel");
+    kernel_cr3 = vm_kernel_cr3();
+    procs[0].cr3 = kernel_cr3;
+    procs[0].uid = 0;
+    loaded_cr3 = kernel_cr3;
+    cur = 0;
+    cur_fx_ptr = procs[0].fx;
 }
 
-int sched_spawn(task_fn_t fn, const char *name){
-    for(int i=0;i<MAX_TASKS;i++){
-        if(tasks[i].state==TASK_UNUSED){
-            tasks[i].id=i;
-            int j=0; while(name[j] && j<31){ tasks[i].name[j]=name[j]; j++; } tasks[i].name[j]=0;
-            tasks[i].fn=fn;
-            tasks[i].state=TASK_READY;
-            tasks[i].stack = kmalloc(TASK_STACK_SIZE);
-            /* set up stack: push trampoline address so ret jumps there */
-            u64 *sp = (u64*)((char*)tasks[i].stack + TASK_STACK_SIZE);
-            /* align */
-            sp = (u64*)(((u64)sp) & ~0xFULL);
-            *--sp = (u64)task_trampoline;
-            tasks[i].sp = sp;
-            task_count++;
-            return i;
+int proc_current(void){ return cur; }
+int proc_uid(int pid){ return (pid >= 0 && pid < MAX_PROCS) ? procs[pid].uid : -1; }
+void proc_set_uid(int pid, int uid){ if(pid >= 0 && pid < MAX_PROCS) procs[pid].uid = uid; }
+
+/* Sets the arguments a new process starts with: argc in rdi, argv in rsi. */
+void proc_set_args(int pid, u64 argc, u64 argv_va){
+    if(pid <= 0 || pid >= MAX_PROCS || procs[pid].state != P_READY) return;
+    u64 *f = procs[pid].krsp;
+    f[9] = argc;
+    f[10] = argv_va;
+}
+
+int proc_create_user(const char *name, u64 entry, u64 user_sp, u64 cr3, u64 arg){
+    int pid = -1;
+    for(int i = 1; i < MAX_PROCS; i++) if(procs[i].state == P_FREE){ pid = i; break; }
+    if(pid < 0) return -1;
+    proc_t *p = &procs[pid];
+    memset(p, 0, sizeof *p);
+    p->pid = pid;
+    for(int k = 0; k < (int)sizeof p->name - 1 && name[k]; k++) p->name[k] = name[k];
+    p->kstack = kmalloc(KSTACK_SIZE + 16);
+    if(!p->kstack) return -1;
+    p->kstack_top = ((u64)(unsigned long)p->kstack + KSTACK_SIZE) & ~0xFULL;
+    /* initial frame: "return" from an interrupt into ring 3 at entry */
+    u64 *f = (u64*)(unsigned long)(p->kstack_top - FRAME_WORDS * 8);
+    memset(f, 0, FRAME_WORDS * 8);
+    f[9] = arg;                /* rdi */
+    f[17] = entry;             /* rip */
+    f[18] = SEL_UCODE;         /* cs */
+    f[19] = 0x202;            /* rflags: IF set */
+    f[20] = user_sp;           /* rsp */
+    f[21] = SEL_UDATA;         /* ss */
+    p->krsp = f;
+    p->cr3 = cr3;
+    p->uid = procs[cur].uid;   /* inherits the creator's user */
+    vm_map_trampoline(cr3);
+    p->state = P_READY;
+    /* default FPU/SSE state: FCW 0x037F, MXCSR 0x1F80 (all exceptions masked) */
+    memset(p->fx, 0, sizeof p->fx);
+    *(u16*)(p->fx + 0) = 0x037F;
+    *(u32*)(p->fx + 24) = 0x1F80;
+    return pid;
+}
+
+/* Frees a dead process's kernel stack and address space. Never the one running. */
+static void reap(proc_t *p){
+    if(p->kstack){ kfree(p->kstack); p->kstack = NULL; }
+    if(p->cr3 && p->cr3 != kernel_cr3 && p->cr3 != loaded_cr3) vm_free_space(p->cr3);
+    p->cr3 = 0;
+    p->state = P_FREE;
+}
+
+static int any_other_ready(void){
+    for(int i = 0; i < MAX_PROCS; i++) if(i != cur && procs[i].state == P_READY) return 1;
+    return 0;
+}
+
+/* Picks the next READY process after the current one and switches to it. */
+static void wake_waiters(void);
+
+/* ---------- signals ----------
+ * Signals are queued and delivered when the process is about to run. A handler
+ * runs on the user stack; the interrupted state is saved below it and restored
+ * by sigreturn, which the trampoline page calls when the handler returns. */
+#define SIG_BLOCK_WORDS 18
+
+static void terminate(proc_t *p, int code){
+    syscall_release((int)(p - procs));
+    p->exit_code = code;
+    p->state = P_ZOMBIE;
+    wake_waiters();
+}
+
+/* Delivers one pending signal to p (about to run). Returns 1 if p died. */
+static int deliver(proc_t *p){
+    if(!p->sig_pending) return 0;
+    for(int sig = 1; sig < NSIG; sig++){
+        if(!(p->sig_pending & (1u << sig))) continue;
+        u64 h = p->sig_handler[sig];
+        p->sig_pending &= ~(1u << sig);
+        if(h == 1 && sig != SIGKILL) continue;               /* ignored */
+        if(h == 0 || sig == SIGKILL){ terminate(p, 128 + sig); return 1; }
+        /* a handler: save the state below the user stack, then run it */
+        u64 *f = p->krsp;
+        u64 blk[SIG_BLOCK_WORDS];
+        memcpy(blk, f, 15 * 8);
+        blk[15] = f[17]; blk[16] = f[19]; blk[17] = f[20];
+        u64 b = ((f[20] - 256) & ~0xFULL) - 144;             /* 16-aligned, 144 bytes */
+        u64 ret = b - 8;                                     /* the handler returns to the trampoline */
+        u64 tramp = VM_SIG_TRAMPOLINE;
+        if(vm_copy_to_user(p->cr3, b, blk, sizeof blk) != 0 ||
+           vm_copy_to_user(p->cr3, ret, &tramp, 8) != 0){
+            terminate(p, 128 + sig);
+            return 1;
         }
+        f[20] = ret;
+        f[17] = h;
+        f[9] = (u64)sig;                                     /* rdi: the signal number */
+        return 0;
     }
-    return -1;
+    return 0;
 }
 
-void sched_yield(void){
-    int prev = current;
-    /* find next ready */
-    int next = -1;
-    for(int i=1;i<=MAX_TASKS;i++){
-        int idx = (current + i) % MAX_TASKS;
-        if(tasks[idx].state==TASK_READY){ next=idx; break; }
+int proc_signal(int pid, int sig){
+    if(pid <= 0 || pid >= MAX_PROCS || sig < 1 || sig >= NSIG) return -1;
+    proc_t *p = &procs[pid];
+    if(p->state == P_FREE || p->state == P_ZOMBIE) return -1;
+    if(sig == SIGKILL){
+        if(pid == cur){ p->sig_pending |= 1u << sig; return 0; }   /* delivered on the way out */
+        terminate(p, -9);
+        return 0;
     }
-    if(next<0 || next==current) return;
-    if(prev>=0 && tasks[prev].state==TASK_RUNNING) tasks[prev].state=TASK_READY;
-    tasks[next].state=TASK_RUNNING;
-    current = next;
-    if(prev>=0){
-        switch_context(&tasks[prev], &tasks[next]);
-    } else {
-        /* first switch: just load next sp */
-        __asm__ volatile("mov %0, %%rsp"::"r"(tasks[next].sp));
-        /* now "return" into trampoline */
-    }
+    p->sig_pending |= 1u << sig;
+    if(p->state == P_BLOCKED) p->state = P_READY;
+    return 0;
 }
 
-void sched_tick(void){
-    /* cooperative: don't preempt; just count. Could set flag. */
+int proc_sig_handler_set(int sig, u64 handler){
+    if(sig < 1 || sig >= NSIG || sig == SIGKILL) return -1;
+    procs[cur].sig_handler[sig] = handler;
+    return 0;
 }
 
-void sched_start(void){
-    /* pick first ready task */
-    for(int i=0;i<MAX_TASKS;i++){
-        if(tasks[i].state==TASK_READY){ 
-            tasks[i].state=TASK_RUNNING; current=i;
-            __asm__ volatile("mov %0, %%rsp"::"r"(tasks[i].sp));
-            /* jump to trampoline */
-            __asm__ volatile("ret");
-            break;
+/* For the current process at a system call return. NULL if it died. */
+u64 *proc_deliver_current(u64 *frame){
+    proc_t *p = &procs[cur];
+    p->krsp = frame;
+    if(deliver(p)) return 0;
+    return p->krsp;
+}
+
+/* sigreturn: restores the state a handler was interrupted in. */
+int proc_sigreturn(u64 *frame){
+    proc_t *p = &procs[cur];
+    u64 blk[SIG_BLOCK_WORDS];
+    if(vm_copy_from_user(p->cr3, frame[20], blk, sizeof blk) != 0) return -1;
+    memcpy(frame, blk, 15 * 8);
+    frame[17] = blk[15];
+    frame[19] = blk[16];
+    frame[20] = blk[17];
+    return 0;
+}
+
+u64 *sched_switch(u64 *frame){
+    proc_t *from = &procs[cur];
+    from->krsp = frame;
+    if(from->state == P_RUNNING) from->state = P_READY;
+
+    proc_t *to = 0;
+    for(;;){
+        int next = -1;
+        for(int k = 1; k <= MAX_PROCS; k++){
+            int i = (cur + k) % MAX_PROCS;
+            if(procs[i].state == P_READY){ next = i; break; }
         }
+        if(next < 0){
+            /* nothing else can run: keep the caller */
+            from->state = from->state == P_READY ? P_RUNNING : from->state;
+            return frame;
+        }
+        cur = next;
+        to = &procs[cur];
+        to->state = P_RUNNING;
+        if(!deliver(to)) break;      /* the process died from a signal: pick again */
+    }
+    if(to->cr3 != loaded_cr3){ vm_switch(to->cr3); loaded_cr3 = to->cr3; }
+    /* now that we are off the dead process's tables, reclaim the finished ones */
+    for(int i = 1; i < MAX_PROCS; i++)
+        if(i != cur && procs[i].state == P_ZOMBIE && procs[i].detached) reap(&procs[i]);
+    if(to->kstack_top) gdt_set_rsp0(to->kstack_top);
+    cur_fx_ptr = to->fx;
+    return to->krsp;
+}
+
+/* Called by the timer. Only user-mode code is preempted. */
+u64 *sched_preempt(u64 *frame){
+    if((frame[18] & 3) != 3) return frame;
+    return sched_switch(frame);
+}
+
+static void wake_waiters(void){
+    for(int i = 0; i < MAX_PROCS; i++) if(procs[i].state == P_BLOCKED) procs[i].state = P_READY;
+}
+
+u64 *proc_exit(u64 *frame, int code){
+    proc_t *p = &procs[cur];
+    syscall_release(cur);            /* close its files (flushes writes) */
+    p->exit_code = code;
+    p->state = P_ZOMBIE;
+    wake_waiters();
+    return sched_switch(frame);
+}
+
+void proc_yield(void){ yield_now(); }
+
+/* Idle: give the CPU away if someone else can run, otherwise sleep until the
+ * next interrupt (the timer, a key, a packet). Keeps the CPU from spinning. */
+void proc_idle(void){
+    net_poll();                       /* keep the network moving while we wait */
+    if(any_other_ready()){ yield_now(); return; }
+    __asm__ volatile("sti; hlt; cli");
+}
+
+static const char *state_name(int s){
+    switch(s){
+        case P_READY: return "ready";
+        case P_RUNNING: return "running";
+        case P_BLOCKED: return "blocked";
+        case P_ZOMBIE: return "zombie";
+        default: return "free";
     }
 }
 
-int sched_task_count(void){ return task_count; }
+void proc_visit(proc_visit_fn cb, void *arg){
+    for(int i = 0; i < MAX_PROCS; i++)
+        if(procs[i].state != P_FREE) cb(procs[i].pid, procs[i].name, state_name(procs[i].state), arg);
+}
+
+void proc_detach(int pid){
+    if(pid > 0 && pid < MAX_PROCS) procs[pid].detached = 1;
+}
+
+/* Kills another process. Its waiter (if any) sees the exit code -9. */
+int proc_kill(int pid){
+    if(pid <= 0 || pid >= MAX_PROCS || pid == cur) return -1;
+    return proc_signal(pid, SIGKILL);
+}
+
+int proc_wait(int pid){
+    if(pid <= 0 || pid >= MAX_PROCS) return -1;
+    for(;;){
+        proc_t *p = &procs[pid];
+        if(p->state == P_ZOMBIE){
+            int code = p->exit_code;
+            reap(p);
+            return code;
+        }
+        if(p->state == P_FREE) return -1;
+        procs[cur].state = P_BLOCKED;
+        proc_idle();
+    }
+}

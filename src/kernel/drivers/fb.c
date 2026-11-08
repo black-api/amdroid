@@ -81,3 +81,14 @@ void fb_swap(void){
         for(u32 x=0;x<fb_w;x++) row[x] = src[x];
     }
 }
+/* Scrolls the back buffer up by dy pixel rows, filling the bottom with bg. */
+void fb_scroll_up(u32 dy, u32 bg){
+    if(!ready) return;
+    if(dy >= fb_h){ fb_clear(bg); return; }
+    for(u32 y = 0; y + dy < fb_h; y++)
+        for(u32 x = 0; x < fb_w; x++)
+            backbuf[y*fb_w + x] = backbuf[(y+dy)*fb_w + x];
+    for(u32 y = fb_h - dy; y < fb_h; y++)
+        for(u32 x = 0; x < fb_w; x++)
+            backbuf[y*fb_w + x] = bg;
+}

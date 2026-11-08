@@ -1,6 +1,5 @@
 /* eval.c — tree-walking evaluator for Fuss values, expressions and statements. */
 #include "fuss_int.h"
-#include "amdroid/heap.h"
 #include "amdroid/console.h"
 #include "amdroid/kmath.h"
 #include <string.h>
@@ -13,8 +12,7 @@ void fz_sb_addn(Sb *sb, const char *s, int n){
     if(sb->len + n + 1 > sb->cap){
         int nc = (sb->len + n + 1) * 2;
         if(nc < 64) nc = 64;
-        sb->b = sb->b ? krealloc(sb->b, (size_t)nc) : kmalloc((size_t)nc);
-        if(!sb->b) fz_die("out of memory");
+        sb->b = fz_realloc_copy(sb->b, (size_t)sb->len, (size_t)nc);
         sb->cap = nc;
     }
     memcpy(sb->b + sb->len, s, (size_t)n);
@@ -24,21 +22,18 @@ void fz_sb_addn(Sb *sb, const char *s, int n){
 void fz_sb_adds(Sb *sb, const char *s){ fz_sb_addn(sb, s, (int)strlen(s)); }
 void fz_sb_addc(Sb *sb, char c){ fz_sb_addn(sb, &c, 1); }
 char *fz_sb_done(Sb *sb){
-    if(!sb->b){ sb->b = kmalloc(1); if(!sb->b) fz_die("out of memory"); sb->b[0] = 0; sb->cap = 1; }
+    if(!sb->b){ sb->b = fz_alloc(1); sb->cap = 1; }
     return sb->b;
 }
 
 /* ---------- arrays ---------- */
 Arr *fz_arr_new(void){
-    Arr *a = kcalloc(1, sizeof(Arr));
-    if(!a) fz_die("out of memory");
-    return a;
+    return fz_alloc(sizeof(Arr));
 }
 void fz_arr_push(Arr *a, Val v){
     if(a->len == a->cap){
         a->cap = a->cap ? a->cap * 2 : 4;
-        a->items = krealloc(a->items, sizeof(Val) * (size_t)a->cap);
-        if(!a->items) fz_die("out of memory");
+        a->items = fz_realloc_copy(a->items, sizeof(Val) * (size_t)a->len, sizeof(Val) * (size_t)a->cap);
     }
     a->items[a->len++] = v;
 }
@@ -133,15 +128,15 @@ static Val binop(int op, Val a, Val b){
             if(a.t == V_STR && b.t == V_STR) return concat2(a.s, b.s);
             if(a.t == V_STR || b.t == V_STR || a.t >= V_ARR || b.t >= V_ARR)
                 return concat2(fz_tostr(a), fz_tostr(b));
-            return fz_num(a.n + b.n);
-        case OP_SUB: return fz_num(a.n - b.n);
-        case OP_MUL: return fz_num(a.n * b.n);
+            return fz_num(fz_numval(a) + fz_numval(b));
+        case OP_SUB: return fz_num(fz_numval(a) - fz_numval(b));
+        case OP_MUL: return fz_num(fz_numval(a) * fz_numval(b));
         case OP_DIV:
-            if(b.n == 0) fz_die("division by zero");
-            return fz_num(a.n / b.n);
+            if(fz_numval(b) == 0) fz_die("division by zero");
+            return fz_num(fz_numval(a) / fz_numval(b));
         case OP_MOD:
-            if(b.n == 0) fz_die("modulo by zero");
-            return fz_num(kfmod(a.n, b.n));
+            if(fz_numval(b) == 0) fz_die("modulo by zero");
+            return fz_num(kfmod(fz_numval(a), fz_numval(b)));
         case OP_LT: return fz_bool(cmp3(a, b) < 0);
         case OP_LE: return fz_bool(cmp3(a, b) <= 0);
         case OP_GT: return fz_bool(cmp3(a, b) > 0);
@@ -164,7 +159,7 @@ static Val index_get(Val o, Val i){
         int n = (int)strlen(o.s);
         if(idx < 0 || idx >= n) fz_die("string index out of bounds");
         char b[2] = { o.s[idx], 0 };
-        return fz_strv(strdup(b));
+        return fz_strv(fz_strdup(b));
     }
     fz_die("only arrays and strings can be indexed");
     return fz_num(0);
@@ -207,19 +202,60 @@ static int exec(Node *n, Val *loc);
 
 static Val fz_eval_node(Node *n, Val *loc);
 
+/* Call frames live on a fixed value stack, so calls do not allocate. */
+#define FZ_STACK_VALS (1 << 18)
+#define FZ_MAX_DEPTH 500
+static Val fz_stack[FZ_STACK_VALS];
+static int fz_sp, fz_depth;
+
+#ifdef FZ_HOST_TEST
+extern void *__libc_stack_end;       /* host test build: the real stack top */
+#define FZ_STACK_TOP ((char*)__libc_stack_end)
+#else
+extern char stack_top[];             /* top of the kernel stack (boot.asm) */
+#define FZ_STACK_TOP stack_top
+#endif
+
+/* Collects garbage. Roots: live call frames, the globals, and the C stack
+   (which holds temporaries). The marker and the spilled registers sit in
+   this frame, so scanning from it covers everything the caller holds. */
+void fz_gc_collect(void){
+    volatile char marker = 0;
+    __builtin_unwind_init();
+    fz_gc_begin();
+    fz_gc_mark_range(fz_stack, &fz_stack[fz_sp]);
+    fz_gc_mark_range(fz_glob, fz_glob + fz_nglobals);
+    fz_gc_mark_range((const void*)&marker, FZ_STACK_TOP);
+    fz_gc_drain();
+    fz_gc_sweep();
+}
+
+void fz_eval_reset(void){ fz_sp = 0; fz_depth = 0; }
+
 /* Calls a user function. Arguments are evaluated in the caller's frame and
    stored in the first slots of the new frame (parameters come first). */
 static Val call_user(Node *call, Node *fn, Val *loc){
     int nl = fn->nlocals > 0 ? fn->nlocals : 1;
-    Val *frame = kcalloc((size_t)nl, sizeof(Val));
-    if(!frame) fz_die("out of memory");
+    if(fz_depth >= FZ_MAX_DEPTH) fz_die("recursion too deep (more than %d calls)", FZ_MAX_DEPTH);
+    if(fz_sp + nl > FZ_STACK_VALS) fz_die("out of value stack");
+    Val *frame = &fz_stack[fz_sp];
+    fz_sp += nl;
+    fz_depth++;
+    for(int j = 0; j < nl; j++) frame[j] = fz_num(0);
     for(int i = 0; i < call->nkids; i++)
         frame[i] = fz_eval_node(call->kids[i], loc);
     int c = exec(fn->l, frame);
-    kfree(frame);
+    fz_sp -= nl;
+    fz_depth--;
     if(c == X_RET) return fz_retval;
     return fz_num(0);
 }
+
+static Val fz_eval_node(Node *n, Val *loc);
+
+/* Leaves (numbers and variables) are read inline, saving a call per node. */
+#define EVAL(n, loc) (((n)->t == N_NUM) ? fz_num((n)->num) : \
+                      ((n)->t == N_IDENT) ? var_get((n), (loc)) : fz_eval_node((n), (loc)))
 
 static Val fz_eval_node(Node *n, Val *loc){
     if(!n) return fz_num(0);
@@ -241,13 +277,30 @@ static Val fz_eval_node(Node *n, Val *loc){
                 Val b = fz_eval_node(n->r, loc);
                 return fz_bool(fz_truthy(b));
             }
-            Val a = fz_eval_node(n->l, loc);
-            Val b = fz_eval_node(n->r, loc);
+            Val a = EVAL(n->l, loc);
+            Val b = EVAL(n->r, loc);
+            if(a.t == V_NUM && b.t == V_NUM){
+                /* fast path: plain numbers */
+                switch(n->op){
+                    case OP_ADD: return fz_num(a.n + b.n);
+                    case OP_SUB: return fz_num(a.n - b.n);
+                    case OP_MUL: return fz_num(a.n * b.n);
+                    case OP_LT: return fz_bool(a.n < b.n);
+                    case OP_LE: return fz_bool(a.n <= b.n);
+                    case OP_GT: return fz_bool(a.n > b.n);
+                    case OP_GE: return fz_bool(a.n >= b.n);
+                    case OP_EQ: return fz_bool(a.n == b.n);
+                    case OP_NE: return fz_bool(a.n != b.n);
+                    case OP_DIV: if(b.n != 0) return fz_num(a.n / b.n); break;
+                    case OP_MOD: if(b.n != 0) return fz_num(kfmod(a.n, b.n)); break;
+                    default: break;
+                }
+            }
             return binop(n->op, a, b);
         }
         case N_UN: {
             Val a = fz_eval_node(n->l, loc);
-            if(n->op == OP_NEG) return fz_num(-a.n);
+            if(n->op == OP_NEG) return fz_num(-fz_numval(a));
             return fz_bool(!fz_truthy(a));
         }
         case N_ARRAYLIT: {
@@ -256,8 +309,7 @@ static Val fz_eval_node(Node *n, Val *loc){
                 Val v = fz_eval_node(n->kids[i], loc);
                 fz_arr_push(a, v);
             }
-            Val out; out.t = V_ARR; out.n = 0; out.s = 0; out.a = a; out.o = 0;
-            return out;
+            return fz_arrv(a);
         }
         case N_INDEX: {
             Val o = fz_eval_node(n->l, loc);
@@ -270,19 +322,16 @@ static Val fz_eval_node(Node *n, Val *loc){
         }
         case N_STRUCTLIT: {
             StructDef *sd = &fz_structs[n->structidx];
-            Obj *o = kcalloc(1, sizeof(Obj));
-            if(!o) fz_die("out of memory");
+            Obj *o = fz_alloc(sizeof(Obj));
             o->type = sd->name;
             o->keys = sd->keys;
             o->n = sd->n;
-            o->vals = kcalloc((size_t)(sd->n ? sd->n : 1), sizeof(Val));
-            if(!o->vals) fz_die("out of memory");
+            o->vals = fz_alloc(sizeof(Val) * (size_t)(sd->n ? sd->n : 1));
             for(int i = 0; i < n->nkids; i++){
                 Val v = fz_eval_node(n->kids[i], loc);
                 o->vals[i] = v;
             }
-            Val out; out.t = V_STRUCT; out.n = 0; out.s = 0; out.a = 0; out.o = o;
-            return out;
+            return fz_objv(o);
         }
         case N_CALL: {
             if(n->builtin){
@@ -319,14 +368,14 @@ static int exec(Node *n, Val *loc){
             if(n->l) (void)fz_eval_node(n->l, loc);
             return X_NORMAL;
         case N_ASSIGN: {
-            Val v = fz_eval_node(n->l, loc);
+            Val v = EVAL(n->l, loc);
             var_set(n, loc, v);
             return X_NORMAL;
         }
         case N_SETINDEX: {
             Val o = fz_eval_node(n->l, loc);
             Val i = fz_eval_node(n->r, loc);
-            Val v = fz_eval_node(n->els, loc);
+            Val v = EVAL(n->els, loc);
             index_set(o, i, v);
             return X_NORMAL;
         }
@@ -340,14 +389,14 @@ static int exec(Node *n, Val *loc){
             print_line(n, loc);
             return X_NORMAL;
         case N_IF: {
-            Val c = fz_eval_node(n->l, loc);
+            Val c = EVAL(n->l, loc);
             if(fz_truthy(c)) return exec(n->r, loc);
             if(n->els) return exec(n->els, loc);
             return X_NORMAL;
         }
         case N_WHILE:
             while(1){
-                Val c = fz_eval_node(n->l, loc);
+                Val c = EVAL(n->l, loc);
                 if(!fz_truthy(c)) break;
                 int r = exec(n->r, loc);
                 if(r == X_BREAK) break;

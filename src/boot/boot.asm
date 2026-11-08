@@ -42,8 +42,9 @@ multiboot_header_end:
 # Stack
 .section .bss
 .align 16
+    .global stack_top
 stack_bottom:
-    .skip 1048576    # 1 MB: the Fuss interpreter recurses deeply
+    .skip 4194304    # 4 MB: the Fuss interpreter recurses deeply
 stack_top:
 
 # Page tables (identity + higher half)
@@ -102,7 +103,7 @@ _start:
     testl $(1<<29), %edx
     jz no_longmode
 
-    # Set up paging: identity map first 2MB (and higher half optional)
+    # Set up paging: identity map the first 256MB (2MB huge pages)
     # PML4[0] -> PDPT
     movl $pdpt, %eax
     orl $0x3, %eax
@@ -114,7 +115,7 @@ _start:
     orl $0x3, %eax
     movl %eax, pdpt
 
-    # PD: 2MB huge pages identity map first 64MB
+    # PD: 2MB huge pages identity map first 256MB
     movl $pd, %edi
     movl $0, %ecx
 2:
@@ -125,7 +126,7 @@ _start:
     movl $0, 4(%edi)
     addl $8, %edi
     incl %ecx
-    cmpl $32, %ecx
+    cmpl $128, %ecx
     jl 2b
 
     # Enable PAE

@@ -69,6 +69,28 @@ static int struct_find(const char *name){
     return -1;
 }
 
+/* Upper-cases a path made of 8.3 components separated by '/'. */
+int fz_canon_path(const char *in, char *out, int cap){
+    int n = 0;
+    const char *p = in;
+    if(!*in) return 0;
+    for(;;){
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        if(len == 0 || len > 12 || (size_t)n + len + 2 > (size_t)cap) return 0;
+        for(size_t i = 0; i < len; i++){
+            char c = p[i];
+            if(c >= 'a' && c <= 'z') c = (char)(c - 32);
+            out[n++] = c;
+        }
+        if(!slash) break;
+        out[n++] = '/';
+        p = slash + 1;
+    }
+    out[n] = 0;
+    return 1;
+}
+
 int fz_canon_name(const char *in, char *out, int cap){
     if(strchr(in, '/')) return 0;
     int n = (int)strlen(in);
@@ -133,40 +155,46 @@ static Tok *lex(const char *s, const char *file, int *outn){
         } else if(isdig(c) || (c == '.' && isdig(s[i + 1]))){
             const char *end;
             double v;
-            if(!kstrtod(s + i, &v, &end)) { fz_at(file, line); fz_die("bad number"); }
+            if(!kstrtod(s + i, &v, &end)){ fz_report(file, line, "bad number"); v = 0; end = s + i + 1; }
             i = (int)(end - s);
             t.t = K_NUM; t.n = v;
         } else if(c == '"'){
             int startline = line;
             i++;
-            Sb b = { NULL, 0, 0 };
+            /* literals live in the kernel heap (the AST points at them), not in
+               the collected arena, so they use their own buffer */
+            int blen = 0, bcap = 16;
+            char *bbuf = kmalloc((size_t)bcap);
+            if(!bbuf) fz_die("out of memory");
             for(;;){
                 char ch = s[i];
-                if(!ch || ch == '\n'){ fz_at(file, startline); fz_die("unterminated string literal"); }
+                if(!ch || ch == '\n'){ fz_report(file, startline, "unterminated string literal"); break; }
                 i++;
                 if(ch == '"') break;
                 if(ch == '\\'){
                     char e = s[i];
-                    if(!e || e == '\n'){ fz_at(file, line); fz_die("unterminated string literal"); }
+                    if(!e || e == '\n'){ fz_report(file, line, "unterminated string literal"); break; }
                     i++;
                     if(e == 'n') ch = '\n';
                     else if(e == 't') ch = '\t';
                     else if(e == '"') ch = '"';
                     else if(e == '\\') ch = '\\';
-                    else { fz_at(file, line); fz_die("unknown escape sequence '\\%c' (try \\n \\t \\\" \\\\)", e); }
+                    else { fz_report(file, line, "unknown escape sequence '\\%c' (try \\n \\t \\\" \\\\)", e); ch = e; }
                 }
-                fz_sb_addc(&b, ch);
+                if(blen + 2 > bcap){ bcap *= 2; bbuf = krealloc(bbuf, (size_t)bcap); if(!bbuf) fz_die("out of memory"); }
+                bbuf[blen++] = ch;
             }
+            bbuf[blen] = 0;
             t.t = K_STR;
-            t.s = fz_sb_done(&b);
+            t.s = bbuf;
         } else {
             i++;
             switch(c){
                 case '=': if(s[i] == '='){ i++; t.t = K_EQ; } else t.t = K_ASSIGN; break;
                 case '!':
                     if(s[i] == '='){ i++; t.t = K_NE; break; }
-                    fz_at(file, line);
-                    fz_die("unexpected '!' (use 'not' for logical negation)");
+                    fz_report(file, line, "unexpected '!' (use 'not' for logical negation)");
+                    continue;   /* skip the character and keep lexing */
                 case '<': if(s[i] == '='){ i++; t.t = K_LE; } else t.t = K_LT; break;
                 case '>': if(s[i] == '='){ i++; t.t = K_GE; } else t.t = K_GT; break;
                 case '+': t.t = K_PLUS; break;
@@ -183,8 +211,8 @@ static Tok *lex(const char *s, const char *file, int *outn){
                 case ',': t.t = K_COMMA; break;
                 case '.': t.t = K_DOT; break;
                 default:
-                    fz_at(file, line);
-                    fz_die("unexpected character '%c' (0x%x)", c, (unsigned)(unsigned char)c);
+                    fz_report(file, line, "unexpected character '%c' (0x%x)", c, (unsigned)(unsigned char)c);
+                    continue;
             }
         }
         out = grow(out, &cap, n, sizeof(Tok));
@@ -195,8 +223,10 @@ static Tok *lex(const char *s, const char *file, int *outn){
 }
 
 /* ---------- parser ---------- */
-typedef struct { Tok *toks; int n, pos; const char *file; } Parser;
+typedef struct { Tok *toks; int n, pos; const char *file; int depth; } Parser;
 static Parser *P;
+static void **cur_rec;      /* recovery point of the innermost top-level loop */
+static int errdepth;        /* open blocks when the last syntax error happened */
 
 static Tok *cur(void){ return &P->toks[P->pos]; }
 static TK peek(void){ return P->toks[P->pos].t; }
@@ -205,9 +235,14 @@ static void adv(void){ if(P->pos < P->n - 1) P->pos++; }
 static int accept(TK t){ if(peek() == t){ adv(); return 1; } return 0; }
 static void skipnl(void){ while(peek() == K_NL) adv(); }
 
+/* Records a syntax error and jumps back to the top-level loop, which skips
+   to the end of the broken statement and keeps parsing. */
+static void perr(const char *msg) __attribute__((noreturn));
 static void perr(const char *msg){
-    fz_at(P->file, cur()->line);
-    fz_die("%s", msg);
+    errdepth = P->depth;
+    fz_report(P->file, cur()->line, "%s", msg);
+    if(cur_rec) __builtin_longjmp(cur_rec, 1);
+    fz_finish(1);
 }
 
 static void expect(TK t, const char *msg){
@@ -380,6 +415,7 @@ static Node *parse_expr(void){ return parse_or(); }
 static Node *parse_block(void){
     expect(K_LB, "'{'");
     Node *block = mk(N_BLOCK, cur()->line);
+    P->depth++;
     skipnl();
     while(peek() != K_RB && peek() != K_EOF){
         Node *s = parse_statement();
@@ -388,6 +424,7 @@ static Node *parse_block(void){
     }
     if(peek() != K_RB) perr("expected '}' to close block");
     adv();
+    P->depth--;
     return block;
 }
 
@@ -488,8 +525,8 @@ static Node *parse_statement(void){
             }
             if(peek() != K_RB) perr("expected '}' to close struct");
             adv();
-            if(struct_find(sname) >= 0){ fz_at(P->file, line); fz_die("struct '%s' is already defined", sname); }
-            if(fz_nstructs == FZ_MAX_STRUCTS){ fz_at(P->file, line); fz_die("too many structs (max %d)", FZ_MAX_STRUCTS); }
+            if(struct_find(sname) >= 0){ fz_report(P->file, line, "struct '%s' is already defined", sname); return NULL; }
+            if(fz_nstructs == FZ_MAX_STRUCTS){ fz_report(P->file, line, "too many structs (max %d)", FZ_MAX_STRUCTS); return NULL; }
             StructDef *sd = &fz_structs[fz_nstructs++];
             sd->name = sname;
             sd->n = nf;
@@ -575,9 +612,30 @@ static Node *parse_statement(void){
 /* Parses a whole source file into the program, expanding imports in place. */
 static void parse_source(const char *name, const char *text);
 
-static void parse_toplevel(Parser *p){
-    Parser *saved = P;
-    P = p;
+/* After a syntax error: skip to the end of the broken statement. Tokens are
+   skipped while tracking braces, so a bad function body is skipped whole. */
+static void recover(void){
+    int open = 0, ed = errdepth;
+    for(;;){
+        TK t = peek();
+        if(t == K_EOF) break;
+        if(t == K_LB) open++;
+        else if(t == K_RB){
+            if(open > 0) open--;
+            else if(ed > 0) ed--;
+        } else if(t == K_NL && open == 0 && ed == 0) break;
+        adv();
+    }
+    P->depth = 0;
+}
+
+static void toplevel_loop(void){
+    void *jb[5];
+    void **prev = cur_rec;
+    cur_rec = jb;
+    if(__builtin_setjmp(jb)){
+        recover();
+    }
     for(;;){
         skipnl();
         if(peek() == K_EOF) break;
@@ -587,10 +645,15 @@ static void parse_toplevel(Parser *p){
             if(peek() != K_STR) perr("expected a file name in quotes after import");
             const char *fname = cur()->s;
             adv();
-            char canon[16];
-            if(!fz_canon_name(fname, canon, sizeof canon)){
-                fz_at(P->file, line);
-                fz_die("cannot import '%s' (am-droid reads only FAT32 root files with 8.3 names)", fname);
+            /* relative to the importing file's directory, like the host compiler */
+            char full[80], canon[80];
+            const char *sl = strrchr(P->file, '/');
+            size_t dl = sl ? (size_t)(sl - P->file) + 1 : 0;
+            int fits = dl + strlen(fname) + 1 <= sizeof full;
+            if(fits){ memcpy(full, P->file, dl); strcpy(full + dl, fname); }
+            if(!fits || !fz_canon_path(full, canon, sizeof canon)){
+                fz_report(P->file, line, "cannot import '%s' (use 8.3 names separated by '/')", fname);
+                continue;
             }
             int seen = 0;
             for(int i = 0; i < nvisited; i++) if(!strcmp(visited[i], canon)) seen = 1;
@@ -599,16 +662,22 @@ static void parse_toplevel(Parser *p){
             visited[nvisited++] = strdup(canon);
             char *text; u32 len;
             if(fz_read_fat(canon, &text, &len) != 0){
-                fz_at(P->file, line);
-                fz_die("cannot open imported file '%s'", fname);
+                fz_report(P->file, line, "cannot open imported file '%s'", fname);
+                continue;
             }
             parse_source(canon, text);
-            P = p;
             continue;
         }
         Node *s = parse_statement();
         if(s) add_kid(fz_program, s);
     }
+    cur_rec = prev;
+}
+
+static void parse_toplevel(Parser *p){
+    Parser *saved = P;
+    P = p;
+    toplevel_loop();
     P = saved;
 }
 
@@ -618,20 +687,23 @@ static void parse_source(const char *name, const char *text){
     fz_line = 1;
     int n;
     Tok *toks = lex(text, file, &n);
-    Parser p = { toks, n, 0, file };
+    Parser p = { toks, n, 0, file, 0 };
     parse_toplevel(&p);
 }
 
 void fz_compile_main(const char *name, const char *text){
-    char canon[16];
-    if(fz_canon_name(name, canon, sizeof canon)){
+    char canon[80];
+    if(fz_canon_path(name, canon, sizeof canon)){
         visited = grow(visited, &capvisited, nvisited, sizeof(char*));
         visited[nvisited++] = strdup(canon);
+        parse_source(canon, text);
+    } else {
+        parse_source(name, text);
     }
-    parse_source(name, text);
 }
 
 void fz_reset(void){
+    fz_eval_reset();
     ndeclared = 0; nvisited = 0; nfns = 0; ngnames = 0; fz_nstructs = 0; fz_nglobals = 0;
     fz_program = mk(N_BLOCK, 1);
     fz_program->file = "";
@@ -710,14 +782,13 @@ static void resolve(Node *n, Node *fn, int loopd){
             resolve(n->r, fn, loopd + 1);
             return;
         case N_BREAK:
-            if(loopd == 0){ fz_at(n->file, n->line); fz_die("'break' outside of a loop"); }
+            if(loopd == 0){ fz_report(n->file, n->line, "'break' outside of a loop"); }
             return;
         case N_CONTINUE:
-            if(loopd == 0){ fz_at(n->file, n->line); fz_die("'continue' outside of a loop"); }
+            if(loopd == 0){ fz_report(n->file, n->line, "'continue' outside of a loop"); }
             return;
         case N_FN:
-            fz_at(n->file, n->line);
-            fz_die("functions must be defined at the top level");
+            fz_report(n->file, n->line, "functions must be defined at the top level");
             return;
         case N_STRUCTDEF:
             return;
@@ -726,33 +797,31 @@ static void resolve(Node *n, Node *fn, int loopd){
             if(f >= 0){
                 Node *target = fns[f];
                 if(n->nkids != target->nparams){
-                    fz_at(n->file, n->line);
-                    fz_die("function '%s' takes %d argument(s), got %d", n->sval, target->nparams, n->nkids);
+                    fz_report(n->file, n->line, "function '%s' takes %d argument(s), got %d", n->sval, target->nparams, n->nkids);
                 }
                 n->fn = target;
             } else {
                 int b = fz_builtin_find(n->sval);
                 if(b < 0){
-                    fz_at(n->file, n->line);
-                    fz_die("unknown function '%s' (not defined and not a builtin)", n->sval);
+                    fz_report(n->file, n->line, "unknown function '%s' (not defined and not a builtin)", n->sval);
+                    for(int i = 0; i < n->nkids; i++) resolve(n->kids[i], fn, loopd);
+                    return;
                 }
                 int want = fz_builtin_argc(b);
                 if(want >= 0 && n->nkids != want){
-                    fz_at(n->file, n->line);
-                    fz_die("builtin '%s' takes %d argument(s), got %d", n->sval, want, n->nkids);
+                    fz_report(n->file, n->line, "builtin '%s' takes %d argument(s), got %d", n->sval, want, n->nkids);
                 }
-                if(n->nkids > FZ_MAX_ARGS){ fz_at(n->file, n->line); fz_die("too many arguments to '%s'", n->sval); }
+                if(n->nkids > FZ_MAX_ARGS){ fz_report(n->file, n->line, "too many arguments to '%s'", n->sval); }
                 n->builtin = b + 1;
             }
             for(int i = 0; i < n->nkids; i++) resolve(n->kids[i], fn, loopd);
             return;
         }
         case N_STRUCTLIT: {
-            if(n->structidx < 0){ fz_at(n->file, n->line); fz_die("unknown struct '%s'", n->sval); }
+            if(n->structidx < 0){ fz_report(n->file, n->line, "unknown struct '%s'", n->sval); }
             StructDef *sd = &fz_structs[n->structidx];
             if(n->nkids != sd->n){
-                fz_at(n->file, n->line);
-                fz_die("struct '%s' takes %d field(s), got %d", sd->name, sd->n, n->nkids);
+                fz_report(n->file, n->line, "struct '%s' takes %d field(s), got %d", sd->name, sd->n, n->nkids);
             }
             for(int i = 0; i < n->nkids; i++) resolve(n->kids[i], fn, loopd);
             return;
@@ -771,7 +840,7 @@ void fz_resolve(void){
     for(int i = 0; i < fz_program->nkids; i++){
         Node *k = fz_program->kids[i];
         if(k->t != N_FN) continue;
-        if(fn_find(k->sval) >= 0){ fz_at(k->file, k->line); fz_die("function '%s' is already defined", k->sval); }
+        if(fn_find(k->sval) >= 0){ fz_report(k->file, k->line, "function '%s' is already defined", k->sval); continue; }
         fns = grow(fns, &capfns, nfns, sizeof(Node*));
         fns[nfns++] = k;
         for(int p = 0; p < k->nkids; p++) ladd_raw(k, k->kids[p]->sval);

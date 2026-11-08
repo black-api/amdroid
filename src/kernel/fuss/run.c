@@ -6,11 +6,13 @@
 #include "amdroid/console.h"
 #include "amdroid/fat32.h"
 #include "amdroid/fuss.h"
+#include "amdroid/auth.h"
 #include <stdarg.h>
 #include <string.h>
 
 const char *fz_file;
 int fz_line;
+int fz_error_count;
 
 static void *jb[5];
 static int run_status;
@@ -65,6 +67,17 @@ static void kvformat(char *out, int cap, const char *fmt, va_list ap){
     #undef PUT
 }
 
+void fz_report(const char *file, int line, const char *fmt, ...){
+    char msg[256];
+    va_list ap;
+    va_start(ap, fmt);
+    kvformat(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    if(file && line > 0) console_printf("fuss: %s:%d: %s\n", file, line, msg);
+    else console_printf("fuss: %s\n", msg);
+    fz_error_count++;
+}
+
 void fz_die(const char *fmt, ...){
     char msg[256];
     va_list ap;
@@ -78,16 +91,17 @@ void fz_die(const char *fmt, ...){
     fz_finish(1);
 }
 
-/* Reads a file from the FAT32 root. Returns 0 and a NUL-terminated buffer. */
+/* Reads a file (root or subdirectory path). Returns 0 and a NUL-terminated buffer. */
 int fz_read_fat(const char *name, char **text, u32 *len){
-    char canon[16];
-    if(!fz_canon_name(name, canon, sizeof canon)) return -1;
+    char canon[80];
+    if(!fz_canon_path(name, canon, sizeof canon)) return -1;
+    if(!auth_may(canon, 0)) return -1;   /* the caller may not read this file */
     u32 size = 0;
-    if(fat32_read_file(canon, NULL, 0, &size) != 0) return -1;   /* size query */
+    if(fat32_read_path(canon, NULL, 0, &size) != 0) return -1;   /* size query */
     char *buf = kmalloc(size + 1);
     if(!buf) fz_die("out of memory");
     u32 got = 0;
-    if(fat32_read_file(canon, buf, size, &got) != 0) return -1;
+    if(fat32_read_path(canon, buf, size, &got) != 0) return -1;
     buf[got] = 0;
     *text = buf;
     if(len) *len = got;
@@ -99,6 +113,7 @@ int fuss_run_file(const char *name){
     fz_reset();
     fz_file = NULL;
     fz_line = 0;
+    fz_error_count = 0;
     run_status = 0;
     if(__builtin_setjmp(jb)){
         return run_status;
@@ -110,6 +125,10 @@ int fuss_run_file(const char *name){
     }
     fz_compile_main(name, text);
     fz_resolve();
+    if(fz_error_count){
+        console_printf("fuss: %d error(s) found\n", fz_error_count);
+        return 1;
+    }
     fz_glob = kcalloc((size_t)(fz_nglobals ? fz_nglobals : 1), sizeof(Val));
     if(!fz_glob) fz_die("out of memory");
     fz_run_program();

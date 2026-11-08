@@ -10,11 +10,15 @@ enum { V_NUM, V_STR, V_BOOL, V_ARR, V_STRUCT };
 typedef struct Val Val;
 typedef struct Arr { Val *items; int len, cap; } Arr;
 typedef struct Obj { const char *type; const char **keys; Val *vals; int n; } Obj;
-struct Val { u8 t; double n; const char *s; Arr *a; Obj *o; };
+struct Val { u8 t; union { double n; const char *s; Arr *a; Obj *o; }; };  /* 16 bytes */
 
-static inline Val fz_num(double d){ Val v; v.t = V_NUM; v.n = d; v.s = 0; v.a = 0; v.o = 0; return v; }
-static inline Val fz_bool(int b){ Val v; v.t = V_BOOL; v.n = b ? 1 : 0; v.s = 0; v.a = 0; v.o = 0; return v; }
-static inline Val fz_strv(const char *s){ Val v; v.t = V_STR; v.n = 0; v.s = s; v.a = 0; v.o = 0; return v; }
+static inline Val fz_num(double d){ Val v; v.t = V_NUM; v.n = d; return v; }
+static inline Val fz_bool(int b){ Val v; v.t = V_BOOL; v.n = b ? 1 : 0; return v; }
+static inline Val fz_strv(const char *s){ Val v; v.t = V_STR; v.s = s; return v; }
+static inline Val fz_arrv(Arr *a){ Val v; v.t = V_ARR; v.a = a; return v; }
+static inline Val fz_objv(Obj *o){ Val v; v.t = V_STRUCT; v.o = o; return v; }
+/* numeric value for arithmetic: strings, arrays and structs count as 0 */
+static inline double fz_numval(Val v){ return (v.t == V_NUM || v.t == V_BOOL) ? v.n : 0.0; }
 
 /* ---------- AST ---------- */
 typedef enum {
@@ -71,12 +75,27 @@ extern int fz_line;
 void fz_at(const char *file, int line);
 void fz_die(const char *fmt, ...) __attribute__((noreturn)); /* report at fz_file:fz_line and stop */
 void fz_finish(int code) __attribute__((noreturn));
+void fz_report(const char *file, int line, const char *fmt, ...); /* records a compile error and continues */
+extern int fz_error_count;
 
 /* ---------- front end (front.c) ---------- */
 void fz_reset(void);
+void fz_eval_reset(void);
 void fz_compile_main(const char *name, const char *text);
 void fz_resolve(void);
 int  fz_canon_name(const char *in, char *out, int cap);  /* 8.3 upper-case, or 0 */
+int  fz_canon_path(const char *in, char *out, int cap);  /* "DIR/NAME.EXT" upper-case, or 0 */
+
+/* ---------- runtime memory (gc.c) ---------- */
+void *fz_alloc(size_t n);                    /* zeroed; may collect garbage */
+void *fz_realloc_copy(void *old, size_t oldn, size_t newn);
+char *fz_strdup(const char *s);
+char *fz_strndup(const char *s, size_t n);
+void fz_gc_collect(void);                    /* eval.c: scans the roots */
+void fz_gc_begin(void);
+void fz_gc_mark_range(const void *lo, const void *hi);
+void fz_gc_drain(void);
+void fz_gc_sweep(void);
 
 /* ---------- files (run.c) ---------- */
 int fz_read_fat(const char *name, char **text, u32 *len);

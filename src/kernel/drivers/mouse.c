@@ -82,6 +82,14 @@ void mouse_feed(u8 raw){
     }
 }
 
+/* Motion from another mouse (USB): dx right-positive, dy down-positive. */
+void mouse_inject(int dx, int dy, int btns){
+    acc_x += dx;
+    acc_y += dy;
+    acc_btns = btns;
+    acc_got = 1;
+}
+
 /* Drain every pending mouse packet in one call, so the cursor does not lag
    one packet per frame. Only bytes flagged as aux (status bit 5) are read;
    keyboard bytes are left in the buffer for the keyboard driver. */

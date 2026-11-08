@@ -9,6 +9,8 @@
 #include "amdroid/fb.h"
 #include "amdroid/timer.h"
 #include "amdroid/kmath.h"
+#include "amdroid/sched.h"
+#include "amdroid/auth.h"
 #include <string.h>
 
 typedef Val (*bfn_t)(Val *a, int n);
@@ -24,11 +26,6 @@ static u64 rng_next(void){
     if(!rng_seeded){ rng_state = timer_ticks() * 2654435761ULL + 1; rng_seeded = 1; }
     rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
     return rng_state >> 33;   /* 31 bits */
-}
-
-static Val readonly(const char *what){
-    fz_die("%s: am-droid's disk is read-only (writing files is not supported yet)", what);
-    return fz_num(0);
 }
 
 static void need_str(Val v, const char *what){
@@ -111,14 +108,14 @@ BI(randbelow){
 BI(upper){
     UNUSED_ARGS;
     need_str(a[0], "upper()");
-    char *r = strdup(a[0].s);
+    char *r = fz_strdup(a[0].s);
     for(char *p = r; *p; p++) if(*p >= 'a' && *p <= 'z') *p = (char)(*p - 32);
     return fz_strv(r);
 }
 BI(lower){
     UNUSED_ARGS;
     need_str(a[0], "lower()");
-    char *r = strdup(a[0].s);
+    char *r = fz_strdup(a[0].s);
     for(char *p = r; *p; p++) if(*p >= 'A' && *p <= 'Z') *p = (char)(*p + 32);
     return fz_strv(r);
 }
@@ -138,7 +135,7 @@ BI(substr){
     int count = n == 3 ? (int)fz_numof(a[2]) : len - start;
     if(count < 0) count = 0;
     if(count > len - start) count = len - start;
-    return fz_strv(strndup(a[0].s + start, (size_t)count));
+    return fz_strv(fz_strndup(a[0].s + start, (size_t)count));
 }
 BI(split){
     UNUSED_ARGS;
@@ -149,12 +146,11 @@ BI(split){
     Arr *out = fz_arr_new();
     const char *p = a[0].s, *q;
     while((q = strstr(p, a[1].s)) != NULL){
-        fz_arr_push(out, fz_strv(strndup(p, (size_t)(q - p))));
+        fz_arr_push(out, fz_strv(fz_strndup(p, (size_t)(q - p))));
         p = q + dl;
     }
-    fz_arr_push(out, fz_strv(strdup(p)));
-    Val v; v.t = V_ARR; v.n = 0; v.s = 0; v.a = out; v.o = 0;
-    return v;
+    fz_arr_push(out, fz_strv(fz_strdup(p)));
+    return fz_arrv(out);
 }
 BI(join){
     UNUSED_ARGS;
@@ -179,8 +175,7 @@ BI(range){
     double lo = kfloor(fz_numof(a[0])), hi = kfloor(fz_numof(a[1]));
     Arr *out = fz_arr_new();
     for(double i = lo; i < hi; i += 1) fz_arr_push(out, fz_num(i));
-    Val v; v.t = V_ARR; v.n = 0; v.s = 0; v.a = out; v.o = 0;
-    return v;
+    return fz_arrv(out);
 }
 
 /* ----- input, time, environment ----- */
@@ -188,7 +183,7 @@ static int getkey(void){
     for(;;){
         if(serial_has_input()) return serial_getc();
         if(keyboard_has_input()) return keyboard_getchar();
-        __asm__ volatile("hlt");
+        proc_yield();
     }
 }
 BI(input){
@@ -216,40 +211,100 @@ BI(read_file){
     need_str(a[0], "read_file()");
     char *text; u32 len;
     if(fz_read_fat(a[0].s, &text, &len) != 0) fz_die("cannot read file '%s'", a[0].s);
-    return fz_strv(text);
+    char *copy = fz_strdup(text);
+    kfree(text);
+    return fz_strv(copy);
 }
 
-static int exists_found;
-static char exists_want[16];
-static void exists_cb(const char *name, int is_dir, u32 size){
-    (void)is_dir; (void)size;
-    if(!strcmp(name, exists_want)) exists_found = 1;
-}
 BI(file_exists){
     UNUSED_ARGS;
     need_str(a[0], "file_exists()");
-    if(!fz_canon_name(a[0].s, exists_want, sizeof exists_want)) return fz_bool(0);
-    exists_found = 0;
-    fat32_list_root(exists_cb);
-    return fz_bool(exists_found);
+    char canon[80];
+    if(!fz_canon_path(a[0].s, canon, sizeof canon)) return fz_bool(0);
+    u32 size = 0;
+    return fz_bool(fat32_read_path(canon, NULL, 0, &size) == 0);
 }
 
 static Arr *files_acc;
 static void files_cb(const char *name, int is_dir, u32 size){
     (void)size;
-    if(!is_dir) fz_arr_push(files_acc, fz_strv(strdup(name)));
+    if(!is_dir) fz_arr_push(files_acc, fz_strv(fz_strdup(name)));
 }
 BI(files){
     UNUSED_ARGS;
-    files_acc = fz_arr_new();
+    Arr *acc = fz_arr_new();      /* kept on the C stack: it is a GC root while listing */
+    files_acc = acc;
     fat32_list_root(files_cb);
-    Val v; v.t = V_ARR; v.n = 0; v.s = 0; v.a = files_acc; v.o = 0;
-    return v;
+    return fz_arrv(acc);
 }
-BI(write_file){ UNUSED_ARGS; return readonly("write_file"); }
-BI(delete_file){ UNUSED_ARGS; return readonly("delete_file"); }
-BI(mkdir_p){ UNUSED_ARGS; return readonly("mkdir_p"); }
-BI(write_ppm){ UNUSED_ARGS; return readonly("write_ppm"); }
+BI(write_file){
+    UNUSED_ARGS;
+    need_str(a[0], "write_file()");
+    char canon[16];
+    if(!fz_canon_path(a[0].s, canon, sizeof canon))
+        fz_die("write_file: '%s' must be a valid path of 8.3 names ", a[0].s);
+    if(!auth_may(canon, 1)) fz_die("write_file: permission denied for '%s'", canon);
+    char *text = fz_tostr(a[1]);
+    if(fat32_write_path(canon, text, (u32)strlen(text)) != 0)
+        fz_die("write_file: cannot write '%s' (disk full or write error)", a[0].s);
+    auth_claim(canon);
+    return fz_bool(1);
+}
+BI(delete_file){
+    UNUSED_ARGS;
+    need_str(a[0], "delete_file()");
+    char canon[16];
+    if(!fz_canon_path(a[0].s, canon, sizeof canon)) return fz_bool(0);
+    if(!auth_may(canon, 1)) return fz_bool(0);
+    return fz_bool(fat32_delete_path(canon) == 0);
+}
+BI(mkdir_p){
+    UNUSED_ARGS;
+    fz_die("mkdir_p: subdirectories are not supported (only the disk root)");
+    return fz_num(0);
+}
+BI(write_ppm){
+    UNUSED_ARGS;
+    need_str(a[0], "write_ppm()");
+    char canon[16];
+    if(!fz_canon_path(a[0].s, canon, sizeof canon))
+        fz_die("write_ppm: name '%s' must be a valid path of 8.3 names", a[0].s);
+    if(a[3].t != V_ARR) fz_die("write_ppm expects an array of 0xRRGGBB ints");
+    int W = (int)fz_numof(a[1]), H = (int)fz_numof(a[2]);
+    if(W < 0 || H < 0) fz_die("write_ppm: negative dimensions");
+    if(a[3].a->len < W * H) fz_die("write_ppm: pixels array too small");
+    char header[32];
+    int hl = 0;
+    {
+        Sb hb = { NULL, 0, 0 };
+        fz_sb_adds(&hb, "P6\n");
+        char num[12];
+        int k = 0; unsigned v = (unsigned)W;
+        do { num[k++] = (char)('0' + v % 10); v /= 10; } while(v);
+        while(k) fz_sb_addc(&hb, num[--k]);
+        fz_sb_addc(&hb, ' ');
+        k = 0; v = (unsigned)H;
+        do { num[k++] = (char)('0' + v % 10); v /= 10; } while(v);
+        while(k) fz_sb_addc(&hb, num[--k]);
+        fz_sb_adds(&hb, "\n255\n");
+        hl = hb.len;
+        if(hl > (int)sizeof header) fz_die("write_ppm: header too long");
+        memcpy(header, hb.b, (size_t)hl);
+    }
+    u32 total = (u32)hl + (u32)W * (u32)H * 3;
+    u8 *img = fz_alloc(total);
+    memcpy(img, header, (size_t)hl);
+    for(int i = 0; i < W * H; i++){
+        u32 c = (u32)(long long)fz_numof(a[3].a->items[i]);
+        u8 *px = img + hl + i * 3;
+        px[0] = (u8)(c >> 16); px[1] = (u8)(c >> 8); px[2] = (u8)c;
+    }
+    if(!auth_may(canon, 1)) fz_die("write_ppm: permission denied for '%s'", canon);
+    int rc = fat32_write_path(canon, img, total);
+    if(rc != 0) fz_die("write_ppm: cannot write '%s' (disk full or write error)", a[0].s);
+    auth_claim(canon);
+    return fz_bool(1);
+}
 
 /* ----- framebuffer ----- */
 static void need_fb(void){
