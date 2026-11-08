@@ -1,4 +1,5 @@
 #include "amdroid/keyboard.h"
+#include "amdroid/mouse.h"
 #include "amdroid/types.h"
 
 #define KBD_DATA 0x60
@@ -24,6 +25,14 @@ volatile int requested_vt = -1;
 void keyboard_init(void){ ctrl=0; alt=0; e0=0; requested_vt=-1; }
 
 void keyboard_irq(void){
+    /* Status bit 5 marks a byte from the aux (mouse) port. It must not be
+       treated as a scancode, so hand it to the mouse parser instead. */
+    u8 st = inb(KBD_STATUS);
+    if(!(st & 1)) return;          /* output buffer empty: nothing to read */
+    if(st & 0x20){
+        mouse_feed(inb(KBD_DATA));
+        return;
+    }
     u8 sc = inb(KBD_DATA);
     if(sc == 0xE0){ e0=1; return; }
     int release = sc & 0x80;
@@ -63,8 +72,19 @@ int keyboard_getchar(void){
     return c;
 }
 
+/* Consumes the pending VT switch request (1..9), or returns -1 if none. */
 int keyboard_get_requested_vt(void){
     int v = requested_vt;
     requested_vt = -1;
     return v;
+}
+
+/* Returns the pending VT switch request without consuming it. */
+int keyboard_peek_requested_vt(void){
+    return requested_vt;
+}
+
+/* Queues a VT switch request, e.g. when a GUI launched from the shell exits. */
+void keyboard_request_vt(int vt){
+    requested_vt = vt;
 }

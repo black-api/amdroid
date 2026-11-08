@@ -3,4 +3,6 @@
 #include "amdroid/types.h"
 void mouse_init(void);
 int  mouse_poll(int *dx, int *dy, int *btns); /* returns 1 if new data */
+void mouse_feed(u8 raw);  /* one aux-port byte (used by the keyboard IRQ) */
+void mouse_disable(void); /* stop packet streaming when the GUI exits */
 #endif

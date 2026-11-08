@@ -68,6 +68,7 @@ int fat32_list_root(void (*cb)(const char*,int,u32)){
             }
             if(e[0]==0xE5) continue; /* deleted */
             if(e[11]==0x0F) continue; /* LFN */
+            if(e[11]&0x08) continue;  /* volume label */
             /* name */
             char name[13];
             int ni=0;

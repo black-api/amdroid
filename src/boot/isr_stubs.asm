@@ -33,8 +33,17 @@ isr_common:
     pushq %r13
     pushq %r14
     pushq %r15
-    movq %rsp, %rdi   # pointer to frame
+    # Save the SSE/x87 state: the interrupted code may be in the middle of
+    # floating-point work, and C handlers may use xmm registers.
+    movq %rsp, %rbx          # rbx = GPR frame (callee-saved; restored by popq)
+    subq $528, %rsp
+    andq $-16, %rsp
+    movq %rsp, %r12          # r12 = fxsave area (callee-saved across the call)
+    fxsave (%r12)
+    movq %rbx, %rdi          # pointer to frame
     call isr_handler
+    fxrstor (%r12)
+    movq %rbx, %rsp
     popq %r15
     popq %r14
     popq %r13

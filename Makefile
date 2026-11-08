@@ -33,7 +33,13 @@ C_SRCS = \
  src/kernel/fs/fat32.c \
  src/kernel/syscall.c \
  src/lib/console.c \
- src/lib/string.c
+ src/lib/string.c \
+ src/lib/klib.c \
+ src/lib/kmath.c \
+ src/kernel/fuss/front.c \
+ src/kernel/fuss/eval.c \
+ src/kernel/fuss/lib.c \
+ src/kernel/fuss/run.c
 
 ASM_SRCS = \
  src/boot/boot.asm \
@@ -45,6 +51,9 @@ all: $(ISO)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# The interpreter is hot code: build it optimised.
+src/kernel/fuss/%.o: CFLAGS += -O2
 
 %.o: %.asm
 	$(AS) $(ASFLAGS) $< -o $@

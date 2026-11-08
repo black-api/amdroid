@@ -12,14 +12,14 @@ multiboot_header:
     .long multiboot_header_end - multiboot_header
     .long -(MB2_MAGIC + MB2_ARCH + (multiboot_header_end - multiboot_header))
 
-    # Information request tag
+    # Information request tag: ask GRUB for the memory map (6) and the
+    # framebuffer info (8).
     .align 8
     .short 1   # type: info request
     .short 0   # flags
-    .long 20   # size
-    .long 1    # memory map
-    .long 6    # framebuffer
-    .long 0    # end
+    .long 16   # size
+    .long 6    # memory map
+    .long 8    # framebuffer info
 
     # Framebuffer request tag: ask GRUB for a 32bpp linear graphics mode.
     # Without this GRUB stays in VGA text mode (80x25, bpp 16) and the GUI
@@ -43,7 +43,7 @@ multiboot_header_end:
 .section .bss
 .align 16
 stack_bottom:
-    .skip 16384
+    .skip 1048576    # 1 MB: the Fuss interpreter recurses deeply
 stack_top:
 
 # Page tables (identity + higher half)
@@ -67,6 +67,15 @@ _start:
     cli
     movl %eax, mb_magic
     movl %ebx, mb_info
+
+    # Enable SSE so the kernel can do floating point (Fuss uses doubles).
+    movl %cr0, %eax
+    andl $0xFFFFFFFB, %eax   # clear EM (no x87/SSE emulation)
+    orl  $0x2, %eax          # set MP
+    movl %eax, %cr0
+    movl %cr4, %eax
+    orl  $0x600, %eax        # OSFXSR (bit 9) | OSXMMEXCPT (bit 10)
+    movl %eax, %cr4
 
     # Set up stack
     movl $stack_top, %esp

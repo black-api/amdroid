@@ -16,6 +16,8 @@
 #include "amdroid/gui.h"
 #include "amdroid/vmm.h"
 
+int shell_run(void); /* returns the VT the user switched to */
+
 /* multiboot2 tag parsing for framebuffer */
 static void *fb_addr = NULL;
 static u32 fb_pitch = 0, fb_w=0, fb_h=0, fb_bpp=0;
@@ -84,25 +86,19 @@ void kernel_main(u32 magic, u32 mbi){
     sched_init();
     console_puts("[sched] ready\n");
 
-    /* shell task */
-    /* run shell in main context */
     console_puts("\nType 'help' for commands.\n");
 
-    /* VT manager */
-    extern void shell_run(void);
-    extern void gui_run(void);
+    /* VT manager: each UI returns the VT the user asked for (1..9) */
     int current_vt = fb_ready() ? 1 : 2;
     for(;;){
         if(current_vt == 1 && fb_ready()){
-            console_puts("Launching GUI (press ctrl+alt (1 to 9 (1 is default)) to start new shell)...\n");
-            gui_run();
+            console_puts("Launching GUI (Ctrl+Alt+2 for the text shell)...\n");
+            current_vt = gui_run();
         } else {
-            console_printf("Shell on VT%d (Ctrl+Alt+1 for GUI)\\n", current_vt);
-            shell_run();
+            console_printf("Shell on VT%d (Ctrl+Alt+1 for GUI)\n", current_vt);
+            current_vt = shell_run();
         }
-        int rv = keyboard_get_requested_vt();
-        if(rv >= 1 && rv <= 9) current_vt = rv;
-        else current_vt = fb_ready() ? 1 : 2;
+        if(current_vt < 1 || current_vt > 9) current_vt = 2;
     }
 
     for(;;) __asm__ volatile("hlt");

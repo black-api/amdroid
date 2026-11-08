@@ -6,4 +6,6 @@ void keyboard_irq(void);
 int  keyboard_getchar(void); /* -1 if none, else ASCII */
 int  keyboard_has_input(void);
 int  keyboard_get_requested_vt(void);
+int  keyboard_peek_requested_vt(void);
+void keyboard_request_vt(int vt);
 #endif

@@ -14,6 +14,7 @@ emulators (QEMU) and real hardware (BIOS and UEFI via GRUB).
 - Cooperative task scheduler
 - System call interface (int 0x80)
 - Interactive shell
+- Built-in Fuss interpreter (`fuss <file.fas>`), with floating point
 
 ## Build
 
@@ -54,7 +55,27 @@ qemu-system-x86_64 -cdrom out/amdroid.iso -hda disk.img -boot d -m 256M -serial 
 
 ## Shell commands
 
-help, ls, cat, echo, pwd, free, uptime, clear, uname, reboot, diskls, diskcat
+help, ls, cat, echo, pwd, free, uptime, clear, uname, reboot, diskls, diskcat, fuss, gui
+
+## Fuss in the OS
+
+`fuss NAME.FAS` runs a Fuss program stored in the FAT32 root of the disk
+(8.3 names, e.g. `HELLO.FAS`). The interpreter is the same language as the
+host compiler in `~/py/fuss`, with these differences:
+
+- Tree-walking interpreter in the kernel, not a compiler; it is much slower
+  (a 20M-iteration loop takes about 75 s).
+- Numbers print with 15 significant digits, not shortest round-trip, so the
+  last digit can differ (e.g. `1/3` prints `0.333333333333333`).
+- Files are read-only: `write_file`, `delete_file`, `mkdir_p` and `write_ppm`
+  report an error. `import` reads from the FAT32 root only.
+- Extra builtins: `input()` (keyboard/serial), `ticks()`, `sleep_ms(ms)`,
+  `files()`, `file_exists(name)`, `read_file(name)`, and framebuffer
+  `fb_width() fb_height() fb_clear(c) fb_rect(x,y,w,h,c) fb_text(x,y,s,fg,bg) fb_present()`.
+- Runtime errors and `exit` are handled with `__builtin_setjmp`.
+
+Build a test disk with `mkfs.fat -F 32` and `mcopy`, then boot with
+`qemu-system-x86_64 -cdrom out/amdroid.iso -hda disk.img -boot d -m 256M`.
 
 ## Layout
 

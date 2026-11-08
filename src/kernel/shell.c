@@ -8,6 +8,7 @@
 #include "amdroid/timer.h"
 #include "amdroid/pmm.h"
 #include "amdroid/keyboard.h"
+#include "amdroid/fuss.h"
 #include <string.h>
 
 static char linebuf[256];
@@ -17,6 +18,8 @@ static void readline(void){
     linepos=0;
     memset(linebuf,0,sizeof(linebuf));
     for(;;){
+        /* a VT switch request (Ctrl+Alt+N) abandons the line */
+        if(keyboard_peek_requested_vt() != -1) return;
         int c = -1;
         if(serial_has_input()) c = serial_getc();
         else if(keyboard_has_input()) c = keyboard_getchar();
@@ -51,6 +54,7 @@ static void cmd_help(void){
     console_puts("  diskls      - list FAT32 root\n");
     console_puts("  diskcat <f> - read FAT32 file\n");
     console_puts("  gui         - launch graphical UI\n");
+    console_puts("  fuss <file> - run a Fuss program (.fas) from the disk\n");
 }
 
 static void cmd_ls(const char *arg){
@@ -91,12 +95,13 @@ static void cmd_cat(const char *arg){
     }
 }
 
-void shell_run(void){
+/* Runs the text shell until a VT switch is requested. Returns that VT (1..9). */
+int shell_run(void){
     for(;;){
-        int rv = keyboard_get_requested_vt();
-        if(rv != -1){ return; }
         console_puts("am-droid$ ");
         readline();
+        int rv = keyboard_get_requested_vt();
+        if(rv != -1) return rv;
         /* parse */
         char *cmd = linebuf;
         while(*cmd==' ') cmd++;
@@ -118,7 +123,14 @@ void shell_run(void){
         else if(strcmp(cmd,"uname")==0) console_puts("am-droid 1.0 x86_64\n");
         else if(strcmp(cmd,"diskls")==0) cmd_diskls();
         else if(strcmp(cmd,"diskcat")==0) cmd_diskcat(arg);
-        else if(strcmp(cmd,"gui")==0) gui_run();
+        else if(strcmp(cmd,"fuss")==0){
+            if(!arg || !*arg) console_puts("usage: fuss <file.fas>\n");
+            else fuss_run_file(arg);
+        }
+        else if(strcmp(cmd,"gui")==0){
+            int vt = gui_run();
+            if(vt != 2) keyboard_request_vt(vt);   /* hand the switch back to the VT loop */
+        }
         else if(strcmp(cmd,"reboot")==0){ /* triple fault / reboot via keyboard controller */
             __asm__ volatile("cli");
             /* pulse reset */
