@@ -6,6 +6,7 @@
 #include "amdroid/gdt.h"
 #include "amdroid/sched.h"
 #include "amdroid/syscall.h"
+#include "amdroid/vm.h"
 
 struct idt_entry {
     u16 offset_low;
@@ -102,6 +103,25 @@ u64 *isr_handler(u64 *frame){
                 console_printf("[proc %d] killed: %s at rip=%p addr=%p\n", proc_current(),
                                vec == 14 ? "page fault" : "general protection fault",
                                (void*)frame[17], (void*)cr2);
+                for(int k = 0; k < 22; k++) console_printf("  frame[%d] = %llx\n", k, (unsigned long long)frame[k]);
+                {
+                    u64 rip = frame[17];
+                    const u8 *pb = (const u8 *)(unsigned long)rip;
+                    console_printf("  rip bytes: %02x %02x %02x %02x %02x %02x\n", pb[0], pb[1], pb[2], pb[3], pb[4], pb[5]);
+                    u64 cr3 = vm_read_cr3();
+                    u64 va = rip & ~0xFFFULL;
+                    u64 *pml4 = (u64 *)(unsigned long)cr3;
+                    u64 *pdpt = (u64 *)(unsigned long)(pml4[(va >> 39) & 511] & ~0xFFFULL);
+                    u64 *pd = pdpt ? (u64 *)(unsigned long)(pdpt[(va >> 30) & 511] & ~0xFFFULL) : 0;
+                    u64 *pt = pd ? (u64 *)(unsigned long)(pd[(va >> 21) & 511] & ~0xFFFULL) : 0;
+                    u64 pte = pt ? pt[(va >> 12) & 511] : 0;
+                    console_printf("  walk: pml4 %llx pdpt %llx pd %llx pt %llx pte %llx\n",
+                                   (unsigned long long)(u64)pml4, (unsigned long long)(u64)pdpt,
+                                   (unsigned long long)(u64)pd, (unsigned long long)(u64)pt,
+                                   (unsigned long long)pte);
+                    console_printf("  cr3 %llx rip page phys %llx\n", (unsigned long long)cr3,
+                                   (unsigned long long)vm_lookup(cr3, va));
+                }
                 next = proc_exit(frame, -1);
                 break;
             }

@@ -11,6 +11,7 @@
 #include "amdroid/fuss.h"
 
 int userdemo_run(void);
+#include "amdroid/husser.h"
 #include "amdroid/elf.h"
 #include "amdroid/rtc.h"
 #include "amdroid/auth.h"
@@ -42,7 +43,7 @@ static int hist_idx = 0;       /* while browsing: index into hist, hist_n = the 
 
 static const char *cmd_names[] = {
     "help", "ls", "cat", "echo", "pwd", "free", "uptime", "clear", "uname", "reboot",
-    "diskls", "diskcat", "fuss", "gui", "userdemo", "run", "ps", "kill", "date", 0
+    "diskls", "diskcat", "fuss", "gui", "userdemo", "run", "ps", "kill", "date", "hussertest", 0
 };
 
 /* Redraws the input line after the cursor's old place. Backspace moves the
@@ -778,6 +779,25 @@ int shell_run(void){
         }
         else if(strcmp(cmd,"userdemo")==0){
             userdemo_run();
+        }
+        else if(strcmp(cmd,"hussertest")==0){
+            /* spawn the Husser renderer, hand it a trivial page, and report */
+            static const char test_html[] = "<h1>Husser smoke test</h1><p>The renderer is alive.</p>";
+            int pid = husser_open(640, 400);
+            if(pid < 0){ console_puts("hussertest: could not spawn husser\n"); continue; }
+            console_printf("hussertest: husser pid %d\n", pid);
+            husser_load(test_html, (u32)sizeof(test_html) - 1, 0);
+            for(int i = 0; i < 100; i++){
+                proc_sleep_ticks(5);
+                const volatile husser_shm_t *h = husser_header();
+                if(h && h->frame_seq > 0) break;
+            }
+            const volatile husser_shm_t *h = husser_header();
+            if(!h){ console_puts("hussertest: header gone\n"); continue; }
+            console_printf("hussertest: state=%u frame=%u page_h=%u nonzero_px=%u alive=%d\n",
+                           h->state, h->frame_seq, h->page_h, husser_vram_nonzero(), husser_alive());
+            husser_close();
+            console_puts("hussertest: done\n");
         }
         else if(strcmp(cmd,"fuss")==0){
             if(!arg || !*arg) console_puts("usage: fuss <file.fas>\n");

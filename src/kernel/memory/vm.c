@@ -109,7 +109,7 @@ void vm_free_space(u64 cr3){
                 if(!(pd[i] & PTE_P)) continue;
                 u64 *pt = (u64*)(unsigned long)(pd[i] & ~0xFFFULL);
                 for(int j = 0; j < 512; j++)
-                    if(pt[j] & PTE_P) pmm_free_page((void*)(unsigned long)(pt[j] & ~0xFFFULL));
+                    if((pt[j] & PTE_P) && !(pt[j] & PTE_KEEP)) pmm_free_page((void*)(unsigned long)(pt[j] & ~0xFFFULL));
                 pmm_free_page(pt);
             }
             pmm_free_page(pd);

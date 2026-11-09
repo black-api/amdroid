@@ -46,12 +46,10 @@ extern int win_drag_app, win_drag_dx, win_drag_dy;
 #define TB_MAX_ITEMS (UI_MAX_APPS + 4)
 typedef struct { int kind; int app; } item_t;
 int    tb_items(item_t *it);
-int    tb_pinned(int a);
-void   tb_set_pinned(int a, int on);
 rect_t tb_bar(int n, u32 sw, u32 sh);
 rect_t tb_item(rect_t bar, int i);
 int    tb_hit(rect_t bar, int n, int x, int y);
-void   tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open, u32 sw);
+void   tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open);
 rect_t tb_menu(rect_t bar, u32 sw);
 int    tb_menu_hit(rect_t m, int x, int y);   /* app index, UI_MAX_APPS for Terminal, -1 none */
 void   tb_menu_draw(rect_t bar, u32 sw, int dy, int mx, int my);   /* dy: slide offset; mx, my: the pointer */

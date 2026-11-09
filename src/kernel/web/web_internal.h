@@ -19,8 +19,9 @@ typedef struct wstyle {
     int max_w, max_pct, max_vw;   /* max-width, the same three ways (0 = none) */
     int auto_lr;              /* margin auto: 1 right, 2 left (both: centred) */
     int border_box;           /* box-sizing: border-box (width includes padding and border) */
-    int border;               /* border width in px (drawn on all four sides) */
+    int border;               /* border width in px, when the same on all four sides (kept for metrics) */
     u32 border_color;
+    int bt, br, bb, bl;       /* per-side border widths (0 = no border on that side) */
     int gap;                  /* flex: space between items */
     int no_bullet;            /* list-style: none (inherited) */
     int hide_text;            /* font-size: 0 or text-indent far to the left: the text is not shown (inherited) */
@@ -46,6 +47,7 @@ typedef struct wnode {
     int skip;                 /* <script> of a type that is not JavaScript (JSON, templates, modules) */
     int css_link;             /* <link>: 1 rel=stylesheet, 2 media=print */
     int hidden;               /* the hidden attribute */
+    int img;                  /* <img>: index into the image table + 1 (0 = none / not an <img>) */
     u64 sig;                  /* bits for its tag, id and classes (set while styling; see css.c) */
 } wnode_t;
 
@@ -67,6 +69,9 @@ extern int web_nlinks;
 void web_nodes_reset(void);
 void web_pool_range(void **p, u32 *n);
 wnode_t *web_new_node(void);
+/* Images: registered at parse time (index+1 stored in the node), decoded as they arrive. */
+int img_register(const char *url);
+void web_images_reset(void);
 /* Generic attribute store for names without a dedicated field. */
 void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen);
 const char *wnode_attr_get(wnode_t *n, const char *name);

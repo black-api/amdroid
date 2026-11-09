@@ -145,7 +145,7 @@ void fbcon_flush(int force){
 void fbcon_scroll_view(int lines){
     if(!ready) return;
     u64 maxoff = abs_line >= (u64)rows ? abs_line - (u64)rows + 1 : 0;
-    if(maxoff > HIST - rows) maxoff = HIST - rows;
+    if(maxoff > (u64)(HIST - rows)) maxoff = (u64)(HIST - rows);
     if(lines < 0 && view_off < (u64)(-lines)) view_off = 0;
     else if(lines < 0) view_off -= (u64)(-lines);
     else view_off += (u64)lines;

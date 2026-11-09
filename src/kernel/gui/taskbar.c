@@ -1,37 +1,32 @@
 /* Taskbar (Start, Search, pinned and open apps, Terminal, clock) and the Start menu. */
 #include "gui_internal.h"
+#include "amdroid/sched.h"
+#include "amdroid/pmm.h"
+#include "amdroid/timer.h"
 
 #define BAR_H       48
 #define BAR_MARGIN  12                 /* gap between the taskbar and the screen bottom */
 #define BAR_ITEM    52                 /* width of one taskbar slot */
 #define BAR_PAD     14
+#define BAR_STATS_W 118                /* live CPU / RAM block inside the pill */
+#define BAR_CLOCK_W 108                /* the clock lives inside the pill too */
 
 static const char *terminal_label = "Terminal";
 
-/* Which apps stay on the taskbar when closed: from each app, then changed by the user. */
-static int pins[UI_MAX_APPS];
-static int pins_ready = 0;
-static void pins_init(void){
-    if(pins_ready) return;
-    for(int a = 0; a < ui_app_count(); a++) pins[a] = ui_apps[a]->pinned;
-    pins_ready = 1;
-}
-int  tb_pinned(int a){ pins_init(); return a >= 0 && a < UI_MAX_APPS && pins[a]; }
-void tb_set_pinned(int a, int on){ pins_init(); if(a >= 0 && a < UI_MAX_APPS) pins[a] = on; }
+/* Every app always has its own slot on the taskbar, pinned or not, so
+ * opening and closing an app never shifts the bar. */
 
 int tb_items(item_t *it){
     int n = 0;
     it[n++] = (item_t){ IT_START, 0 };
     it[n++] = (item_t){ IT_SEARCH, 0 };
-    int apps = ui_app_count();
-    for(int a = 0; a < apps; a++)
-        if(win_is_open(a) || tb_pinned(a)) it[n++] = (item_t){ IT_APP, a };
+    for(int a = 0; a < ui_app_count(); a++) it[n++] = (item_t){ IT_APP, a };
     it[n++] = (item_t){ IT_TERM, 0 };
     return n;
 }
 
 rect_t tb_bar(int n, u32 sw, u32 sh){
-    u32 w = (u32)n * BAR_ITEM + 2 * BAR_PAD;
+    u32 w = (u32)n * BAR_ITEM + 2 * BAR_PAD + BAR_STATS_W + BAR_CLOCK_W;
     return (rect_t){ (sw - w) / 2, sh - BAR_MARGIN - BAR_H, w, BAR_H };
 }
 rect_t tb_item(rect_t bar, int i){
@@ -43,8 +38,40 @@ int tb_hit(rect_t bar, int n, int x, int y){
     return -1;
 }
 
-void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open, u32 sw){
-    (void)sw;
+/* ---- live system stats (real measurements, sampled twice a second) ----
+ * CPU comes from the scheduler's TSC accounting (busy = not halted-idle),
+ * RAM from the physical page allocator. */
+#define STATS_TICKS 50               /* 0.5 s at 100 Hz */
+static u64 st_last_tsc = 0, st_last_idle = 0, st_last_at = 0;
+static int st_sampled = 0;
+static u32 st_cpu = 0;               /* tenths of a percent */
+static u32 st_ram_pct = 0;           /* whole percent */
+static u64 st_ram_used = 0, st_ram_total = 0;
+static void tb_stats(u64 now){
+    if(st_sampled && now - st_last_at < STATS_TICKS) return;
+    proc_info_t pi[4];
+    u64 idle = 0;
+    proc_info(pi, 4, &idle);
+    u64 tsc = sched_tsc();
+    if(st_sampled && tsc > st_last_tsc){
+        u64 dt = tsc - st_last_tsc;
+        u64 di = idle >= st_last_idle ? idle - st_last_idle : 0;
+        st_cpu = di >= dt ? 0 : (u32)((dt - di) * 1000 / dt);
+        if(st_cpu > 1000) st_cpu = 1000;
+    }
+    u64 tot = pmm_total_pages(), free = pmm_free_pages();
+    st_ram_total = tot * 4096;
+    u64 used = (tot > free ? tot - free : 0) * 4096;
+    st_ram_used = used;
+    st_ram_pct = st_ram_total ? (u32)(used * 100 / st_ram_total) : 0;
+    st_last_tsc = tsc;
+    st_last_idle = idle;
+    st_last_at = now;
+    st_sampled = 1;
+}
+
+void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open){
+    tb_stats(timer_ticks());
     ui_rrect(bar.x, bar.y, bar.w, bar.h, bar.h / 2, C_BAR_EDGE);
     ui_rrect(bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 2, (bar.h - 2) / 2, C_BAR);
     for(int i = 0; i < n; i++){
@@ -58,6 +85,7 @@ void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int 
         else {
             ico = ui_apps[it[i].app]->icon;
             if(it[i].app == top) col = ui_accent();
+            else if(!win_is_open(it[i].app)) col = C_DIM;   /* closed apps sit dim in their fixed slot */
         }
         ui_icon(ico, r.x + (r.w - 32) / 2, r.y + 2, col);
         if(it[i].kind == IT_APP && win_is_open(it[i].app)){
@@ -67,13 +95,27 @@ void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int 
                      focused ? ui_accent() : C_MUTED);
         }
     }
-    /* the clock at the right edge, centred on the bar (signed maths: the bar is lower than a 2x line) */
-    char clk[8];
-    ui_clock(clk);
-    u32 cw = ui_text_w(clk, UI_SCALE);
-    int ty = (int)bar.y + ((int)bar.h - (int)UI_CH) / 2;
-    ui_text(sw - cw - 32, (u32)ty, clk, C_MUTED, UI_SCALE);
-
+    /* live CPU / RAM, then the clock, both inside the pill so they never
+     * float over a window */
+    {
+        u32 sx = bar.x + BAR_PAD + (u32)n * BAR_ITEM;
+        char cpu[16] = "CPU ", pct[12], num[12];
+        ui_num(st_cpu / 10, num); ui_cat(cpu, num); ui_cat(cpu, ".");
+        ui_num(st_cpu % 10, pct); ui_cat(cpu, pct); ui_cat(cpu, "%");
+        char ram[16] = "RAM ", rp[12];
+        ui_num(st_ram_pct, rp); ui_cat(ram, rp); ui_cat(ram, "%");
+        ui_fill((rect_t){ sx, bar.y + 10, 1, bar.h - 20 }, C_SEP);
+        u32 fill = (u32)(((u64)bar.h * st_cpu) / 1000);
+        if(fill > bar.h - 6) fill = bar.h - 6;
+        ui_fill((rect_t){ sx + 7, bar.y + 3 + (bar.h - 6) - fill, 3, fill }, ui_accent());
+        ui_text(sx + 16, bar.y + 7, cpu, C_TEXT, 1);
+        ui_text(sx + 16, bar.y + 25, ram, C_MUTED, 1);
+        char clk[8];
+        ui_clock(clk);
+        u32 cw = ui_text_w(clk, UI_SCALE);
+        int ty = (int)bar.y + ((int)bar.h - (int)UI_CH) / 2;
+        ui_text(bar.x + bar.w - cw - 20, (u32)ty, clk, C_MUTED, UI_SCALE);
+    }
     /* a label over the icon under the pointer, once the hover has faded in */
     if(hover >= 0 && hover < n && hover_amt > 160){
         const char *label = it[hover].kind == IT_START ? "Start" : it[hover].kind == IT_SEARCH ? "Search" :

@@ -182,7 +182,8 @@ void win_set_size(int a, int w, int h){
     if(w < WIN_MIN_W) w = WIN_MIN_W;
     if(h < WIN_MIN_H) h = WIN_MIN_H;
     if(w > scr_w) w = scr_w;
-    if(h > scr_h) h = scr_h;
+    /* nothing covers the taskbar strip: a window resized at the bottom stops above it */
+    if((int)rects[a].y + h > scr_h - 60) h = scr_h - 60 - (int)rects[a].y;
     rects[a].w = (u32)w;
     rects[a].h = (u32)h;
 }
@@ -193,6 +194,10 @@ rect_t win_grip(int a){
 }
 
 void win_move(int a, int x, int y){
+    /* the title bar stays grabbable and the window stops above the taskbar pill */
+    if(x < -(int)rects[a].w + 60) x = -(int)rects[a].w + 60;
+    if(x > scr_w - 60) x = scr_w - 60;
+    if((int)rects[a].y + (int)rects[a].h > scr_h - 60) y = scr_h - 60 - (int)rects[a].h;
     rects[a].x = (u32)x;
     rects[a].y = (u32)y;
 }
@@ -245,9 +250,12 @@ static void chrome(int a, rect_t r, int focused, int with_body){
     ui_fill((rect_t){ r.x + r.w - 8, r.y + r.h - 13, 3, 3 }, C_MUTED);
     if(with_body && app->draw){
         rect_t b = { r.x + UI_PAD, r.y + UI_TITLE_H + 12, r.w - 2 * UI_PAD, r.h - UI_TITLE_H - 12 - UI_PAD };
+        /* the app can only paint inside its body: nothing runs off the window */
+        fb_set_clip(b.x, b.y, b.w, b.h);
         ui_app_enter(a);
         app->draw(b, focused);
         ui_app_leave();
+        fb_clear_clip();
     }
 }
 

@@ -295,6 +295,10 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
             char *h = kmalloc(hl + 1);
             if(h){ memcpy(h, n->href, hl + 1); sheet_href[nsheets++] = h; }
         }
+        if(!fragment && !closing && name_eq(n->tag, "img")){
+            const char *src = wnode_attr_get(n, "src");
+            if(src && src[0]) n->img = img_register(src) + 1;   /* 0 when the table is full */
+        }
         if(closing){
             for(int k = sp - 1; k > 0; k--)
                 if(name_eq(stack[k]->tag, n->tag)){ sp = k; break; }
@@ -381,6 +385,7 @@ void web_free(void){
     web_css_ext_len = 0;
     for(int i = 0; i < nsheets; i++){ kfree(sheet_href[i]); sheet_href[i] = NULL; }
     nsheets = 0;
+    web_images_reset();
     if(web_js){ kfree(web_js); web_js = NULL; }
     web_js_len = 0;
     web_nscripts = 0;

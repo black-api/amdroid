@@ -118,6 +118,9 @@ int gui_login(void){
         n++;
     }
 
+    /* auto-login: skip the login screen when the only account has no password */
+    if(n == 1 && auth_login(names[0], "") == 0){ mouse_disable(); return 0; }
+
     int sel = 0, hover = -1, prev_btn = 0, mx = (int)sw / 2, my = (int)sh / 2;
     int pw_mode = 0, pw_len = 0;
     char pw[PW_MAX + 1];

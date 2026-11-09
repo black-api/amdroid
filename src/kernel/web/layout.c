@@ -265,7 +265,7 @@ static int blank_text(const wnode_t *c){
 static int item_w(const wstyle_t *st, int w){
     int want = st->width + w * st->width_pct / 1000 + view_w * st->width_vw / 1000;
     if(want <= 0) return 0;
-    int extra = st->border_box ? 0 : st->p[1] + st->p[3] + 2 * (st->border > 0 ? st->border : 0);
+    int extra = st->border_box ? 0 : st->p[1] + st->p[3] + st->bl + st->br;
     int out = want + extra + st->m[1] + st->m[3];
     return out > w ? w : out;
 }
@@ -290,7 +290,7 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
     }
     const wstyle_t *st = &n->st;
     if(st->display == W_NONE) return;
-    int extra = st->p[1] + st->p[3] + 2 * (st->border > 0 ? st->border : 0) + st->m[1] + st->m[3];
+    int extra = st->p[1] + st->p[3] + st->bl + st->br + st->m[1] + st->m[3];
     if(strcmp(n->tag, "img") == 0){ *maxw = *minw = 8 * 8 * scale_of(st->size); return; }
     if(strcmp(n->tag, "input") == 0){ *maxw = *minw = 20 * 8 * scale_of(st->size); return; }
     int fixed = item_w(st, view_w);
@@ -422,6 +422,118 @@ static void flex_children(wnode_t *n, int x0, int w, int gap){
     cy = y;
 }
 
+/* ---- tables ---- */
+
+#define TABLE_COLS   16
+#define TABLE_DEPTH  4
+typedef struct { int x, w; int col_w[TABLE_COLS]; int ncols; } table_plan_t;
+static table_plan_t table_stack[TABLE_DEPTH];
+static int table_depth = 0;
+
+static int cell_span(wnode_t *c){
+    const char *v = wnode_attr_get(c, "colspan");
+    if(!v) return 1;
+    int s = 0;
+    while(*v >= '0' && *v <= '9'){ s = s * 10 + (*v - '0'); v++; }
+    return s < 1 ? 1 : (s > TABLE_COLS ? TABLE_COLS : s);
+}
+
+/* The rows of a table: direct <tr> children and rows inside <thead>/<tbody>/<tfoot>.
+ * Fills rows[256] and returns how many there are. */
+static int table_collect_rows(wnode_t *n, wnode_t **rows){
+    int nr = 0;
+    for(wnode_t *c = n->first; c; c = c->next){
+        if(c->text) continue;
+        if(strcmp(c->tag, "tr") == 0){ if(nr < 256) rows[nr++] = c; continue; }
+        if(strcmp(c->tag, "thead") == 0 || strcmp(c->tag, "tbody") == 0 || strcmp(c->tag, "tfoot") == 0){
+            for(wnode_t *r = c->first; r; r = r->next)
+                if(!r->text && strcmp(r->tag, "tr") == 0 && nr < 256) rows[nr++] = r;
+        }
+    }
+    return nr;
+}
+
+/* Works out the column widths from the cells' preferred widths and remembers them. */
+static void table_plan(wnode_t *n, int x0, int w){
+    if(table_depth >= TABLE_DEPTH) return;
+    int need[TABLE_COLS];
+    for(int i = 0; i < TABLE_COLS; i++) need[i] = 0;
+    int ncols = 0;
+    wnode_t *rows[256];
+    int nrows = table_collect_rows(n, rows);
+    for(int ri = 0; ri < nrows; ri++){
+        int col = 0;
+        for(wnode_t *c = rows[ri]->first; c; c = c->next){
+            if(c->text) continue;
+            if(strcmp(c->tag, "td") != 0 && strcmp(c->tag, "th") != 0) continue;
+            if(c->st.display == W_NONE){ col += cell_span(c); continue; }
+            int span = cell_span(c);
+            int mx, mn;
+            content_size(c, &mx, &mn);
+            if(mx < 20) mx = 20;
+            int share = (mx + span - 1) / span;
+            for(int k = 0; k < span && col + k < TABLE_COLS; k++)
+                if(share > need[col + k]) need[col + k] = share;
+            col += span;
+        }
+        if(col > ncols) ncols = col > TABLE_COLS ? TABLE_COLS : col;
+    }
+    if(ncols == 0){ ncols = 1; need[0] = w; }
+    int sum = 0;
+    for(int i = 0; i < ncols; i++) sum += need[i];
+    table_plan_t *p = &table_stack[table_depth++];
+    p->x = x0; p->w = w; p->ncols = ncols;
+    if(sum <= w){
+        /* give the extra width equally to the columns */
+        int extra = (w - sum) / ncols, over = w - sum - extra * ncols;
+        int off = 0;
+        for(int i = 0; i < ncols; i++){ p->col_w[i] = need[i] + extra + (i < over ? 1 : 0); off += p->col_w[i]; }
+        (void)off;
+    } else {
+        int used = 0;
+        for(int i = 0; i < ncols; i++){ p->col_w[i] = need[i] * w / sum; if(p->col_w[i] < 16) p->col_w[i] = 16; used += p->col_w[i]; }
+        /* fix rounding so the table is exactly w wide (trim the last columns) */
+        for(int i = ncols - 1; used > w && i >= 0; i--){
+            int cut = used - w;
+            if(cut > p->col_w[i] - 16) cut = p->col_w[i] - 16;
+            if(cut > 0){ p->col_w[i] -= cut; used -= cut; }
+        }
+    }
+}
+
+/* A table row: lays its cells side by side on an equal baseline, like flex_line but 2D. */
+static void layout_tr(wnode_t *n){
+    wstyle_t *st = &n->st;
+    flush_line();
+    cy += st->m[0];
+    table_plan_t *p = table_depth > 0 ? &table_stack[table_depth - 1] : NULL;
+    int row_y = cy;
+    int col = 0, x = p ? p->x : cx;
+    int max_cy = cy;
+    int saved_align = cur_align;
+    cur_align = 0;
+    for(wnode_t *c = n->first; c; c = c->next){
+        if(c->text) continue;
+        if(strcmp(c->tag, "td") != 0 && strcmp(c->tag, "th") != 0) continue;
+        int span = cell_span(c);
+        int wsum = 0, advance = 0;
+        if(p){ for(int k = 0; k < span && col + k < p->ncols; k++){ wsum += p->col_w[col + k]; } advance = wsum; }
+        else { wsum = cw; advance = cw; }
+        int saved_cx = cx, saved_cw = cw;
+        cx = x;
+        cw = wsum > 0 ? wsum : 40;
+        cy = row_y;
+        cur_align = 0;
+        layout_node(c);                 /* the cell lays itself as a block: padding, border, bg */
+        if(cy > max_cy) max_cy = cy;
+        cx = saved_cx; cw = saved_cw;
+        x += advance;
+        if(p) col += span;
+    }
+    cy = max_cy + st->m[2];
+    cur_align = saved_align;
+}
+
 /* ---- the tree ---- */
 
 static void layout_node(wnode_t *n){
@@ -433,6 +545,7 @@ static void layout_node(wnode_t *n){
     }
     cur_dom = n;
     if(st->display == W_NONE) return;
+    if(strcmp(n->tag, "tr") == 0){ layout_tr(n); return; }
     if(strcmp(n->tag, "br") == 0){ flush_line(); return; }
     if(strcmp(n->tag, "input") == 0){
         /* a text box: its value, or the placeholder in grey, on a dark box */
@@ -453,6 +566,31 @@ static void layout_node(wnode_t *n){
         return;
     }
     if(strcmp(n->tag, "img") == 0){
+        int idx = n->img ? n->img - 1 : -1;
+        u32 iw = 0, ih = 0;
+        const u32 *px = idx >= 0 ? web_image_pixels(idx, &iw, &ih) : NULL;
+        if(px && iw && ih){
+            /* width/height attributes win; otherwise the natural size (capped to the container) */
+            int dw = 0, dh = 0;
+            const char *ws = wnode_attr_get(n, "width"), *hs = wnode_attr_get(n, "height");
+            for(const char *q = ws; q && *q >= '0' && *q <= '9'; q++) dw = dw * 10 + (*q - '0');
+            for(const char *q = hs; q && *q >= '0' && *q <= '9'; q++) dh = dh * 10 + (*q - '0');
+            if(dw <= 0) dw = (int)iw;
+            if(dh <= 0) dh = (int)((u64)dw * ih / iw);
+            if(dh <= 0) dh = 1;
+            if(dw > cw){ dh = (int)((u64)dh * cw / (dw ? dw : 1)); dw = cw; }
+            flush_line();
+            cy += st->m[0];
+            if(ncmds < CMD_MAX){
+                web_cmd_t im = { .kind = WEB_CMD_IMAGE, .x = cx + st->m[3], .y = cy, .w = dw, .h = dh,
+                                 .color = 0, .link = cur_link, .dom = n, .img = idx };
+                emit(&im);
+            }
+            cy += dh;
+            cy += st->m[2];
+            return;
+        }
+        /* not decoded (yet): the alt text */
         char alt[120] = "[image";
         if(n->alt && n->alt[0]){ int k = (int)strlen(alt); alt[k++] = ':'; alt[k++] = ' '; for(const char *a = n->alt; *a && k < 110; a++) alt[k++] = *a; alt[k] = 0; }
         int k = (int)strlen(alt);
@@ -496,10 +634,11 @@ static void layout_node(wnode_t *n){
     cy += st->m[0];
     int saved_cx = cx, saved_cw = cw, saved_align = cur_align;
     int box_top = cy;
-    int b = st->border > 0 ? st->border : 0;
+    int bt = st->bt, br = st->br, bb = st->bb, bl = st->bl;
+    int bw = bl + br;
     /* the content width: width (px, % of the container, vw) capped by max-width */
     int avail = cw - st->m[1] - st->m[3];
-    int extra = st->p[1] + st->p[3] + 2 * b;
+    int extra = st->p[1] + st->p[3] + bw;
     int content = avail - extra;
     int want = st->width + cw * st->width_pct / 1000 + view_w * st->width_vw / 1000;
     if(want > 0){ content = st->border_box ? want - extra : want; }
@@ -512,8 +651,8 @@ static void layout_node(wnode_t *n){
         if(st->auto_lr == 3) box_x += (avail - box_w) / 2;            /* margin: 0 auto */
         else if(st->auto_lr == 2) box_x += avail - box_w;
     }
-    cy += st->p[0] + b;
-    cx = box_x + st->p[3] + b;
+    cy += st->p[0] + bt;
+    cx = box_x + st->p[3] + bl;
     cw = content;
     cur_align = st->align;
     if(st->display == W_LISTITEM && !st->no_bullet){
@@ -522,17 +661,20 @@ static void layout_node(wnode_t *n){
         add_text("*", 1, &bullet, -1);
         pending_space = 1;
     }
+    int is_table = strcmp(n->tag, "table") == 0 && table_depth < TABLE_DEPTH;
+    if(is_table) table_plan(n, cx, cw);
     if(st->display == W_FLEX){
         flex_children(n, cx, cw, st->gap);
     } else {
         for(wnode_t *c = n->first; c; c = c->next) layout_node(c);
     }
+    if(is_table) table_depth--;
     flush_line();
     if(st->height > 0){
-        int content_h = cy - (box_top + st->m[0] + st->p[0] + b);
+        int content_h = cy - (box_top + st->m[0] + st->p[0] + bt);
         if(st->height > content_h) cy += st->height - content_h;
     }
-    cy += st->p[2] + b;
+    cy += st->p[2] + bb;
     int box_h = cy - box_top;
     if(st->bg_set && ncmds < CMD_MAX){
         web_cmd_t bg = { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top, .w = box_w, .h = box_h,
@@ -542,14 +684,21 @@ static void layout_node(wnode_t *n){
         cmds[0] = bg;
         ncmds++;
     }
-    if(b > 0){
-        web_cmd_t edges[4] = {
-            { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top, .w = box_w, .h = b, .color = st->border_color, .link = -1 },
-            { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top + box_h - b, .w = box_w, .h = b, .color = st->border_color, .link = -1 },
-            { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top, .w = b, .h = box_h, .color = st->border_color, .link = -1 },
-            { .kind = WEB_CMD_RECT, .x = box_x + box_w - b, .y = box_top, .w = b, .h = box_h, .color = st->border_color, .link = -1 },
-        };
-        for(int i = 0; i < 4; i++) emit(&edges[i]);
+    if(bt > 0){
+        web_cmd_t e = { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top, .w = box_w, .h = bt, .color = st->border_color, .link = -1 };
+        emit(&e);
+    }
+    if(bb > 0){
+        web_cmd_t e = { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top + box_h - bb, .w = box_w, .h = bb, .color = st->border_color, .link = -1 };
+        emit(&e);
+    }
+    if(bl > 0){
+        web_cmd_t e = { .kind = WEB_CMD_RECT, .x = box_x, .y = box_top, .w = bl, .h = box_h, .color = st->border_color, .link = -1 };
+        emit(&e);
+    }
+    if(br > 0){
+        web_cmd_t e = { .kind = WEB_CMD_RECT, .x = box_x + box_w - br, .y = box_top, .w = br, .h = box_h, .color = st->border_color, .link = -1 };
+        emit(&e);
     }
     cy += st->m[2];
     cx = saved_cx; cw = saved_cw; cur_align = saved_align;

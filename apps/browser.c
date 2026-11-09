@@ -1,6 +1,7 @@
 /* Browser: a web browser. It loads pages over HTTP (and HTTPS through the host's proxy,
- * tools/https_proxy.py) and shows them with the HTML, CSS and JavaScript engines in
- * src/kernel/web and src/kernel/js.
+ * tools/https_proxy.py). The page itself — HTML, CSS, JavaScript, painting — is rendered by
+ * Husser, a separate ring-3 process with its own address space; this app owns the network,
+ * the window chrome, and what to do when Husser asks for something.
  *
  * Loading runs a step at a time from the draw loop, so the desktop keeps moving while a
  * page arrives: a progress bar runs under the toolbar, Go turns into Stop, and the footer
@@ -9,7 +10,7 @@
 #include "amdroid/net.h"
 #include "amdroid/heap.h"
 #include "amdroid/keyboard.h"
-#include "amdroid/web.h"
+#include "amdroid/husser.h"
 #include "amdroid/fb.h"
 #include "amdroid/timer.h"
 
@@ -22,6 +23,7 @@
 #define MAX_REDIRECTS 5
 #define FIRST_BYTE_TICKS 3000     /* 30 s for the first byte (the proxy may be fetching) */
 #define IDLE_TICKS       1000     /* 10 s of silence after that ends the page */
+#define RES_FAIL_LEN     0xFFFFFFFFu
 
 #define PROXY_IP   0x0A000202u    /* 10.0.2.2: the host, as seen from the guest */
 #define PROXY_PORT 8888
@@ -38,13 +40,15 @@ static int nhist = 0;
 static char num_buf[4];
 static int num_len = 0;
 static int scroll = 0;              /* pixels */
-static int page_h = 0;              /* total height of the laid-out page */
 static int have_page = 0;
-static int laid_width = -1;
 static rect_t last_body;
-static void *hover_node = NULL;     /* the element under the pointer */
-static void *focus_node = NULL;     /* the text box that gets typed keys */
 static int hover_btn = -1;          /* toolbar button under the pointer */
+/* husser protocol bookkeeping */
+static u32 need_seq_consumed = 0;   /* the need list we last saw */
+static u32 nav_seq_consumed = 0;    /* a navigation Husser asked for */
+static u8  res_done[2][32];         /* [kind-1][idx]: fetched or in flight */
+static int waiting_link = -1;       /* the link index we are waiting a url for */
+static u32 waiting_link_seq = 0;    /* the link_url_seq it answers */
 static int b_focused = 0;           /* the window had focus at its last draw */
 static u32 ticks_n = 0, drawn_at = 0;   /* frames: to tell when it is minimized (not drawn) */
 extern const app_t app_browser;
@@ -243,13 +247,16 @@ static u32 ld_len, ld_hdr, ld_clen;
 static int ld_have_clen;
 static u64 ld_t0, ld_tlast;
 static char ld_host[HOST_MAX];        /* shown in the footer */
-static int ld_kind;                   /* 0 the page, 1 one of its stylesheets */
-static int css_next, css_total, css_done;
+static int ld_kind;                   /* 0 the page, 1 one of its stylesheets, 2 one of its images */
+static int css_done;                  /* for the final "Loaded" line */
+static int img_done;
 static u32 page_kb;                   /* for the final "Loaded" line */
 static int page_code;
 static int page_cut;
-
-static void next_sheet(void);
+static int ld_img_idx = -1;
+static int ld_sheet_idx = -1;
+static int no_more_needs = 0;          /* set by Stop; poll_husser_needs stays quiet */
+static int resources_busy = 0;         /* a stylesheet/image fetch is in flight or pending */
 static void loaded_status(void);
 
 static void ld_cleanup(void){
@@ -268,25 +275,34 @@ static void push_history(void){
     hist_scroll[HIST_MAX - 1] = scroll;
 }
 
-/* Shows html as the page for url. */
+/* Shows html as the page for url: spawns or reuses Husser, hands it the page. */
 static int show(const char *url, const char *html, u32 len){
-    web_set_url(url);
-    if(web_load(html, len) != 0) return -1;
+    scroll = ld_scroll >= 0 ? ld_scroll : 0;
+    if(husser_open(1280, 720) < 0) return -1;
+    husser_set_url(url);
+    husser_load(html, len, (u32)scroll);
+    for(int k = 0; k < 32; k++){ res_done[0][k] = 0; res_done[1][k] = 0; }
+    need_seq_consumed = 0;
+    no_more_needs = 0;
+    resources_busy = 0;
+    waiting_link = -1;
     if(ld_remember && !same(cur_url, url)) push_history();
     ui_copy(cur_url, url, URL_MAX);
     if(!editing){ ui_copy(addr, url, sizeof addr); addr_len = (int)ui_len(addr); }
     have_page = 1;
-    laid_width = -1;                  /* laid out again at the next draw */
-    scroll = ld_scroll >= 0 ? ld_scroll : 0;
-    hover_node = NULL;                /* those pointed into the old page */
-    focus_node = NULL;
     return 0;
 }
 
 static void fail(const char *why){
     static char page[2048];
     ld_cleanup();
-    if(ld_kind == 1){ next_sheet(); return; }     /* a stylesheet that fails is left out */
+    if(ld_kind == 1 || ld_kind == 2){   /* a stylesheet/image that fails is just left out */
+        int idx = ld_kind == 1 ? ld_sheet_idx : ld_img_idx;
+        husser_res((u32)ld_kind, (u32)(idx < 0 ? 0 : idx), NULL, RES_FAIL_LEN);
+        ld_kind = 0;
+        ld_cleanup();
+        return;
+    }
     ui_copy(page, "<html><head><title>Can't open this page</title><style>"
                   "body{margin:24px}h1{color:#ffb547}p{color:#9aa7b0}a{color:#4cc2ff}"
                   "</style></head><body><h1>Can't open this page</h1><p>", sizeof page);
@@ -305,7 +321,12 @@ static void fail(const char *why){
 static void go(const char *url, int remember, int scroll_to){
     ld_cleanup();
     ld_kind = 0;
-    css_next = css_total = css_done = 0;
+    css_done = 0;
+    img_done = 0;
+    no_more_needs = 0;
+    for(int k = 0; k < 32; k++){ res_done[0][k] = 0; res_done[1][k] = 0; }
+    need_seq_consumed = 0;
+    waiting_link = -1;
     char full[URL_MAX];
     typed_url(url, full, sizeof full);
     ui_copy(ld_url, full, URL_MAX);
@@ -332,13 +353,13 @@ static void go(const char *url, int remember, int scroll_to){
 
 static void stop(void){
     if(ld == LD_IDLE) return;
-    ld_cleanup();
-    if(ld_kind == 1){                    /* stop the stylesheets: the page itself is here */
-        css_next = css_total;
+    if(ld_kind == 1 || ld_kind == 2){   /* stop a subresource: the page itself is here */
+        int idx = ld_kind == 1 ? ld_sheet_idx : ld_img_idx;
+        husser_res((u32)ld_kind, (u32)(idx < 0 ? 0 : idx), NULL, RES_FAIL_LEN);
         ld_kind = 0;
-        ui_copy(status, "Stopped (some styles were not loaded).", sizeof status);
-        return;
     }
+    no_more_needs = 1;
+    ld_cleanup();
     ui_copy(addr, cur_url, sizeof addr);
     addr_len = (int)ui_len(addr);
     ui_copy(status, "Stopped.", sizeof status);
@@ -383,6 +404,7 @@ static void ld_connect(void){
     cat_n(req, " HTTP/1.0\r\nHost: ", sizeof req);
     cat_n(req, host, sizeof req);
     cat_n(req, ld_kind == 1 ? "\r\nUser-Agent: BRO-weser\r\nAccept: text/css,*/*\r\nConnection: close\r\n\r\n"
+             : ld_kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/*,*/*;q=0.8\r\nConnection: close\r\n\r\n"
                             : "\r\nUser-Agent: BRO-weser\r\nAccept: text/html,text/plain\r\nConnection: close\r\n\r\n", sizeof req);
     if(tcp_send(ld_sock, req, ui_len(req)) != 0){ fail("Sending the request failed."); return; }
 
@@ -392,7 +414,7 @@ static void ld_connect(void){
     ld_have_clen = 0;
     ld_tlast = timer_ticks();
     ld = LD_RECV;
-    if(ld_kind == 1) return;                 /* "Loading styles..." stays */
+    if(ld_kind == 1 || ld_kind == 2) return;   /* the caller already set a status line */
     ui_copy(status, "Waiting for ", sizeof status);
     cat_n(status, ld_host, sizeof status);
     cat_n(status, "...", sizeof status);
@@ -450,15 +472,25 @@ static void ld_finish(void){
 
     u32 blen = ld_len - ld_hdr;
     const char *body = (const char *)ld_buf + ld_hdr;
+    if(ld_kind == 2){
+        /* an image: husser decodes it */
+        if(ld_img_idx >= 0 && code < 300) husser_res(2, (u32)ld_img_idx, body, blen);
+        else husser_res(2, (u32)(ld_img_idx < 0 ? 0 : ld_img_idx), NULL, RES_FAIL_LEN);
+        img_done++;
+        ld_kind = 0;
+        ld_cleanup();
+        return;
+    }
     if(ld_kind == 1){
-        /* a stylesheet: add it and lay the page out again */
+        /* a stylesheet: husser applies it and lays out again */
         char ct[80] = "text/css";
         header("content-type:", ct, sizeof ct);
         int not_css = 0;
         for(char *q = ct; *q; q++) if(starts(q, "javascript") || starts(q, "html")) not_css = 1;
-        if(code < 300 && blen && !not_css){ web_add_css(body, blen); laid_width = -1; css_done++; }
+        if(code < 300 && blen && !not_css){ husser_res(1, (u32)(ld_sheet_idx < 0 ? 0 : ld_sheet_idx), body, blen); css_done++; }
+        else husser_res(1, (u32)(ld_sheet_idx < 0 ? 0 : ld_sheet_idx), NULL, RES_FAIL_LEN);
+        ld_kind = 0;
         ld_cleanup();
-        next_sheet();
         return;
     }
     char ctype[80] = "text/html";
@@ -510,11 +542,8 @@ static void ld_finish(void){
     page_code = code;
     page_cut = ld_len >= BODY_MAX;
     ld_cleanup();
-    /* then the page's linked stylesheets, one after another */
-    css_next = 0;
-    css_done = 0;
-    css_total = web_stylesheet_count();
-    next_sheet();
+    /* the page is shown; Husser now asks for the stylesheets and images it wants */
+    loaded_status();
 }
 
 /* "Loaded 14 KB + 2 stylesheets in 0.8 s" (or the server's error code) */
@@ -537,37 +566,15 @@ static void loaded_status(void){
         cat_n(m, " + ", sizeof m); cat_n(m, ns, sizeof m);
         cat_n(m, css_done == 1 ? " stylesheet" : " stylesheets", sizeof m);
     }
+    if(img_done){
+        ui_num((u32)img_done, ns);
+        cat_n(m, " + ", sizeof m); cat_n(m, ns, sizeof m);
+        cat_n(m, img_done == 1 ? " image" : " images", sizeof m);
+    }
     cat_n(m, " in ", sizeof m);
     cat_n(m, sec, sizeof m); cat_n(m, ".", sizeof m); cat_n(m, ten, sizeof m); cat_n(m, " s", sizeof m);
     if(page_cut) cat_n(m, " (cut off at 1 MB)", sizeof m);
     ui_copy(status, m, sizeof status);
-}
-
-/* Starts the next linked stylesheet, or finishes the page when there are none left. */
-static void next_sheet(void){
-    while(css_next < css_total){
-        const char *href = web_stylesheet(css_next++);
-        char u[URL_MAX];
-        url_t pu;
-        if(!href) continue;
-        resolve(cur_url, href, u, sizeof u);
-        if(parse_url(u, &pu) != 0) continue;
-        ui_copy(ld_url, u, URL_MAX);
-        ui_copy(ld_host, pu.host, sizeof ld_host);
-        ld_kind = 1;
-        ld_redirects = 0;
-        ld = LD_START;
-        char a[8] = "", b[8] = "";
-        ui_num((u32)css_next, a);
-        ui_num((u32)css_total, b);
-        ui_copy(status, "Loading styles ", sizeof status);
-        cat_n(status, a, sizeof status); cat_n(status, " of ", sizeof status); cat_n(status, b, sizeof status);
-        cat_n(status, " from ", sizeof status); cat_n(status, pu.host, sizeof status); cat_n(status, "...", sizeof status);
-        return;
-    }
-    ld_kind = 0;
-    loaded_status();
-    tell("Page loaded", web_title()[0] ? web_title() : cur_url);
 }
 
 /* Reads whatever has arrived, without waiting. */
@@ -636,20 +643,15 @@ static void reload(void){
     if(cur_url[0]) go(cur_url, 0, scroll);
 }
 
-static void follow_index(int idx){
-    const char *href = web_link(idx);
-    if(!href){ ui_copy(status, "No such link.", sizeof status); return; }
-    if(starts(href, "javascript:")) return;
-    if(starts(href, "mailto:")){ ui_copy(status, "Mail links are not supported.", sizeof status); return; }
-    char u[URL_MAX];
-    resolve(cur_url, href, u, URL_MAX);
-    go(u, 1, -1);
-}
-
 static void follow_number(int n){
     /* links are shown as [1], [2]... from 1; the engine numbers them from 0 */
     if(n < 1){ ui_copy(status, "No such link.", sizeof status); return; }
-    follow_index(n - 1);
+    const volatile husser_shm_t *h = husser_header();
+    if(!h){ ui_copy(status, "No page loaded.", sizeof status); return; }
+    waiting_link = n - 1;
+    waiting_link_seq = h->link_url_seq;
+    husser_link_url((u32)(n - 1));   /* b_tick picks the answer up */
+    return;
 }
 
 /* ---- layout on screen ---- */
@@ -666,19 +668,18 @@ static void button(rect_t r, const char *label, u32 bg, u32 fg){
     ui_text(r.x + (r.w - ui_text_w(label, UI_SCALE)) / 2, r.y + (r.h - UI_CH) / 2, label, fg, UI_SCALE);
 }
 
-/* Closing the window gives all its memory back. */
+/* Closing the window gives all its memory back: Husser exits, passing the page on. */
 static void b_close(void){
     ld_cleanup();
     ld_kind = 0;
-    css_next = css_total = 0;
-    web_release();
+    css_done = 0;
+    img_done = 0;
+    husser_close();
     have_page = 0;
     cur_url[0] = 0;
     addr[0] = 0; addr_len = 0;
     nhist = 0;
     scroll = 0;
-    laid_width = -1;
-    hover_node = focus_node = NULL;
     status[0] = 0;
 }
 
@@ -686,11 +687,69 @@ static void b_open(void){
     if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
 }
 
+/* Polls the shared region: the subresources Husser wants fetched, and the
+ * navigation/link answers it gives back. Called every frame. */
+static void poll_husser(void){
+    const volatile husser_shm_t *h = husser_header();
+    if(husser_alive()){
+        if(h && have_page && !no_more_needs && ld == LD_IDLE &&
+           h->need_count && h->need_seq != need_seq_consumed){
+            need_seq_consumed = h->need_seq;
+            for(u32 k = 0; k < h->need_count; k++){
+                u32 kind = h->need[k].kind, idx = h->need[k].idx;
+                if(kind < 1 || kind > 2 || idx >= 32) continue;
+                if(res_done[kind - 1][idx]) continue;
+                char url_copy[HUSSER_URL_NEED];
+                ui_copy(url_copy, (const char *)h->need[k].url, sizeof url_copy);
+                if(starts(url_copy, "data:")) continue;     /* husser handles data URLs itself */
+                char u[URL_MAX];
+                url_t pu;
+                resolve(cur_url, url_copy, u, sizeof u);
+                res_done[kind - 1][idx] = 1;                 /* once started, don't start twice */
+                if(parse_url(u, &pu) != 0){ husser_res(kind, idx, NULL, RES_FAIL_LEN); continue; }
+                ui_copy(ld_url, u, URL_MAX);
+                ui_copy(ld_host, pu.host, sizeof ld_host);
+                ld_kind = (int)kind;
+                if(kind == 1) ld_sheet_idx = (int)idx; else ld_img_idx = (int)idx;
+                ld_redirects = 0;
+                ld = LD_START;
+                ui_copy(status, kind == 1 ? "Loading stylesheet from " : "Loading image from ", sizeof status);
+                cat_n(status, pu.host, sizeof status);
+                cat_n(status, "...", sizeof status);
+                resources_busy = 1;
+                return;                                      /* one at a time */
+            }
+        }
+        if(h && have_page && ld == LD_IDLE && h->need_count == 0 && resources_busy){
+            resources_busy = 0;
+            loaded_status();                                 /* all stylesheets and images are in */
+        }
+        if(h && h->nav_seq != nav_seq_consumed){
+            nav_seq_consumed = h->nav_seq;
+            char u[URL_MAX];
+            ui_copy(u, (const char *)h->nav_url, sizeof u);
+            if(u[0]){
+                char full[URL_MAX];
+                resolve(cur_url, u, full, sizeof full);
+                go(full, 1, 0);
+            }
+            return;
+        }
+        if(waiting_link >= 0 && h && h->link_url_seq != waiting_link_seq){
+            waiting_link = -1;
+            if(!h->link_url[0]){ ui_copy(status, "No such link.", sizeof status); return; }
+            char full[URL_MAX];
+            resolve(cur_url, (const char *)h->link_url, full, sizeof full);
+            go(full, 1, 0);
+        }
+    }
+}
+
 static void b_tick(void){
     ticks_n++;
     if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
-    web_tick();                                                 /* script timers that are due */
     ld_step();                                                  /* loading goes on while minimized */
+    poll_husser();
 }
 
 static void b_draw(rect_t b, int focused){
@@ -734,46 +793,33 @@ static void b_draw(rect_t b, int focused){
         if(x + 3 < ab.x + ab.w) ui_fill((rect_t){ x, ty, 2, UI_CH }, ui_accent());
     }
 
-    /* page */
+    /* page: Husser paints it; we blit the viewport it shares with us */
     rect_t area = area_of(b);
     ui_fill(area, C_WIN);
-    if(web_dirty()){ web_clear_dirty(); laid_width = -1; }   /* a script changed the page */
-    if(have_page){
-        if(laid_width != (int)area.w){
-            page_h = web_layout((int)area.w);
-            laid_width = (int)area.w;
+    const volatile husser_shm_t *hv = husser_header();
+    if(have_page && hv){
+        if(!husser_alive()){
+            /* Husser died: the page is gone, the desktop is fine */
+            ui_text(area.x + 24, area.y + 40, "Husser stopped", C_TEXT, UI_SCALE);
+            ui_text(area.x + 24, area.y + 96, "This page crashed the Husser renderer; the desktop is fine.", C_MUTED, 1);
+            ui_text(area.x + 24, area.y + 120, "Close this window and open Browser again to try once more.", C_MUTED, 1);
+        } else if((u32)area.w != hv->vw || (u32)area.h != hv->vh){
+            husser_resize((u32)area.w, (u32)area.h);            /* relayouts only if the width changed */
+        } else if(hv->state == H_STATE_READY){
+            husser_blit(area.x, area.y, hv->vw, hv->vh);
+        } else if(hv->state == H_STATE_BOOT){
+            ui_text(area.x + 24, area.y + 40, "Loading...", C_MUTED, UI_SCALE);
+        } else {                                                /* H_STATE_FAILED */
+            ui_text(area.x + 24, area.y + 40, "This page could not be rendered.", C_TEXT, UI_SCALE);
+            if(hv->js_error[0]) ui_text(area.x + 24, area.y + 96, (const char *)hv->js_error, C_MUTED, 1);
         }
-        int maxs = page_h - (int)area.h;
+        int pgh = (int)hv->page_h;
+        int maxs = pgh - (int)area.h;
         if(maxs < 0) maxs = 0;
         if(scroll > maxs) scroll = maxs;
         if(scroll < 0) scroll = 0;
-
-        int n = 0;
-        const web_cmd_t *cmds = web_cmds(&n);
-        for(int i = 0; i < n; i++){
-            const web_cmd_t *c = &cmds[i];
-            int y = (int)area.y + c->y - scroll;
-            if(c->kind == WEB_CMD_RECT){
-                /* clip the box to the page area so it cannot spill over the window */
-                int x0 = (int)area.x + c->x, y0 = y;
-                int x1 = x0 + c->w, y1 = y0 + c->h;
-                if(x0 < (int)area.x) x0 = (int)area.x;
-                if(y0 < (int)area.y) y0 = (int)area.y;
-                if(x1 > (int)(area.x + area.w)) x1 = (int)(area.x + area.w);
-                if(y1 > (int)(area.y + area.h)) y1 = (int)(area.y + area.h);
-                if(x1 > x0 && y1 > y0) fb_fill_rect((u32)x0, (u32)y0, (u32)(x1 - x0), (u32)(y1 - y0), c->color);
-                continue;
-            }
-            if(y < (int)area.y || y + c->h > (int)(area.y + area.h)) continue;   /* only whole lines */
-            u32 x = (u32)((int)area.x + c->x);
-            if((int)x + c->w < (int)area.x || (int)x > (int)(area.x + area.w)) continue;
-            ui_text(x, (u32)y, c->text, c->color, (u32)c->scale);
-            if(c->bold) ui_text(x + 1, (u32)y, c->text, c->color, (u32)c->scale);
-            if(c->link >= 0 && c->dom == hover_node)                  /* underline the link under the pointer */
-                ui_fill((rect_t){ x, (u32)(y + c->h - 2), (u32)c->w, 2 }, c->color);
-        }
-        if(page_h > (int)area.h){
-            int bar_h = (int)area.h * (int)area.h / page_h;
+        if(pgh > (int)area.h && hv->state == H_STATE_READY){
+            int bar_h = (int)area.h * (int)area.h / pgh;
             if(bar_h < 24) bar_h = 24;
             int bar_y = (int)area.y + (int)((long long)scroll * ((int)area.h - bar_h) / (maxs ? maxs : 1));
             ui_rrect(area.x + area.w - 8, (u32)bar_y, 5, (u32)bar_h, 2, C_DIM);
@@ -800,10 +846,10 @@ static void b_draw(rect_t b, int focused){
 
     /* footer: page title, script messages, then the status */
     char foot[200] = "";
-    if(have_page && web_title()[0]){ cat_n(foot, web_title(), sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
-    if(ld == LD_IDLE){
-        if(web_js_error()[0]){ cat_n(foot, "Script error: ", sizeof foot); cat_n(foot, web_js_error(), sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
-        else if(web_console()[0]){ cat_n(foot, "console: ", sizeof foot); cat_n(foot, web_console(), sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
+    if(have_page && hv && hv->title[0]){ cat_n(foot, (const char *)hv->title, sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
+    if(ld == LD_IDLE && hv){
+        if(hv->js_error[0]){ cat_n(foot, "Script error: ", sizeof foot); cat_n(foot, (const char *)hv->js_error, sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
+        else if(hv->console[0]){ cat_n(foot, "console: ", sizeof foot); cat_n(foot, (const char *)hv->console, sizeof foot); cat_n(foot, "  |  ", sizeof foot); }
     }
     if(num_len){ cat_n(foot, "Link ", sizeof foot); cat_n(foot, num_buf, sizeof foot); cat_n(foot, " (Enter)  ", sizeof foot); }
     cat_n(foot, status, sizeof foot);
@@ -814,30 +860,12 @@ static void b_draw(rect_t b, int focused){
     ui_text(b.x + 4, b.y + b.h - 26, foot, ld != LD_IDLE ? C_TEXT : C_MUTED, 1);
 }
 
-/* The element drawn under (x, y) in the page area, or NULL. */
-static void *element_at(rect_t b, int x, int y){
-    rect_t area = area_of(b);
-    if(!have_page || !ui_contains(area, x, y)) return NULL;
-    int n = 0;
-    const web_cmd_t *cmds = web_cmds(&n);
-    int px = x - (int)area.x, py = y - (int)area.y + scroll;
-    void *hit = NULL;
-    for(int i = 0; i < n; i++){
-        const web_cmd_t *c = &cmds[i];
-        if(c->kind != WEB_CMD_TEXT) continue;
-        if(px >= c->x && px < c->x + c->w && py >= c->y && py < c->y + c->h) hit = (void *)c->dom;
-    }
-    return hit;
-}
-
 static void b_move(rect_t b, int x, int y){
     hover_btn = ui_contains(back_btn(b), x, y) ? 0 : ui_contains(reload_btn(b), x, y) ? 1 :
                 ui_contains(go_btn(b), x, y) ? 2 : -1;
-    void *now = element_at(b, x, y);
-    if(now == hover_node) return;
-    if(hover_node) web_dispatch(hover_node, "mouseout", NULL);
-    hover_node = now;
-    if(hover_node) web_dispatch(hover_node, "mouseover", NULL);
+    rect_t area = area_of(b);
+    if(!have_page || !ui_contains(area, x, y)) return;
+    husser_move(x - (int)area.x, y - (int)area.y);
 }
 
 static void b_click(rect_t b, int x, int y){
@@ -850,29 +878,14 @@ static void b_click(rect_t b, int x, int y){
     }
     if(ui_contains(addr_box(b), x, y)){
         if(!editing){ editing = 1; addr_len = 0; addr[0] = 0; }    /* start fresh, like selecting all */
-        focus_node = NULL;
         return;
     }
     if(editing){ editing = 0; ui_copy(addr, cur_url, sizeof addr); addr_len = (int)ui_len(addr); }
 
     rect_t area = area_of(b);
     if(!have_page || !ui_contains(area, x, y)) return;
-    int n = 0;
-    const web_cmd_t *cmds = web_cmds(&n);
-    int px = x - (int)area.x, py = y - (int)area.y + scroll;
-    for(int i = 0; i < n; i++){
-        const web_cmd_t *c = &cmds[i];
-        if(c->kind != WEB_CMD_TEXT) continue;
-        if(px >= c->x && px < c->x + c->w && py >= c->y && py < c->y + c->h){
-            /* click handlers run first; a handler that ran stops the default link action */
-            web_click(c->dom);
-            if(web_is_input(c->dom)){ focus_node = (void *)c->dom; return; }   /* a text box */
-            focus_node = NULL;
-            if(web_take_prevented()) return;           /* a handler called preventDefault */
-            if(c->link >= 0) follow_index(c->link);
-            return;
-        }
-    }
+    husser_click(x - (int)area.x, y - (int)area.y);
+    /* the click runs inside Husser; a link it wants followed comes back via nav_seq */
 }
 
 static int b_key(int c){
@@ -884,9 +897,14 @@ static int b_key(int c){
         return 1;
     }
     if(c == 27 && ld != LD_IDLE){ stop(); return 1; }
-    if(focus_node){
-        if(c == 27){ focus_node = NULL; return 1; }
-        if(web_key_input(focus_node, c)) return 1;
+    /* an input box on the page has focus: keys go to Husser, and it decides */
+    {
+        const volatile husser_shm_t *h = husser_header();
+        if(h && h->input_focus){
+            if(c == 27){ husser_key(27); return 1; }
+            husser_key((u32)(c & 0x7F));
+            return 1;
+        }
     }
     if(c >= '0' && c <= '9'){
         if(num_len < 3){ num_buf[num_len++] = (char)c; num_buf[num_len] = 0; }
@@ -904,10 +922,10 @@ static int b_key(int c){
         back();
         return 1;
     }
-    if(c == KEY_UP){ scroll -= SCROLL_STEP; return 1; }
-    if(c == KEY_DOWN){ scroll += SCROLL_STEP; return 1; }
-    if(c == KEY_PGUP){ scroll -= (int)area_of(last_body).h - 48; return 1; }
-    if(c == KEY_PGDN){ scroll += (int)area_of(last_body).h - 48; return 1; }
+    if(c == KEY_UP){ scroll -= SCROLL_STEP; husser_paint((u32)scroll); return 1; }
+    if(c == KEY_DOWN){ scroll += SCROLL_STEP; husser_paint((u32)scroll); return 1; }
+    if(c == KEY_PGUP){ scroll -= (int)area_of(last_body).h - 48; husser_paint((u32)scroll); return 1; }
+    if(c == KEY_PGDN){ scroll += (int)area_of(last_body).h - 48; husser_paint((u32)scroll); return 1; }
     /* any other letter starts typing an address, like a real address bar */
     if(c >= 32 && c <= 126){
         editing = 1; addr_len = 0; addr[0] = 0;

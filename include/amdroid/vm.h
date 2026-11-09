@@ -10,12 +10,15 @@
 #define PTE_P 0x1ULL
 #define PTE_W 0x2ULL
 #define PTE_U 0x4ULL
+#define PTE_KEEP 0x200ULL            /* a borrowed page: not private to this process, never freed */
 
 u64  vm_kernel_cr3(void);
 u64  vm_new_space(void);                              /* returns the new PML4 (physical) */
 int  vm_map_user(u64 cr3, u64 virt, u64 phys, u64 flags);
 u64  vm_alloc_user_page(u64 cr3, u64 virt);           /* allocates and maps one zeroed page */
-#define VM_SIG_TRAMPOLINE (VM_USER_BASE + 0xE000)   /* where signal handlers return to */
+/* User programs are linked at the base; keep the signal trampoline far
+ * above any realistic image's end (text + rodata + data + bss), not inside it. */
+#define VM_SIG_TRAMPOLINE (VM_USER_BASE + 0x4000000)   /* BASE + 64 MB */
 void vm_map_trampoline(u64 cr3);
 void vm_switch(u64 cr3);
 u64  vm_read_cr3(void);

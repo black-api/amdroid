@@ -431,6 +431,7 @@ const char *js_to_str(js_val_t v){
         case JS_BOOL: return v.b ? "true" : "false";
         case JS_NULL: return "null";
         case JS_OBJ:
+            if(!v.o) return "[object Object]";
             if(v.o->is_array){
                 /* arrays print their items joined by commas */
                 u32 n = 0;
@@ -449,7 +450,7 @@ const char *js_to_str(js_val_t v){
     }
 }
 
-int js_callable(js_val_t v){ return v.t == JS_OBJ && v.o->is_func; }
+int js_callable(js_val_t v){ return v.t == JS_OBJ && v.o != NULL && v.o->is_func; }
 
 /* ---- lexer ---- */
 enum { T_EOF, T_NUMBER, T_STRING, T_ID, T_PUNCT, T_REGEX, T_TEMPLATE };
@@ -1772,7 +1773,8 @@ static js_val_t eval(jsnode_t *n, env_t *env){
 }
 
 static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
-    js_obj_t *o = fn.o;
+    js_obj_t *o = (fn.t == JS_OBJ) ? fn.o : NULL;
+    if(!o || !o->is_func) return js_undef();   /* calling a non-function used to fault at o->native */
     if(o->native) return o->native(self, argc, argv, o->ctx);
     if(o->default_ctor){
         /* a class without a constructor passes its arguments to the superclass */
@@ -1784,6 +1786,8 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
     jsnode_t *f = o->fdecl;
     env_t *env = new_env(o->closure);
     if(!f->arrow){
+        /* non-strict: a plain call (no receiver) sees the global object as this */
+        if(self.t == JS_UNDEF || self.t == JS_NULL) self = js_objv(global_obj);
         env_define(env, "this", self);
         env_define(env, "%fn", js_objv(o));
         if(o->home) env_define(env, "%home", js_objv(o->home));
@@ -2828,7 +2832,7 @@ void js_init(void){
 
     global_obj = js_new_object();
     global_env = new_env(NULL);
-    env_define(global_env, "this", js_undef());
+    env_define(global_env, "this", js_objv(global_obj));   /* global this === window */
 
     js_set(array_proto, "push", js_objv(js_new_native(arr_push_native, NULL)));
     js_set(array_proto, "pop", js_objv(js_new_native(arr_pop, NULL)));

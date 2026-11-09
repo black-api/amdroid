@@ -42,7 +42,7 @@ static void run_item(item_t it, u64 now, int *next_vt){
 
 /* ---- right-click menus ---- */
 
-enum { A_OPEN = 1, A_PIN, A_UNPIN, A_CLOSE, A_MIN, A_MAX, A_RESTORE, A_SNAP_L, A_SNAP_R,
+enum { A_OPEN = 1, A_CLOSE, A_MIN, A_MAX, A_RESTORE, A_SNAP_L, A_SNAP_R,
        A_TERM, A_APP, A_WALL, A_SORT, A_ABOUT_APP };
 
 static int find_app(int icon){
@@ -54,10 +54,6 @@ static void add(cm_item_t *m, int *n, const char *label, int action, int sep){
     cm_item_t *it = &m[(*n)++];
     ui_copy(it->label, label, sizeof it->label);
     it->action = action; it->sep = sep; it->enabled = 1; it->danger = 0;
-}
-
-static void pin_items(cm_item_t *m, int *n, int a){
-    add(m, n, tb_pinned(a) ? "Unpin from taskbar" : "Pin to taskbar", tb_pinned(a) ? A_UNPIN : A_PIN, 1);
 }
 
 /* The context packs what was clicked: an app index, plus 100 for a desktop-background click. */
@@ -72,7 +68,6 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
         if(it[hi].kind != IT_APP) return;
         int a = it[hi].app;
         add(m, &k, win_is_open(a) ? (win_is_min(a) ? "Show" : "Bring to front") : "Open", A_OPEN, 0);
-        pin_items(m, &k, a);
         if(win_is_open(a)){ add(m, &k, "Close window", A_CLOSE, 1); m[k - 1].danger = 1; }
         cm_open(x, y, m, k, a, (u32)sw, (u32)sh, now);
         return;
@@ -87,7 +82,6 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
         add(m, &k, win_is_max(a) ? "Restore" : "Maximize", win_is_max(a) ? A_RESTORE : A_MAX, 0);
         add(m, &k, "Snap to left half", A_SNAP_L, 1);
         add(m, &k, "Snap to right half", A_SNAP_R, 0);
-        pin_items(m, &k, a);
         add(m, &k, "Close", A_CLOSE, 1);
         m[k - 1].danger = 1;
         cm_open(x, y, m, k, a, (u32)sw, (u32)sh, now);
@@ -97,7 +91,6 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
     if(d >= 0){
         desk_select(d);
         add(m, &k, "Open", A_OPEN, 0);
-        pin_items(m, &k, d);
         cm_open(x, y, m, k, d, (u32)sw, (u32)sh, now);
         return;
     }
@@ -114,23 +107,12 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
 }
 
 static void do_action(int action, int a, u64 now, int *next_vt){
-    char msg[64];
     if(action >= 100){                     /* open an app named in the action */
         launch(action / 100 - 1, now, next_vt);
         return;
     }
     switch(action){
         case A_OPEN:    launch(a, now, next_vt); break;
-        case A_PIN:
-            tb_set_pinned(a, 1);
-            ui_copy(msg, ui_apps[a]->name, sizeof msg); ui_cat(msg, " stays on the taskbar");
-            ui_notify(a, "Pinned to the taskbar", msg);
-            break;
-        case A_UNPIN:
-            tb_set_pinned(a, 0);
-            ui_copy(msg, ui_apps[a]->name, sizeof msg); ui_cat(msg, " leaves the taskbar when closed");
-            ui_notify(a, "Unpinned from the taskbar", msg);
-            break;
         case A_CLOSE:   if(win_is_open(a)) win_close_app(a); break;
         case A_MIN:     win_minimize(a); break;
         case A_MAX:     if(!win_is_max(a)) win_toggle_max(a); break;
@@ -334,7 +316,7 @@ int gui_run(void){
         desk_draw(mx, my);
         win_draw_all(now, ui_anim_on);
         isl_draw(now);
-        tb_draw(it, n, bar, hover, hov_amt, win_top_app(), start_open, sw);
+        tb_draw(it, n, bar, hover, hov_amt, win_top_app(), start_open);
         if(start_open){
             int dy = 0;
             if(ui_anim_on && now - start_opened_at < 12) dy = (255 - ui_ease((int)((now - start_opened_at) * 255 / 12))) * 24 / 255;

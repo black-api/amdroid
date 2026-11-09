@@ -175,6 +175,10 @@ u64 *syscall_dispatch(u64 *frame){
         case SYS_YIELD:
             frame[14] = 0;
             return sched_switch(frame);
+        case SYS_SLEEP:
+            proc_sleep_ticks(a1);       /* real sleep: no CPU while waiting */
+            frame[14] = 0;
+            break;
         case SYS_GETPID:
             frame[14] = (u64)pid;
             break;

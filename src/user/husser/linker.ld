@@ -1,12 +1,10 @@
 ENTRY(_start)
 SECTIONS
 {
-    . = 0x1000;
+    . = 0x40000000;
     .text : { *(.text*) }
     .rodata : { *(.rodata*) }
-    .data.rel.ro : { *(.data.rel.ro*) }
     .data : { *(.data*) }
     .bss : { *(.bss*) *(COMMON) }
-    .dynamic : { *(.dynamic) }
-    .rela.dyn : { *(.rela.dyn) }
+    __husser_end = .;
 }

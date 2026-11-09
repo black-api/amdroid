@@ -19,6 +19,7 @@
 #define SYS_SIGACTION 12  /* sigaction(sig, handler): 0 default, 1 ignore, else a function */
 #define SYS_KILL 13       /* kill(pid, sig) */
 #define SYS_SIGRETURN 14  /* used by the signal trampoline, not by programs */
+#define SYS_SLEEP 15      /* sleep(ticks): block for N timer ticks (100 Hz) */
 
 void syscall_init(void);
 u64 *syscall_dispatch(u64 *frame);   /* returns the frame to resume */

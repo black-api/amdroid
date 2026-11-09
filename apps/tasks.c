@@ -65,8 +65,7 @@ static u64 last_sample = 0, last_tsc = 0, last_idle = 0;
 static int sampled = 0;
 static u16 cpu_hist[HIST];                    /* tenths of a percent */
 static u64 mem_hist_b[HIST];                  /* bytes in use */
-static u16 mem_hist[HIST];                    /* tenths of the graph's scale (mem_scale) */
-static u64 mem_scale = 0;
+static u16 mem_hist[HIST];                    /* tenths of the real physical memory */
 static int nhist = 0;
 static u32 cpu_now = 0;
 static u64 mem_used = 0, mem_total = 0;
@@ -200,13 +199,10 @@ static void sample(u64 now){
         cpu_hist[nhist] = (u16)cpu_now;
         mem_hist_b[nhist] = mem_used;
         nhist++;
-        /* the memory graph's top: the peak of the last minute, rounded up to 8 MB steps */
-        u64 peak = 0;
-        for(int i = 0; i < nhist; i++) if(mem_hist_b[i] > peak) peak = mem_hist_b[i];
-        u64 step = 8ull * 1024 * 1024;
-        mem_scale = (peak * 5 / 4 + step - 1) / step * step;
-        if(mem_scale > mem_total) mem_scale = mem_total;
-        for(int i = 0; i < nhist; i++) mem_hist[i] = (u16)(mem_scale ? mem_hist_b[i] * 1000 / mem_scale : 0);
+        /* the memory graph uses the machine's real memory as a fixed scale, so
+           the line never jumps when usage grows (an auto-zoom rescaling the
+           past looked like a glitch) */
+        for(int i = 0; i < nhist; i++) mem_hist[i] = (u16)(mem_total ? mem_hist_b[i] * 1000 / mem_total : 0);
     }
     last_tsc = tsc;
     last_idle = idle;
@@ -265,28 +261,49 @@ static int sel_index(void){
 
 #define GRAPH_H   132
 #define TABLE_ROW 40
+static int narrow_layout(rect_t b){ return b.w < 560; }
 static rect_t graph_rect(rect_t b, int which){
     u32 w = (b.w - 16) / 2;
     return (rect_t){ b.x + (u32)which * (w + 16), b.y + 28, w, GRAPH_H };
 }
 static u32 toolbar_y(rect_t b){ return b.y + 28 + GRAPH_H + 16; }
-static rect_t new_btn(rect_t b){ return (rect_t){ b.x + b.w - 380, toolbar_y(b), 180, 40 }; }
-static rect_t end_btn(rect_t b){ return (rect_t){ b.x + b.w - 188, toolbar_y(b), 188, 40 }; }
+static rect_t new_btn(rect_t b){
+    if(narrow_layout(b)) return (rect_t){ b.x + b.w - 232, toolbar_y(b), 112, 40 };
+    return (rect_t){ b.x + b.w - 380, toolbar_y(b), 180, 40 };
+}
+static rect_t end_btn(rect_t b){
+    if(narrow_layout(b)) return (rect_t){ b.x + b.w - 114, toolbar_y(b), 114, 40 };
+    return (rect_t){ b.x + b.w - 188, toolbar_y(b), 188, 40 };
+}
 static u32 head_y(rect_t b){ return toolbar_y(b) + 56; }
 static int table_rows(rect_t b){
     int h = (int)(b.y + b.h) - (int)head_y(b) - 36 - 40;
     return h > 0 ? h / TABLE_ROW : 0;
 }
-/* column x positions: pid, name, rss, group rss, cpu, group cpu, end */
+/* column x positions. Wide: pid, name, rss, group rss, cpu, group cpu, end.
+ * Narrow: pid, name, rss, cpu - the group columns are dropped so no text can
+ * run into its neighbour. */
 static void cols(rect_t b, u32 *x){
     u32 right = b.x + b.w;
-    x[6] = right;
-    x[5] = right - 170;
-    x[4] = x[5] - 110;
-    x[3] = x[4] - 170;
-    x[2] = x[3] - 140;
-    x[0] = b.x;
-    x[1] = b.x + 90;
+    if(!narrow_layout(b)){
+        /* pid 70, name (at least 140), rss 120, group rss 140, cpu 100, group cpu 110 */
+        x[6] = right;
+        x[5] = right - 110;
+        x[4] = x[5] - 100;
+        x[3] = x[4] - 140;
+        x[2] = x[3] - 120;
+        x[1] = b.x + 70;
+        x[0] = b.x;
+    } else {
+        /* pid 58 (room for the sort arrow) | name | rss 76 | cpu 60 */
+        x[0] = b.x;
+        x[1] = b.x + 58;
+        x[2] = right - 136;
+        x[3] = right - 60;
+        x[4] = right;
+        x[5] = right;
+        x[6] = right;
+    }
 }
 
 /* ---- drawing ---- */
@@ -307,6 +324,10 @@ static void fmt_pct(char *out, u32 tenths){
     out[0] = 0;
     ui_num(tenths / 10, n); ui_cat(out, n); ui_cat(out, ".");
     ui_num(tenths % 10, n); ui_cat(out, n); ui_cat(out, "%");
+}
+static void fmt_mb_num(char *out, u64 v){      /* "29.6" for a "29.6 MB" value */
+    fmt_bytes(out, v);
+    for(char *q = out; *q; q++) if(*q == ' '){ *q = 0; break; }
 }
 
 /* A filled history graph with dotted grid lines, newest on the right. */
@@ -367,42 +388,52 @@ static void t_draw(rect_t b, int focused){
     make_order();
 
     /* graphs */
+    int nar = narrow_layout(b);
     char t[64], v[24];
     rect_t gc = graph_rect(b, 0), gm = graph_rect(b, 1);
     ui_copy(t, "CPU  ", sizeof t); fmt_pct(v, cpu_now); ui_cat(t, v);
-    ui_text(gc.x, b.y, t, C_TEXT, UI_SCALE);
-    ui_copy(t, "Memory  ", sizeof t); fmt_bytes(v, mem_used); ui_cat(t, v); ui_cat(t, " / ");
-    fmt_bytes(v, mem_total); ui_cat(t, v);
-    ui_text(gm.x, b.y, t, C_TEXT, UI_SCALE);
+    ui_text(gc.x, b.y, t, C_TEXT, 1);
+    if(nar){
+        /* the full "29.6 MB / 256.0 MB" does not fit half of a narrow window */
+        ui_copy(t, "MEM ", sizeof t);
+        fmt_mb_num(v, mem_used); ui_cat(t, v); ui_cat(t, "/");
+        fmt_mb_num(v, mem_total); ui_cat(t, v); ui_cat(t, " MB");
+    } else {
+        ui_copy(t, "Memory  ", sizeof t); fmt_bytes(v, mem_used); ui_cat(t, v); ui_cat(t, " / ");
+        fmt_bytes(v, mem_total); ui_cat(t, v);
+    }
+    ui_text(gm.x, b.y, t, C_TEXT, 1);
     graph(gc, cpu_hist, nhist, G_FILL, G_LINE);
     graph(gm, mem_hist, nhist, M_FILL, M_LINE);
     ui_text(gc.x + gc.w - ui_text_w("60 s", 1) - 6, gc.y + gc.h + 2, "60 s", C_DIM, 1);
-    if(mem_scale){
-        char sc[32] = "top ";
-        fmt_bytes(v, mem_scale); ui_cat(sc, v);
-        ui_text(gm.x + gm.w - ui_text_w(sc, 1) - 6, gm.y + gm.h + 2, sc, C_DIM, 1);
-    }
 
     /* toolbar */
     char cnt[40] = "", n[12];
     ui_num((u32)nrows, n); ui_cat(cnt, n); ui_cat(cnt, nrows == 1 ? " task" : " tasks");
-    ui_text(b.x, toolbar_y(b) + 4, cnt, C_MUTED, UI_SCALE);
+    u32 bs = nar ? 1 : UI_SCALE;
+    u32 bt = toolbar_y(b) + (nar ? 12 : 4);
+    ui_text(b.x, bt, cnt, C_MUTED, bs);
     rect_t nb = new_btn(b), eb = end_btn(b);
     ui_rrect(nb.x, nb.y, nb.w, nb.h, 10, picking ? ui_accent() : C_CARD_HI);
-    ui_text(nb.x + (nb.w - ui_text_w("New task", UI_SCALE)) / 2, nb.y + 4, "New task", picking ? C_BAR : C_TEXT, UI_SCALE);
+    ui_text(nb.x + (nb.w - ui_text_w("New task", bs)) / 2, bt, "New task", picking ? C_BAR : C_TEXT, bs);
     ui_rrect(eb.x, eb.y, eb.w, eb.h, 10, 0x5A2A28);
-    ui_text(eb.x + (eb.w - ui_text_w("End task", UI_SCALE)) / 2, eb.y + 4, "End task", 0xFFB4AB, UI_SCALE);
+    ui_text(eb.x + (eb.w - ui_text_w("End task", bs)) / 2, bt, "End task", 0xFFB4AB, bs);
 
     /* table header, with the sort arrow */
     u32 cx[7];
     cols(b, cx);
     u32 hy = head_y(b);
-    static const char *hd[6] = { "PID", "NAME", "RSS", "GROUP RSS", "CPU", "GROUP CPU" };
+    static const char *hd6[6] = { "PID", "NAME", "RSS", "GROUP RSS", "CPU", "GROUP CPU" };
+    static const char *hd4[4] = { "PID", "NAME", "RSS", "CPU" };
+    static const int map4[4] = { 0, 1, 2, 4 };
+    int ncol = nar ? 4 : 6;
+    const char **hd = nar ? hd4 : hd6;
     ui_fill((rect_t){ b.x, hy, b.w, 32 }, C_CARD);
-    for(int c = 0; c < 6; c++){
-        u32 tx = c < 2 ? cx[c] + 12 : cx[c + 1] - 14 - ui_text_w(hd[c], 1) - (sort_col == c ? 16 : 0);
-        ui_text(tx, hy + 8, hd[c], sort_col == c ? C_TEXT : C_MUTED, 1);
-        if(sort_col == c){
+    for(int c = 0; c < ncol; c++){
+        int sc = nar ? map4[c] : c;
+        u32 tx = c < 2 ? cx[c] + 12 : cx[c + 1] - 14 - ui_text_w(hd[c], 1) - (sort_col == sc ? 16 : 0);
+        ui_text(tx, hy + 8, hd[c], sort_col == sc ? C_TEXT : C_MUTED, 1);
+        if(sort_col == sc){
             u32 ax = tx + ui_text_w(hd[c], 1) + 6, ay = hy + 11;
             for(u32 k = 0; k < 5; k++){
                 u32 w = sort_desc ? 9 - 2 * k : 1 + 2 * k;
@@ -434,37 +465,46 @@ static void t_draw(rect_t b, int focused){
         if(mark) bg = ui_lerp(bg, mark, 60);
         ui_rrect(rr.x, rr.y, rr.w, rr.h, 8, bg);
         if(k == si && !ghost) ui_fill((rect_t){ rr.x, rr.y + 6, 4, rr.h - 12 }, ui_accent());
-        u32 ty = y + (TABLE_ROW - 4 - UI_CH) / 2;
+        u32 ts = nar ? 1 : UI_SCALE;   /* scale 1 keeps the numbers inside narrow columns */
+        u32 pad = nar ? 8 : 14;
+        u32 ty = y + (TABLE_ROW - 4 - (ts == 1 ? 16 : UI_CH)) / 2;
         u32 tc = ghost ? COL_END : C_TEXT;
         /* pid: apps run inside the kernel, so they show its pid */
         char pid[12] = "";
         ui_num((u32)(r->kind == K_PROC ? r->id : 0), pid);
-        ui_text(cx[0] + 12, ty, pid, C_MUTED, UI_SCALE);
+        ui_text(cx[0] + 12, ty, pid, C_MUTED, ts);
         /* name, indented under its parent, with a dot for its state */
         u32 nx = cx[1] + 12 + (r->parent >= 0 ? 24 : 0);
         u32 dc = ghost ? COL_END : ui_streq(r->state, "zombie") ? COL_END :
                  ui_streq(r->state, "blocked") ? C_DIM : ui_streq(r->state, "app") ? ui_accent() : COL_START;
-        dot(nx, ty + 11, 10, dc);
+        dot(nx, ty + (ts == 1 ? 5 : 11), ts == 1 ? 6 : 10, dc);
         char name[20];
-        u32 room = (cx[2] - nx - 30) / UI_CW;
+        u32 room = (cx[2] - nx - (nar ? 8 : 30)) / (ts == 1 ? 8 : UI_CW);
         ui_copy(name, r->name, room + 1 < sizeof name ? room + 1 : sizeof name);
-        ui_text(nx + 18, ty, name, tc, UI_SCALE);
+        ui_text(nx + 18, ty, name, tc, ts);
         /* numbers, right-aligned */
         char s[24];
-        fmt_bytes(s, r->rss);   ui_text(cx[3] - 14 - ui_text_w(s, UI_SCALE), ty, s, tc, UI_SCALE);
-        fmt_bytes(s, r->grss);  ui_text(cx[4] - 14 - ui_text_w(s, UI_SCALE), ty, s, ghost ? tc : C_MUTED, UI_SCALE);
-        fmt_pct(s, r->cpu);     ui_text(cx[5] - 14 - ui_text_w(s, UI_SCALE), ty, s, tc, UI_SCALE);
-        fmt_pct(s, r->gcpu);    ui_text(cx[6] - 14 - ui_text_w(s, UI_SCALE), ty, s, ghost ? tc : C_MUTED, UI_SCALE);
+        if(nar){
+            fmt_bytes(s, r->rss);   ui_text(cx[3] - pad - ui_text_w(s, ts), ty, s, tc, ts);
+            fmt_pct(s, r->cpu);     ui_text(cx[4] - pad - ui_text_w(s, ts), ty, s, tc, ts);
+        } else {
+            fmt_bytes(s, r->rss);   ui_text(cx[3] - 14 - ui_text_w(s, ts), ty, s, tc, ts);
+            fmt_bytes(s, r->grss);  ui_text(cx[4] - 14 - ui_text_w(s, ts), ty, s, ghost ? tc : C_MUTED, ts);
+            fmt_pct(s, r->cpu);     ui_text(cx[5] - 14 - ui_text_w(s, ts), ty, s, tc, ts);
+            fmt_pct(s, r->gcpu);    ui_text(cx[6] - 14 - ui_text_w(s, ts), ty, s, ghost ? tc : C_MUTED, ts);
+        }
     }
 
     /* legend */
     u32 ly = b.y + b.h - 26, lx = b.x;
-    static const char *ln[3] = { "Starting task", "Changing task", "Terminating task" };
+    static const char *ln6[3] = { "Starting task", "Changing task", "Terminating task" };
+    static const char *ln4[3] = { "Starting", "Changing", "Ending" };
     static const u32 lc[3] = { COL_START, COL_CHANGE, COL_END };
+    const char **ln = nar ? ln4 : ln6;
     for(int i = 0; i < 3; i++){
         dot(lx, ly + 2, 14, lc[i]);
         ui_text(lx + 22, ly, ln[i], C_MUTED, 1);
-        lx += 22 + ui_text_w(ln[i], 1) + 28;
+        lx += 22 + ui_text_w(ln[i], 1) + (nar ? 16 : 28);
     }
 
     /* "New task": the programs on the disk */
@@ -566,9 +606,16 @@ static void t_click(rect_t b, int x, int y){
     cols(b, cx);
     u32 hy = head_y(b);
     if(y >= (int)hy && y < (int)hy + 32){
-        int c = 0;
-        for(int i = 0; i < 6; i++) if(x >= (int)cx[i] && x < (int)cx[i + 1 < 6 ? i + 1 : 6]) c = i;
-        if(x >= (int)cx[5]) c = 5;
+        int c;
+        if(narrow_layout(b)){
+            static const int map4[4] = { 0, 1, 2, 4 };
+            int slot = x < (int)cx[1] ? 0 : x < (int)cx[2] ? 1 : x < (int)cx[3] ? 2 : 3;
+            c = map4[slot];
+        } else {
+            c = 0;
+            for(int i = 0; i < 6; i++) if(x >= (int)cx[i] && x < (int)cx[i + 1 < 6 ? i + 1 : 6]) c = i;
+            if(x >= (int)cx[5]) c = 5;
+        }
         if(c == sort_col) sort_desc = !sort_desc;
         else { sort_col = c; sort_desc = c >= 2; }       /* numbers: biggest first */
         return;

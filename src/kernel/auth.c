@@ -309,32 +309,23 @@ const char *auth_name(void){ return current < 0 ? "nobody" : users[current].name
 /* ---------- public API ---------- */
 
 static void first_boot_setup(void){
-    console_puts("No accounts yet. Create the root account.\n");
-    char pass[64], again[64];
-    for(;;){
-        console_puts("New root password: ");
-        auth_read_secret(pass, sizeof pass);
-        console_puts("Repeat it:        ");
-        auth_read_secret(again, sizeof again);
-        if(!strcmp(pass, again) && pass[0]) break;
-        console_puts("The passwords do not match (or are empty). Try again.\n");
-    }
+    /* No persistent disk, so accounts can't survive a reboot: auto-create a
+     * passwordless root instead of prompting, and let the GUI log straight in.
+     * (Set a password later with `passwd` to require a login.) */
     int i = 0;
     for(; i < MAX_USERS; i++) if(!users[i].used) break;
     copy(users[i].name, "root", sizeof users[i].name);
     users[i].uid = 0;
-    /* a fresh salt from the timer, mixed through the hash */
     u64 t = salt_seed();
     for(int k = 0; k < 16; k++){ users[i].salt[k] = (u8)(t >> ((k % 8) * 8)); t = t * 6364136223846793005ULL + 1; }
-    derive(users[i].salt, pass, users[i].hash);
+    derive(users[i].salt, "", users[i].hash);        /* empty password */
     users[i].kdf = KDF_PBKDF2;
     users[i].used = 1;
     save_users();
-    /* the databases are root's */
     ensure_perm("USERS.DB", 0, 0600);
     ensure_perm("PERMS.DB", 0, 0600);
     save_perms();
-    console_puts("Root account created.\n");
+    console_puts("Created a passwordless root account (set one with 'passwd').\n");
 }
 
 void auth_init(void){

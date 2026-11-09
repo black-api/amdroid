@@ -6,6 +6,7 @@
 
 #define WEB_CMD_TEXT 0        /* a word, at (x, y), scale, colour */
 #define WEB_CMD_RECT 1        /* a filled box */
+#define WEB_CMD_IMAGE 2       /* an <img>, decoded; at (x, y), scaled to (w, h) */
 
 typedef struct web_cmd {
     int kind;
@@ -16,6 +17,7 @@ typedef struct web_cmd {
     const char *text;         /* text commands */
     int link;                 /* index into the link table, or -1 */
     const void *dom;          /* the element this text belongs to (for clicks) */
+    int img;                  /* WEB_CMD_IMAGE: index into the image table (web_image_pixels) */
 } web_cmd_t;
 
 /* Linked stylesheets (<link rel=stylesheet href=...>): how many, and each href as written.
@@ -31,6 +33,14 @@ int web_load(const char *html, u32 len);
 int web_layout(int width);
 /* The drawing commands of the last layout, and how many. */
 const web_cmd_t *web_cmds(int *n);
+/* Images: the browser fetches each one (resolve web_image(i) against the page URL),
+   hands the bytes to web_add_image, and lays the page out again (laid_width = -1). */
+int web_image_count(void);
+const char *web_image(int i);
+int web_image_state(int i);         /* 0 pending, 1 ready, 2 failed */
+int web_add_image(int idx, const char *data, u32 len);
+int web_add_image_data_url(int idx, const char *url);   /* data:[mediatype][;base64],... */
+const u32 *web_image_pixels(int i, u32 *w, u32 *h);
 /* The page title (from <title>), or "". */
 const char *web_title(void);
 /* The href of a link (as written in the page; relative links are not resolved), or NULL. */

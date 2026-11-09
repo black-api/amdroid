@@ -655,7 +655,16 @@ static void apply_one(wstyle_t *st, int parent_size, const char *prop, u32 pn, c
         if(parse_len(v, vl, st->size, &px)) st->hide_text = px < -500;
     } else if(strcmp(p, "border") == 0 || strcmp(p, "border-width") == 0 || strcmp(p, "border-color") == 0 ||
               strcmp(p, "border-top") == 0 || strcmp(p, "border-bottom") == 0 || strcmp(p, "border-left") == 0 ||
-              strcmp(p, "border-right") == 0 || strcmp(p, "border-style") == 0){
+              strcmp(p, "border-right") == 0 || strcmp(p, "border-style") == 0 ||
+              strcmp(p, "border-top-width") == 0 || strcmp(p, "border-right-width") == 0 ||
+              strcmp(p, "border-bottom-width") == 0 || strcmp(p, "border-left-width") == 0){
+        /* which sides this property sets: 0 = all four */
+        int side = 0;   /* 1 top, 2 right, 3 bottom, 4 left */
+        if(strcmp(p, "border-top") == 0 || strcmp(p, "border-top-width") == 0) side = 1;
+        else if(strcmp(p, "border-right") == 0 || strcmp(p, "border-right-width") == 0) side = 2;
+        else if(strcmp(p, "border-bottom") == 0 || strcmp(p, "border-bottom-width") == 0) side = 3;
+        else if(strcmp(p, "border-left") == 0 || strcmp(p, "border-left-width") == 0) side = 4;
+        int *dst[4] = { &st->bt, &st->br, &st->bb, &st->bl };
         /* the parts of a border value: a width, a colour, or a style word */
         u32 i = 0;
         while(i < vl){
@@ -666,13 +675,21 @@ static void apply_one(wstyle_t *st, int parent_size, const char *prop, u32 pn, c
             int px; u32 c;
             char tk[24]; u32 tl = i - b < 23 ? i - b : 23;
             memcpy(tk, v + b, tl); tk[tl] = 0;
-            if(strcmp(tk, "none") == 0 || strcmp(tk, "hidden") == 0){ st->border = 0; }
-            else if(strcmp(tk, "solid") == 0 || strcmp(tk, "dashed") == 0 || strcmp(tk, "dotted") == 0){
-                if(st->border == 0) st->border = 1;
+            if(strcmp(tk, "none") == 0 || strcmp(tk, "hidden") == 0){
+                if(side) *dst[side - 1] = 0; else st->bt = st->br = st->bb = st->bl = 0;
             }
-            else if(parse_len(v + b, i - b, st->size, &px)) st->border = px;
+            else if(strcmp(tk, "solid") == 0 || strcmp(tk, "dashed") == 0 || strcmp(tk, "dotted") == 0){
+                if(side){ if(*dst[side - 1] == 0) *dst[side - 1] = 1; }
+                else for(int k = 0; k < 4; k++) if(dst[k][0] == 0) *dst[k] = 1;
+            }
+            else if(parse_len(v + b, i - b, st->size, &px)){
+                if(side) *dst[side - 1] = px; else st->bt = st->br = st->bb = st->bl = px;
+            }
             else if(parse_color(v + b, i - b, &c)) st->border_color = c;
         }
+        st->border = st->bt > st->br ? st->bt : st->br;
+        if(st->bb > st->border) st->border = st->bb;
+        if(st->bl > st->border) st->border = st->bl;
     } else if(strcmp(p, "gap") == 0){
         int px;
         if(parse_len(v, vl, st->size, &px)) st->gap = px;
@@ -747,7 +764,8 @@ static void defaults(wnode_t *n){
        strcmp(t, "article") == 0 || strcmp(t, "main") == 0 || strcmp(t, "header") == 0 || strcmp(t, "footer") == 0 ||
        strcmp(t, "nav") == 0 || strcmp(t, "aside") == 0 || strcmp(t, "form") == 0 || strcmp(t, "table") == 0 ||
        strcmp(t, "center") == 0 || strcmp(t, "address") == 0 || strcmp(t, "figure") == 0 || strcmp(t, "#root") == 0 ||
-       strcmp(t, "tr") == 0 || strcmp(t, "dl") == 0){
+       strcmp(t, "tr") == 0 || strcmp(t, "dl") == 0 || strcmp(t, "td") == 0 || strcmp(t, "th") == 0 ||
+       strcmp(t, "thead") == 0 || strcmp(t, "tbody") == 0 || strcmp(t, "tfoot") == 0 || strcmp(t, "caption") == 0){
         st->display = W_BLOCK;
         if(strcmp(t, "center") == 0) st->align = 1;
         return;
@@ -825,7 +843,7 @@ void css_apply(wnode_t *n, wnode_t *parent){
         memset(st->p, 0, sizeof st->p);
         st->underline = 0;
         st->display = W_INLINE;
-        st->width = 0; st->height = 0; st->border = 0; st->gap = 0;
+        st->width = 0; st->height = 0; st->border = 0; st->bt = st->br = st->bb = st->bl = 0; st->gap = 0;
         st->width_pct = st->width_vw = 0;
         st->max_w = st->max_pct = st->max_vw = 0;
         st->auto_lr = 0; st->border_box = 0;

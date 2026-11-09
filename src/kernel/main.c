@@ -80,11 +80,18 @@ void kernel_main(u32 magic, u32 mbi){
     if(fat32_init()==0) console_puts("[fat32] mounted\n");
     else console_puts("[fat32] no disk\n");
 
-    /* framebuffer: on QEMU's VGA, ask for a bigger screen than GRUB chose */
+    /* framebuffer: on QEMU's VGA, set the screen size (FB_W x FB_H, from the
+     * build's GFXMODE; defaults to 1920x1080). */
+#ifndef FB_W
+#define FB_W 1920
+#endif
+#ifndef FB_H
+#define FB_H 1080
+#endif
     {
         u64 nb = 0; u32 np = 0;
-        if(fb_addr && fb_bochs_set_mode(1920, 1080, &nb, &np)){
-            fb_addr = (void*)nb; fb_pitch = np; fb_w = 1920; fb_h = 1080;
+        if(fb_addr && fb_bochs_set_mode(FB_W, FB_H, &nb, &np)){
+            fb_addr = (void*)nb; fb_pitch = np; fb_w = FB_W; fb_h = FB_H;
         }
     }
     /* framebuffer */
