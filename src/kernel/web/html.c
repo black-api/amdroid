@@ -243,18 +243,13 @@ static void add_title(const char *s, u32 len){
     web_title_buf[t] = 0;
 }
 
-int web_load(const char *html, u32 len){
-    web_free();
-    web_nodes_reset();
-    web_root = web_new_node();
-    if(!web_root) return -1;
-    web_root->text = 0;
-    strcpy(web_root->tag, "#root");
-    web_root->st.display = W_BLOCK;
-
+/* The HTML tokenizer and tree builder. Appends the parsed nodes under root.
+ * When fragment is set (innerHTML), <title>/<style>/<script>/<link> are not
+ * collected or executed — only element and text nodes are built. */
+static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
     wnode_t *stack[W_MAX_DEPTH];
     int sp = 0;
-    stack[sp++] = web_root;
+    stack[sp++] = root;
 
     u32 i = 0;
     while(i < len){
@@ -295,7 +290,7 @@ int web_load(const char *html, u32 len){
         int self_close = 0, closing = 0;
         i = read_tag(html, len, i + 1, n, &self_close, &closing);
 
-        if(!closing && name_eq(n->tag, "link") && n->css_link == 1 && n->href && nsheets < SHEETS_MAX){
+        if(!fragment && !closing && name_eq(n->tag, "link") && n->css_link == 1 && n->href && nsheets < SHEETS_MAX){
             u32 hl = (u32)strlen(n->href);
             char *h = kmalloc(hl + 1);
             if(h){ memcpy(h, n->href, hl + 1); sheet_href[nsheets++] = h; }
@@ -314,6 +309,7 @@ int web_load(const char *html, u32 len){
 
         if(name_eq(n->tag, "title") || name_eq(n->tag, "style") || name_eq(n->tag, "script")){
             u32 end = find_end_tag(html, len, i, n->tag);
+            if(fragment){ i = end; while(i < len && html[i] != '>') i++; i++; continue; }  /* skip raw content */
             if(name_eq(n->tag, "title")){
                 if(!web_title_buf[0]) add_title(html + i, end - i);    /* the first one (an <svg> can have its own) */
             } else if(name_eq(n->tag, "style")){
@@ -354,8 +350,26 @@ int web_load(const char *html, u32 len){
             if(!is_void(n->tag) && !self_close) stack[sp++] = n;
         }
     }
+}
+
+int web_load(const char *html, u32 len){
+    web_free();
+    web_nodes_reset();
+    web_root = web_new_node();
+    if(!web_root) return -1;
+    web_root->text = 0;
+    strcpy(web_root->tag, "#root");
+    web_root->st.display = W_BLOCK;
+
+    parse_into(html, len, web_root, 0);
     dom_run_scripts();
     return 0;
+}
+
+/* Parses an HTML fragment and appends the resulting nodes under parent
+ * (for element.innerHTML = "<...>"). Scripts and stylesheets are not run. */
+void web_parse_fragment(const char *html, u32 len, wnode_t *parent){
+    if(parent) parse_into(html, len, parent, 1);
 }
 
 void web_free(void){

@@ -70,6 +70,8 @@ wnode_t *web_new_node(void);
 /* Generic attribute store for names without a dedicated field. */
 void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen);
 const char *wnode_attr_get(wnode_t *n, const char *name);
+/* Parses an HTML fragment, appending nodes under parent (element.innerHTML). */
+void web_parse_fragment(const char *html, u32 len, wnode_t *parent);
 
 /* jsdom.c: the script side of the page */
 void dom_reset(void);

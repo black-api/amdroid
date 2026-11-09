@@ -535,21 +535,9 @@ static int elem_set(js_obj_t *o, const char *name, js_val_t v){
         return 1;
     }
     if(strcmp(name, "innerHTML") == 0){
-        /* no HTML fragments yet: the text of the markup, without its tags */
         const char *src = js_to_str(v);
-        u32 sl = (u32)strlen(src), k = 0;
-        char *t = kmalloc(sl + 1);
-        if(!t) return 1;
-        int in_tag = 0;
-        for(u32 i = 0; i < sl; i++){
-            if(src[i] == '<') in_tag = 1;
-            else if(src[i] == '>' && in_tag) in_tag = 0;
-            else if(!in_tag) t[k++] = src[i];
-        }
-        t[k] = 0;
         clear_children(n);
-        if(k) add_text_child(n, t);
-        kfree(t);
+        web_parse_fragment(src, (u32)strlen(src), n);
         dirty = 1;
         return 1;
     }
