@@ -105,7 +105,7 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
     int files = find_app(UI_ICO_FILES), bro = find_app(UI_ICO_BROWSER), set = find_app(UI_ICO_SETTINGS);
     add(m, &k, "Open Terminal", A_TERM, 0);
     if(files >= 0){ add(m, &k, "Open Files", A_APP, 0); m[k - 1].action = A_APP + 100 * (files + 1); }
-    if(bro >= 0){ add(m, &k, "Open BRO weser", A_APP, 0); m[k - 1].action = A_APP + 100 * (bro + 1); }
+    if(bro >= 0){ add(m, &k, "Open Browser", A_APP, 0); m[k - 1].action = A_APP + 100 * (bro + 1); }
     add(m, &k, "Next wallpaper", A_WALL, 1);
     if(set >= 0){ add(m, &k, "Settings", A_APP, 0); m[k - 1].action = A_APP + 100 * (set + 1); }
     add(m, &k, "Sort icons", A_SORT, 1);

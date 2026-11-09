@@ -198,23 +198,35 @@ static void esc_cat(char *d, const char *s, u32 max){
 
 static const char start_page[] =
     "<html><head><title>New tab</title><style>"
-    "body{margin:24px}h1{color:#4cc2ff}p{color:#9aa7b0}"
-    "a{color:#4cc2ff}li{margin:6px 0}"
+    "body{margin:0;color:#c9d4dc}"
+    ".hero{background:rgb(23,42,56);padding:22px 24px}"
+    "h1{color:#4cc2ff;margin:0}"
+    ".sub{color:#9aa7b0;margin:6px 0 0 0}"
+    ".wrap{padding:8px 24px 24px 24px}"
+    "ul{margin:4px 0}li{margin:10px 0}"
+    "a{color:#4cc2ff}"
+    ".http a{color:rgb(61,220,151)}"
+    ".secure a{color:#7c6cff}"
+    ".news a{color:#ffb547}"
+    ".ref a{color:#ff6b9d}"
+    ".tag{color:#63717b}"
+    ".keys{background:rgb(21,32,41);padding:14px 24px;color:#9aa7b0}"
+    ".keys b{color:#ff8c42}"
     "</style></head><body>"
-    "<h1>BRO weser</h1>"
-    "<p>Type an address in the bar above and press Enter, or open one of these:</p>"
-    "<ul>"
-    "<li><a href=\"http://example.com/\">example.com</a> - a small test page (HTTP)</li>"
-    "<li><a href=\"https://example.com/\">example.com over HTTPS</a> - through the host proxy</li>"
-    "<li><a href=\"http://info.cern.ch/hypertext/WWW/TheProject.html\">The first website</a> - CERN, 1991</li>"
-    "<li><a href=\"https://text.npr.org/\">text.npr.org</a> - news in plain HTML</li>"
-    "<li><a href=\"https://lite.cnn.com/\">lite.cnn.com</a> - CNN, text only</li>"
-    "<li><a href=\"https://news.ycombinator.com/\">Hacker News</a></li>"
-    "<li><a href=\"https://lobste.rs/\">Lobsters</a> - with its stylesheets</li>"
-    "<li><a href=\"https://en.wikipedia.org/wiki/Linux\">Wikipedia: Linux</a> - a 1 MB page</li>"
-    "</ul>"
-    "<p>Keys: type a link number and press Enter to follow it; Backspace goes back; "
-    "arrows and Page Up/Down scroll; Esc stops a page that is loading.</p>"
+    "<div class=\"hero\"><h1>Browser</h1>"
+    "<p class=\"sub\">Type an address in the bar above and press Enter, or open one of these:</p></div>"
+    "<div class=\"wrap\"><ul>"
+    "<li class=\"http\"><a href=\"http://example.com/\">example.com</a> <span class=\"tag\">- a small test page (HTTP)</span></li>"
+    "<li class=\"secure\"><a href=\"https://example.com/\">example.com over HTTPS</a> <span class=\"tag\">- through the host proxy</span></li>"
+    "<li class=\"ref\"><a href=\"http://info.cern.ch/hypertext/WWW/TheProject.html\">The first website</a> <span class=\"tag\">- CERN, 1991</span></li>"
+    "<li class=\"news\"><a href=\"https://text.npr.org/\">text.npr.org</a> <span class=\"tag\">- news in plain HTML</span></li>"
+    "<li class=\"news\"><a href=\"https://lite.cnn.com/\">lite.cnn.com</a> <span class=\"tag\">- CNN, text only</span></li>"
+    "<li class=\"news\"><a href=\"https://news.ycombinator.com/\">Hacker News</a></li>"
+    "<li class=\"secure\"><a href=\"https://lobste.rs/\">Lobsters</a> <span class=\"tag\">- with its stylesheets</span></li>"
+    "<li class=\"ref\"><a href=\"https://en.wikipedia.org/wiki/Linux\">Wikipedia: Linux</a> <span class=\"tag\">- a 1 MB page</span></li>"
+    "</ul></div>"
+    "<div class=\"keys\"><b>Keys:</b> type a link number and press Enter to follow it; Backspace goes back; "
+    "arrows and Page Up/Down scroll; Esc stops a page that is loading.</div>"
     "</body></html>";
 
 /* ---- loading ---- */
@@ -426,7 +438,7 @@ static void ld_finish(void){
         ui_copy(ld_url, next, URL_MAX);
         kfree(ld_buf); ld_buf = NULL;
         url_t u;
-        if(parse_url(next, &u) != 0){ fail("The site redirected to an address BRO weser cannot open."); return; }
+        if(parse_url(next, &u) != 0){ fail("The site redirected to an address Browser cannot open."); return; }
         ui_copy(ld_host, u.host, sizeof ld_host);
         ld = LD_START;
         ui_copy(status, "Redirected to ", sizeof status);
@@ -467,7 +479,7 @@ static void ld_finish(void){
     if(!html && !text){
         char m[128] = "This is a file of type ";
         cat_n(m, ctype, sizeof m);
-        cat_n(m, ", which BRO weser cannot show.", sizeof m);
+        cat_n(m, ", which Browser cannot show.", sizeof m);
         fail(m);
         return;
     }
