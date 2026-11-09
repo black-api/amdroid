@@ -429,6 +429,29 @@ static int parse_color(const char *v, u32 n, u32 *out){
         if(digits == 6){ *out = rgb; return 1; }
         return 0;
     }
+    if(n >= 4 && c_lower(v[0]) == 'r' && c_lower(v[1]) == 'g' && c_lower(v[2]) == 'b'){
+        u32 i = 3;                          /* rgb(...) or rgba(...) */
+        if(i < n && c_lower(v[i]) == 'a') i++;
+        while(i < n && v[i] != '(') i++;
+        if(i >= n) return 0;
+        i++;
+        int comp[4], nc = 0;
+        while(i < n && nc < 4){
+            while(i < n && (v[i] == ' ' || v[i] == ',')) i++;
+            if(i >= n || v[i] == ')') break;
+            int val = 0, any = 0;
+            while(i < n && v[i] >= '0' && v[i] <= '9'){ val = val * 10 + (v[i] - '0'); i++; any = 1; }
+            if(i < n && v[i] == '.'){ i++; while(i < n && v[i] >= '0' && v[i] <= '9') i++; }  /* ignore alpha fraction */
+            if(i < n && v[i] == '%'){ val = val * 255 / 100; i++; }
+            if(any) comp[nc++] = val; else i++;
+        }
+        if(nc >= 3){
+            for(int j = 0; j < 3; j++){ if(comp[j] < 0) comp[j] = 0; if(comp[j] > 255) comp[j] = 255; }
+            *out = ((u32)comp[0] << 16) | ((u32)comp[1] << 8) | (u32)comp[2];
+            return 1;
+        }
+        return 0;
+    }
     for(u32 i = 0; i < sizeof colors / sizeof colors[0]; i++){
         u32 k = 0;
         while(k < n && colors[i].name[k] && c_lower(v[k]) == colors[i].name[k]) k++;

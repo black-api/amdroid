@@ -118,6 +118,24 @@ static char *dup_attr(const char *s, u32 n){
     return d;
 }
 
+void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen){
+    for(wattr_t *a = n->attrs; a; a = a->next)
+        if(name_eq(a->name, name)){ char *nv = dup_attr(val, vlen); if(nv) a->val = nv; return; }
+    wattr_t *a = kmalloc(sizeof(wattr_t));
+    if(!a) return;
+    u32 nl = (u32)strlen(name);
+    a->name = kmalloc(nl + 1);
+    if(a->name) memcpy(a->name, name, nl + 1);
+    a->val = dup_attr(val, vlen);
+    a->next = n->attrs;
+    n->attrs = a;
+}
+const char *wnode_attr_get(wnode_t *n, const char *name){
+    for(wattr_t *a = n->attrs; a; a = a->next)
+        if(name_eq(a->name, name)) return a->val;
+    return NULL;
+}
+
 static void set_attr(wnode_t *n, const char *name, const char *val, u32 vlen){
     if(name_eq(name, "id")) n->id = dup_attr(val, vlen);
     else if(name_eq(name, "class")) n->cls = dup_attr(val, vlen);
@@ -160,6 +178,7 @@ static void set_attr(wnode_t *n, const char *name, const char *val, u32 vlen){
         }
         n->skip = !ok;
     }
+    else wnode_attr_set(n, name, val, vlen);     /* data-*, type, name, src, ... */
 }
 
 /* Reads a tag starting after '<' at i. Fills name and attributes; returns the index after '>'. */

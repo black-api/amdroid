@@ -144,10 +144,12 @@ static js_val_t get_attr(js_val_t self, int argc, js_val_t *argv, void *ctx){
     const char *name = js_to_str(argv[0]);
     const char *v = NULL;
     if(strcmp(name, "id") == 0) v = n->id;
-    else if(strcmp(name, "class") == 0) v = n->cls;
+    else if(strcmp(name, "class") == 0 || strcmp(name, "className") == 0) v = n->cls;
     else if(strcmp(name, "href") == 0) v = n->href;
-    else if(strcmp(name, "alt") == 0) v = n->alt;
+    else if(strcmp(name, "alt") == 0 || strcmp(name, "placeholder") == 0) v = n->alt;
     else if(strcmp(name, "style") == 0) v = n->style;
+    else if(strcmp(name, "value") == 0) v = n->value;
+    else v = wnode_attr_get(n, name);
     return v ? js_str(v) : js_null();
 }
 
@@ -158,11 +160,25 @@ static js_val_t set_attr(js_val_t self, int argc, js_val_t *argv, void *ctx){
     const char *name = js_to_str(argv[0]);
     const char *v = js_to_str(argv[1]);
     if(strcmp(name, "id") == 0) n->id = (char *)v;
-    else if(strcmp(name, "class") == 0){ n->cls = (char *)v; dirty = 1; }
+    else if(strcmp(name, "class") == 0 || strcmp(name, "className") == 0){ n->cls = (char *)v; dirty = 1; }
     else if(strcmp(name, "href") == 0) n->href = (char *)v;
-    else if(strcmp(name, "alt") == 0) n->alt = (char *)v;
+    else if(strcmp(name, "alt") == 0 || strcmp(name, "placeholder") == 0) n->alt = (char *)v;
     else if(strcmp(name, "style") == 0){ n->style = (char *)v; dirty = 1; }
+    else if(strcmp(name, "value") == 0){ n->value = (char *)v; dirty = 1; }
+    else { wnode_attr_set(n, name, v, (u32)strlen(v)); dirty = 1; }
     return js_undef();
+}
+
+static js_val_t create_text_node(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    wnode_t *n = web_new_node();
+    if(!n) return js_null();
+    n->text = 1;
+    const char *s = argc ? js_to_str(argv[0]) : "";
+    u32 sl = (u32)strlen(s);
+    char *t = kmalloc(sl + 1);
+    if(t){ memcpy(t, s, sl + 1); n->txt = t; n->tlen = sl; }
+    return js_objv(wrap(n));
 }
 
 static js_val_t append_child(js_val_t self, int argc, js_val_t *argv, void *ctx){
@@ -365,8 +381,37 @@ static int style_set(js_obj_t *o, const char *name, js_val_t v){
     return 1;
 }
 static int style_get(js_obj_t *o, const char *name, js_val_t *out){
-    (void)o;
     if(strcmp(name, "setProperty") == 0 || strcmp(name, "removeProperty") == 0){ *out = js_objv(methods[M_NOOP]); return 1; }
+    wnode_t *n = (wnode_t *)js_host(o);
+    if(strcmp(name, "cssText") == 0){ *out = js_str(n && n->style ? n->style : ""); return 1; }
+    char prop[48];
+    u32 k = 0;
+    for(const char *q = name; *q && k + 2 < sizeof prop; q++){      /* camelCase -> kebab-case */
+        if(*q >= 'A' && *q <= 'Z'){ prop[k++] = '-'; prop[k++] = (char)(*q + 32); }
+        else prop[k++] = *q;
+    }
+    prop[k] = 0;
+    const char *best = NULL; u32 bestlen = 0;
+    for(const char *s = n ? n->style : NULL; s && *s; ){
+        while(*s == ' ' || *s == ';') s++;
+        const char *ns = s;
+        while(*s && *s != ':' && *s != ';') s++;
+        if(*s != ':') break;
+        u32 nl = (u32)(s - ns);
+        while(nl && ns[nl-1] == ' ') nl--;
+        s++;
+        while(*s == ' ') s++;
+        const char *vs = s;
+        while(*s && *s != ';') s++;
+        u32 vl = (u32)(s - vs);
+        while(vl && vs[vl-1] == ' ') vl--;
+        if(nl == k && memcmp(ns, prop, k) == 0){ best = vs; bestlen = vl; }   /* last declaration wins */
+        if(*s == ';') s++;
+    }
+    if(best){
+        char *r = kmalloc(bestlen + 1);
+        if(r){ memcpy(r, best, bestlen); r[bestlen] = 0; *out = js_str(r); return 1; }
+    }
     *out = js_str("");
     return 1;
 }
@@ -375,6 +420,7 @@ static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
     (void)o;
     if(strcmp(name, "getElementById") == 0){ *out = js_objv(js_new_native(get_by_id, NULL)); return 1; }
     if(strcmp(name, "createElement") == 0){ *out = js_objv(js_new_native(create_element, NULL)); return 1; }
+    if(strcmp(name, "createTextNode") == 0){ *out = js_objv(js_new_native(create_text_node, NULL)); return 1; }
     if(strcmp(name, "body") == 0){
         wnode_t *b = web_root ? find_tag(web_root, "body") : NULL;
         *out = b ? js_objv(wrap(b)) : js_null();

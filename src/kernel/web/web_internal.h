@@ -31,12 +31,15 @@ typedef struct wstyle {
     int justify;              /* justify-content: 0 start, 1 centre, 2 end, 3 space-between, 4 space-around */
 } wstyle_t;
 
+typedef struct wattr { char *name, *val; struct wattr *next; } wattr_t;
+
 typedef struct wnode {
     int text;                 /* 1: text node, 0: element */
     char tag[12];
     char *txt;                /* text nodes: the raw text */
     u32 tlen;
     char *id, *cls, *href, *style, *alt, *onclick, *value;   /* alt doubles as <input placeholder> */
+    wattr_t *attrs;           /* any other attributes (data-*, type, name, ...) */
     struct wnode *parent, *first, *last, *next;
     wstyle_t st;
     void *jsobj;              /* the script object for this element, once made */
@@ -64,6 +67,9 @@ extern int web_nlinks;
 void web_nodes_reset(void);
 void web_pool_range(void **p, u32 *n);
 wnode_t *web_new_node(void);
+/* Generic attribute store for names without a dedicated field. */
+void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen);
+const char *wnode_attr_get(wnode_t *n, const char *name);
 
 /* jsdom.c: the script side of the page */
 void dom_reset(void);
