@@ -372,7 +372,7 @@ int udp_send(u32 ip, u16 dport, u16 sport, const void *data, u32 len){
 #define TF_RST 0x04
 #define TF_PSH 0x08
 #define TF_ACK 0x10
-#define RXBUF 16384
+#define RXBUF 61440              /* receive buffer, and so the largest window we offer */
 #define MAX_SOCK 8
 
 enum { TS_FREE = 0, TS_SYN_SENT, TS_ESTABLISHED, TS_CLOSED_BY_PEER, TS_LISTEN, TS_SYN_RCVD };
@@ -399,6 +399,7 @@ typedef struct {
     u32 peer_wnd;             /* the window the peer advertised */
     u32 cwnd, ssthresh;       /* congestion window and slow-start threshold, in bytes */
     int dupacks;
+    u32 adv_wnd;              /* the window we last told the peer about */
     ooo_t ooo[OOO_SLOTS];     /* segments that arrived out of order */
 } tcb_t;
 
@@ -621,7 +622,9 @@ static int tcp_seg(tcb_t *s, u32 seq, u8 flags, const u8 *data, u32 len){
     put32(seg + 4, seq); put32(seg + 8, s->rcv_nxt);
     seg[12] = 5 << 4; seg[13] = flags;
     u32 win = s->rx ? RXBUF - s->rx_len : 4096;
-    put16(seg + 14, (u16)(win > 65535 ? 65535 : win));
+    if(win > 65535) win = 65535;
+    put16(seg + 14, (u16)win);
+    s->adv_wnd = win;
     memcpy(seg + 20, data, len);
     u32 total = 20 + len;
     u16 c = checksum(seg, total, pseudo_sum(my_ip, s->ip, IPPROTO_TCP, (u16)total));
@@ -762,7 +765,16 @@ int tcp_recv(int sock, void *buf, u32 max, u32 timeout_ms){
     memcpy(buf, s->rx, n);
     memmove(s->rx, s->rx + n, s->rx_len - n);
     s->rx_len -= n;
+    /* reading opened a window the peer saw as (nearly) shut: tell it, or it waits for a timeout */
+    if(n && s->state == TS_ESTABLISHED && !s->peer_closed && s->adv_wnd < RXBUF / 4 && RXBUF - s->rx_len >= RXBUF / 2)
+        tcp_send_seg(s, TF_ACK, 0, 0);
     return (int)n;
+}
+
+/* The other side has closed and every byte it sent has been read. */
+int tcp_closed(int sock){
+    if(sock < 0 || sock >= MAX_SOCK || !socks[sock].used) return 1;
+    return socks[sock].peer_closed && socks[sock].rx_len == 0;
 }
 
 void tcp_close(int sock){

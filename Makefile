@@ -1,7 +1,7 @@
 CC = gcc
 AS = as
 LD = ld
-CFLAGS = -std=gnu11 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pie -mno-red-zone -m64 -Iinclude
+CFLAGS = -std=gnu11 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pie -mno-red-zone -m64 -Iinclude -MMD -MP
 ASFLAGS = --64
 LDFLAGS = -T linker.ld -nostdlib -z max-page-size=0x1000
 
@@ -10,7 +10,16 @@ ISO = out/amdroid.iso
 
 # Framebuffer mode requested from GRUB, as WIDTHxHEIGHTxBPP (bpp must be 32).
 # Override on the command line, e.g.: make GFXMODE=1920x1080x32
-GFXMODE ?= 1280x800x32
+GFXMODE ?= 1920x1080x32
+
+# GUI: the core in src/kernel/gui/, and every app in apps/.
+GUI_SRCS = $(wildcard src/kernel/gui/*.c) $(wildcard apps/*.c)
+
+# The web engine: HTML, CSS and layout.
+WEB_SRCS = $(wildcard src/kernel/web/*.c)
+
+# JavaScript: the interpreter (src/kernel/js).
+JS_SRCS = $(wildcard src/kernel/js/*.c)
 
 C_SRCS = \
  src/kernel/main.c \
@@ -29,7 +38,9 @@ C_SRCS = \
  src/kernel/drivers/ata.c \
  src/kernel/drivers/fb.c \
  src/kernel/drivers/mouse.c \
- src/kernel/gui.c \
+ $(GUI_SRCS) \
+ $(WEB_SRCS) \
+ $(JS_SRCS) \
  src/kernel/fs/fat32.c \
  src/kernel/syscall.c \
  src/lib/console.c \
@@ -86,6 +97,13 @@ out/user/%.elf: src/user/c/%.c src/user/c/ulib.c src/user/c/ulib.h src/user/c/li
 # The interpreter is hot code: build it optimised.
 src/kernel/fuss/%.o: CFLAGS += -O2
 
+# The GUI redraws the whole screen every frame; build its drawing code optimised too.
+src/kernel/gui/%.o: CFLAGS += -O2
+apps/%.o: CFLAGS += -O2
+src/kernel/web/%.o: CFLAGS += -O2
+src/kernel/js/%.o: CFLAGS += -O2
+src/kernel/drivers/fb.o: CFLAGS += -O2
+
 %.o: %.asm
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -99,7 +117,7 @@ $(ISO): $(KERNEL) grub.cfg
 	grub-mkrescue -o $(ISO) out/iso 2>/dev/null
 
 clean:
-	rm -f $(OBJS) $(KERNEL) $(ISO)
+	rm -f $(OBJS) $(OBJS:.o=.d) $(KERNEL) $(ISO)
 	rm -rf out/iso
 
 run: $(ISO)
@@ -109,3 +127,6 @@ run-hd: $(KERNEL)
 	qemu-system-x86_64 -kernel $(KERNEL) -serial stdio -m 256M
 
 .PHONY: all clean run run-hd userprogs
+
+# Header dependencies (written by -MMD): a changed header rebuilds the files that use it.
+-include $(OBJS:.o=.d)

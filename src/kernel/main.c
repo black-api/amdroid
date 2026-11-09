@@ -80,6 +80,13 @@ void kernel_main(u32 magic, u32 mbi){
     if(fat32_init()==0) console_puts("[fat32] mounted\n");
     else console_puts("[fat32] no disk\n");
 
+    /* framebuffer: on QEMU's VGA, ask for a bigger screen than GRUB chose */
+    {
+        u64 nb = 0; u32 np = 0;
+        if(fb_addr && fb_bochs_set_mode(1920, 1080, &nb, &np)){
+            fb_addr = (void*)nb; fb_pitch = np; fb_w = 1920; fb_h = 1080;
+        }
+    }
     /* framebuffer */
     console_printf("[fb] addr=%p pitch=%u w=%u h=%u bpp=%u\n", fb_addr, fb_pitch, fb_w, fb_h, fb_bpp);
     if(fb_addr){
@@ -117,7 +124,11 @@ void kernel_main(u32 magic, u32 mbi){
     /* accounts: first boot creates root; then someone must log in */
     fbcon_set_active(1);
     auth_init();
-    shell_login();
+    if(fb_ready()){
+        fbcon_set_active(0);
+        gui_login();                /* graphical login: no password */
+    }
+    else shell_login();
 
     /* VT manager: each UI returns the VT the user asked for (1..9) */
     int current_vt = fb_ready() ? 1 : 2;
@@ -126,6 +137,12 @@ void kernel_main(u32 magic, u32 mbi){
             console_puts("Launching GUI (Ctrl+Alt+2 for the text shell)...\n");
             fbcon_set_active(0);
             current_vt = gui_run();
+            if(current_vt == 3){                    /* sign out */
+                auth_logout();
+                fbcon_set_active(0);
+                gui_login();
+                current_vt = 1;
+            }
         } else {
             console_printf("Shell on VT%d (Ctrl+Alt+1 for GUI)\n", current_vt);
             fbcon_set_active(1);

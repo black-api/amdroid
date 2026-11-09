@@ -273,6 +273,35 @@ static int is_system_file(const char *path){
 
 void auth_logout(void){ current = -1; proc_set_uid(0, -1); }
 
+/* Signs in without a password. Only the graphical login screen calls this; the
+ * text shell still asks for one. */
+int auth_login_nopass(const char *name){
+    for(int i = 0; i < MAX_USERS; i++){
+        if(!users[i].used || !upper_eq(users[i].name, name)) continue;
+        current = i;
+        proc_set_uid(0, (int)users[i].uid);
+        return 0;
+    }
+    return -1;
+}
+
+int auth_user_count(void){
+    int n = 0;
+    for(int i = 0; i < MAX_USERS; i++) if(users[i].used) n++;
+    return n;
+}
+
+const char *auth_user_at(int i, int *uid){
+    for(int k = 0; k < MAX_USERS; k++){
+        if(!users[k].used) continue;
+        if(i-- == 0){
+            if(uid) *uid = (int)users[k].uid;
+            return users[k].name;
+        }
+    }
+    return NULL;
+}
+
 /* the current user's uid, or -1 when nobody is logged in */
 int auth_uid(void){ return current < 0 ? -1 : (int)users[current].uid; }
 const char *auth_name(void){ return current < 0 ? "nobody" : users[current].name; }

@@ -119,6 +119,24 @@ void vm_free_space(u64 cr3){
     pmm_free_page(pml4);
 }
 
+/* How many pages a process's private region holds (its pages and their page tables). */
+u64 vm_user_pages(u64 cr3){
+    u64 *pml4 = (u64*)(unsigned long)cr3;
+    u64 n = 0;
+    if(!pml4 || !(pml4[0] & PTE_P)) return 0;
+    u64 *pdpt = (u64*)(unsigned long)(pml4[0] & ~0xFFFULL);
+    if(!(pdpt[1] & PTE_P)) return 0;
+    u64 *pd = (u64*)(unsigned long)(pdpt[1] & ~0xFFFULL);
+    n++;
+    for(int i = 0; i < 512; i++){
+        if(!(pd[i] & PTE_P)) continue;
+        u64 *pt = (u64*)(unsigned long)(pd[i] & ~0xFFFULL);
+        n++;
+        for(int j = 0; j < 512; j++) if(pt[j] & PTE_P) n++;
+    }
+    return n;
+}
+
 /* Copies bytes into or out of a user address space, one page at a time. */
 int vm_copy_to_user(u64 cr3, u64 va, const void *src, u64 len){
     const u8 *s = src;

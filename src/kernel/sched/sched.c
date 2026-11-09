@@ -13,6 +13,9 @@
 #include "amdroid/net.h"
 #include "amdroid/types.h"
 #include <string.h>
+#include "amdroid/timer.h"
+
+static const char *state_name(int s);
 
 #define KSTACK_SIZE (16 * 1024)
 #define FRAME_WORDS 22      /* see isr_stubs.asm: 15 GPRs, vector, error, iret frame */
@@ -32,6 +35,9 @@ typedef struct proc {
     int uid;                    /* who the process runs as */
     u32 sig_pending;            /* bit n = signal n waiting */
     u64 sig_handler[NSIG];      /* 0 = default, 1 = ignore, else a user function */
+    int ppid;                   /* the process that started it */
+    u32 serial;                 /* tells a new process from an old one that had the same pid */
+    u64 cycles;                 /* CPU time used, in TSC cycles */
     u8 fx[512] __attribute__((aligned(16)));   /* saved SSE/x87 state */
 } proc_t;
 
@@ -44,6 +50,24 @@ static u64 loaded_cr3;
 u8 *cur_fx_ptr;
 
 static inline void yield_now(void){ __asm__ volatile("int $0x81"); }
+
+/* ---- CPU accounting: cycles go to whoever ran since the last mark; time in hlt is idle ---- */
+static u64 last_tsc = 0, idle_cycles = 0;
+static u32 next_serial = 1;
+static inline u64 rdtsc(void){ u32 lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return ((u64)hi << 32) | lo; }
+static void charge(void){
+    u64 now = rdtsc();
+    if(last_tsc) procs[cur].cycles += now - last_tsc;
+    last_tsc = now;
+}
+static void idle_hlt(void){
+    charge();
+    __asm__ volatile("sti; hlt");
+    u64 now = rdtsc();
+    idle_cycles += now - last_tsc;
+    last_tsc = now;
+}
+u64 sched_tsc(void){ return rdtsc(); }
 
 void sched_init(void){
     memset(procs, 0, sizeof procs);
@@ -77,6 +101,8 @@ int proc_create_user(const char *name, u64 entry, u64 user_sp, u64 cr3, u64 arg)
     proc_t *p = &procs[pid];
     memset(p, 0, sizeof *p);
     p->pid = pid;
+    p->ppid = cur;
+    p->serial = next_serial++;
     for(int k = 0; k < (int)sizeof p->name - 1 && name[k]; k++) p->name[k] = name[k];
     p->kstack = kmalloc(KSTACK_SIZE + 16);
     if(!p->kstack) return -1;
@@ -202,6 +228,7 @@ int proc_sigreturn(u64 *frame){
 }
 
 u64 *sched_switch(u64 *frame){
+    charge();
     proc_t *from = &procs[cur];
     from->krsp = frame;
     if(from->state == P_RUNNING) from->state = P_READY;
@@ -258,7 +285,37 @@ void proc_yield(void){ yield_now(); }
 void proc_idle(void){
     net_poll();                       /* keep the network moving while we wait */
     if(any_other_ready()){ yield_now(); return; }
-    __asm__ volatile("sti; hlt; cli");
+    idle_hlt();
+    __asm__ volatile("cli");
+}
+
+/* Waits n timer ticks, letting other processes run (the GUI uses this between frames). */
+void proc_sleep_ticks(u64 n){
+    u64 target = timer_ticks() + n;
+    while(timer_ticks() < target){
+        if(any_other_ready()) yield_now();
+        else idle_hlt();
+    }
+}
+
+/* A snapshot of the processes for the task manager. */
+int proc_info(proc_info_t *out, int max, u64 *idle){
+    charge();
+    int n = 0;
+    for(int i = 0; i < MAX_PROCS && n < max; i++){
+        proc_t *p = &procs[i];
+        if(p->state == P_FREE) continue;
+        proc_info_t *o = &out[n++];
+        o->pid = p->pid;
+        o->ppid = i == 0 ? -1 : p->ppid;
+        o->serial = i == 0 ? 0 : p->serial;
+        for(int k = 0; k < 32; k++) o->name[k] = p->name[k];
+        o->state = state_name(p->state);
+        o->cycles = p->cycles;
+        o->pages = i == 0 ? 0 : vm_user_pages(p->cr3);
+    }
+    if(idle) *idle = idle_cycles;
+    return n;
 }
 
 static const char *state_name(int s){
@@ -283,7 +340,12 @@ void proc_detach(int pid){
 /* Kills another process. Its waiter (if any) sees the exit code -9. */
 int proc_kill(int pid){
     if(pid <= 0 || pid >= MAX_PROCS || pid == cur) return -1;
-    return proc_signal(pid, SIGKILL);
+    int r = proc_signal(pid, SIGKILL);
+    /* nobody will wait for a detached process: reclaim it now rather than
+       waiting for the next context switch, which may not come while idle */
+    proc_t *p = &procs[pid];
+    if(r == 0 && p->state == P_ZOMBIE && p->detached && p->cr3 != loaded_cr3) reap(p);
+    return r;
 }
 
 int proc_wait(int pid){

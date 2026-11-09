@@ -22,6 +22,7 @@ u64  vm_read_cr3(void);
 void vm_free_space(u64 cr3);                          /* releases a process's memory */
 int  vm_copy_to_user(u64 cr3, u64 va, const void *src, u64 len);
 int  vm_copy_from_user(u64 cr3, u64 va, void *dst, u64 len);
+u64  vm_user_pages(u64 cr3);                        /* resident pages of a process's own region */
 u64  vm_lookup(u64 cr3, u64 virt);                    /* physical page or 0 */
 
 #endif

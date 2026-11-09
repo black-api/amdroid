@@ -30,7 +30,12 @@ int  proc_signal(int pid, int sig);
 int  proc_sig_handler_set(int sig, u64 handler);   /* the caller: 0 default, 1 ignore, else a function */
 u64 *proc_deliver_current(u64 *frame);             /* the frame to resume, or NULL if the caller died */
 int  proc_sigreturn(u64 *frame);                    /* restores the state a handler interrupted */
-void proc_detach(int pid);        /* nobody will wait for it: reap on exit */
+void proc_detach(int pid);
+/* For the task manager: the processes with their CPU time (TSC cycles) and resident pages. */
+typedef struct { int pid, ppid; u32 serial; char name[32]; const char *state; u64 cycles; u64 pages; } proc_info_t;
+int  proc_info(proc_info_t *out, int max, u64 *idle_cycles);
+u64  sched_tsc(void);
+void proc_sleep_ticks(u64 n);     /* wait, giving the CPU to other processes */        /* nobody will wait for it: reap on exit */
 u64 *sched_preempt(u64 *frame);   /* timer: switch only if the interrupted code was user mode */
 
 #endif

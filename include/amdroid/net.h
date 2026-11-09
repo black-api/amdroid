@@ -17,6 +17,7 @@ int  tcp_listen(u16 port);                        /* a listening socket */
 int  tcp_accept(int lsock, u32 timeout_ms);       /* the next connection, or -1 */
 int  tcp_send(int sock, const void *data, u32 len);
 int  tcp_recv(int sock, void *buf, u32 max, u32 timeout_ms);   /* bytes read, 0 at end of stream */
+int  tcp_closed(int sock);                        /* 1 once the peer closed and all data was read */
 void tcp_close(int sock);
 
 /* DNS and UDP */

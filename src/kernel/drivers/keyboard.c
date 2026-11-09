@@ -5,7 +5,7 @@
 #define KBD_DATA 0x60
 #define KBD_STATUS 0x64
 
-static char keybuf[256];
+static u8 keybuf[256];          /* unsigned: KEY_* codes are 0x80..0x89 */
 static int kb_head=0, kb_tail=0;
 
 static inline u8 inb(u16 p){ u8 v; __asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p)); return v; }
@@ -53,7 +53,7 @@ void keyboard_irq(void){
         if(sc==0x1D){ if(release) ctrl=0; else ctrl=1; return; }
         if(sc==0x38){ if(release) alt=0; else alt=1; return; }
         if(release) return;
-        char k = 0;
+        u8 k = 0;
         switch(sc){
             case 0x48: k = KEY_UP; break;
             case 0x50: k = KEY_DOWN; break;
@@ -106,7 +106,7 @@ int keyboard_has_input(void){
 }
 int keyboard_getchar(void){
     if(kb_head==kb_tail) return -1;
-    char c = keybuf[kb_tail];
+    u8 c = keybuf[kb_tail];
     kb_tail = (kb_tail+1)%256;
     return c;
 }

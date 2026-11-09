@@ -3,6 +3,53 @@
 #include "amdroid/heap.h"
 #include "amdroid/types.h"
 #include "amdroid/console.h"
+#include "amdroid/pci.h"
+
+/* Bochs display interface (QEMU -vga std, bochs-display): 16-bit index/data ports. */
+#define DISPI_IDX   0x1CE
+#define DISPI_DATA  0x1CF
+#define DISPI_ID        0
+#define DISPI_XRES      1
+#define DISPI_YRES      2
+#define DISPI_BPP       3
+#define DISPI_ENABLE    4
+#define DISPI_VIRT_W    6
+#define DISPI_VIRT_H    7
+#define DISPI_XOFF      8
+#define DISPI_YOFF      9
+
+static inline void io_outw(u16 p, u16 v){ __asm__ volatile("outw %0,%1" :: "a"(v), "Nd"(p)); }
+static inline u16  io_inw(u16 p){ u16 v; __asm__ volatile("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static void dispi_write(u16 idx, u16 v){ io_outw(DISPI_IDX, idx); io_outw(DISPI_DATA, v); }
+static u16 dispi_read(u16 idx){ io_outw(DISPI_IDX, idx); return io_inw(DISPI_DATA); }
+
+int fb_bochs_set_mode(u32 w, u32 h, u64 *base, u32 *pitch){
+    int dev = -1;
+    for(int d = 0; d < 32 && dev < 0; d++){
+        u32 id = pci_cfg_read32(0, (u8)d, 0, 0);
+        if((id & 0xFFFF) == 0x1234 && (id >> 16) == 0x1111) dev = d;
+    }
+    if(dev < 0) return 0;
+    if(dispi_read(DISPI_ID) < 0xB0C0) return 0;             /* not a Bochs-style card */
+    u32 bar = pci_cfg_read32(0, (u8)dev, 0, 0x10);
+    if(bar & 1) return 0;
+    u64 b = bar & ~0xFULL;
+
+    dispi_write(DISPI_ENABLE, 0);
+    dispi_write(DISPI_XRES, (u16)w);
+    dispi_write(DISPI_YRES, (u16)h);
+    dispi_write(DISPI_BPP, 32);
+    dispi_write(DISPI_VIRT_W, (u16)w);
+    dispi_write(DISPI_VIRT_H, (u16)h);
+    dispi_write(DISPI_XOFF, 0);
+    dispi_write(DISPI_YOFF, 0);
+    /* check the card took the size before switching the display on */
+    if(dispi_read(DISPI_XRES) != (u16)w || dispi_read(DISPI_YRES) != (u16)h) return 0;
+    dispi_write(DISPI_ENABLE, 0x41);                         /* enabled, linear framebuffer */
+    *base = b;
+    *pitch = w * 4;
+    return 1;
+}
 
 static void *fb_addr = NULL;
 static u32 fb_pitch = 0, fb_w = 0, fb_h = 0, fb_bpp = 0;
@@ -27,6 +74,18 @@ static u32 rgb(u8 r, u8 g, u8 b){ return (r<<16)|(g<<8)|b; } /* stored as 0x00RR
 void fb_putpixel(u32 x, u32 y, u32 color){
     if(!ready || x>=fb_w || y>=fb_h) return;
     backbuf[y*fb_w + x] = color;
+}
+
+/* Alpha-blend 'color' over the existing back-buffer pixel. a is 0..256. */
+void fb_blend(u32 x, u32 y, u32 color, u32 a){
+    if(!ready || x>=fb_w || y>=fb_h) return;
+    if(a == 0) return;
+    if(a >= 256){ backbuf[y*fb_w+x] = color; return; }
+    u32 bg = backbuf[y*fb_w+x];
+    u32 ia = 256 - a;
+    u32 rb = ((((bg & 0x00FF00FF) * ia + (color & 0x00FF00FF) * a) >> 8) & 0x00FF00FF);
+    u32 g  = ((((bg & 0x0000FF00) * ia + (color & 0x0000FF00) * a) >> 8) & 0x0000FF00);
+    backbuf[y*fb_w+x] = rb | g;
 }
 
 void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color){
@@ -76,8 +135,8 @@ void fb_swap(void){
     /* honour the hardware pitch (bytes per row), which may exceed w*4 */
     u8 *dst = (u8*)fb_addr;
     for(u32 y=0;y<fb_h;y++){
-        volatile u32 *row = (volatile u32*)(dst + (u32)y*fb_pitch);
-        u32 *src = &backbuf[y*fb_w];
+        u32 *row = (u32*)(dst + (u32)y*fb_pitch);
+        const u32 *src = &backbuf[y*fb_w];
         for(u32 x=0;x<fb_w;x++) row[x] = src[x];
     }
 }
@@ -91,4 +150,10 @@ void fb_scroll_up(u32 dy, u32 bg){
     for(u32 y = fb_h - dy; y < fb_h; y++)
         for(u32 x = 0; x < fb_w; x++)
             backbuf[y*fb_w + x] = bg;
+}
+
+/* Copies a whole frame (fb_w * fb_h 0x00RRGGBB pixels) into the back buffer. */
+void fb_blit(const u32 *src){
+    if(!ready) return;
+    for(u32 i = 0; i < fb_w * fb_h; i++) backbuf[i] = src[i];
 }
