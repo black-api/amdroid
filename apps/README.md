@@ -51,7 +51,7 @@ manager gives you the same body rectangle in `click`.
 ## Files
 
 - One file per app: `files.c`, `tasks.c`, `settings.c`, `about.c`, `calc.c`, `clock.c`,
-  `notes.c`, `network.c`, `browser.c` (BRO weser).
+  `notes.c`, `network.c`, `browser.c` (Browser).
 - `registry.c`: the list of apps and their order (keys 1, 2, 3, ...).
 - Core GUI: `src/kernel/gui/` (`gui.c` loop, `windows.c`, `taskbar.c`, `island.c`
   notifications, `desktop.c` icons, `menu.c` right-click menus, `wallpaper.c`, `ui.c`,

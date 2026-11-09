@@ -1,4 +1,4 @@
-/* BRO weser: a web browser. It loads pages over HTTP (and HTTPS through the host's proxy,
+/* Browser: a web browser. It loads pages over HTTP (and HTTPS through the host's proxy,
  * tools/https_proxy.py) and shows them with the HTML, CSS and JavaScript engines in
  * src/kernel/web and src/kernel/js.
  *
