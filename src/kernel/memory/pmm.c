@@ -106,12 +106,21 @@ void pmm_init(u32 mbi){
         (unsigned long long)(free_pages*4096/1024/1024));
 }
 
+/* The search starts where the last one ended (alloc_hint) and skips full bytes of the
+ * bitmap, so handing out thousands of pages for a new process stays quick. */
 void *pmm_alloc_page(void){
-    for(u64 i=0;i<total_pages;i++){
-        if(!bitmap_test(i)){
-            bitmap_set(i);
-            if(free_pages) free_pages--;
-            return (void*)(i*PAGE_SIZE);
+    if(!free_pages) return NULL;
+    for(int pass = 0; pass < 2; pass++){
+        u64 i = pass ? 0 : alloc_hint, stop = pass ? alloc_hint : total_pages;
+        while(i < stop){
+            if((i & 7) == 0 && bitmap[i / 8] == 0xFF){ i += 8; continue; }
+            if(!bitmap_test(i)){
+                bitmap_set(i);
+                free_pages--;
+                alloc_hint = i + 1;
+                return (void*)(i*PAGE_SIZE);
+            }
+            i++;
         }
     }
     return NULL;
@@ -122,6 +131,7 @@ void pmm_free_page(void *p){
     if(i < total_pages && bitmap_test(i)){
         bitmap_clear(i);
         free_pages++;
+        if(i < alloc_hint) alloc_hint = i;
     }
 }
 

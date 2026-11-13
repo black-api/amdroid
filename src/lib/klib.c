@@ -47,12 +47,10 @@ char *strndup(const char *s, size_t n){
 }
 
 void *memmove(void *d, const void *s, size_t n){
-    unsigned char *dd = d;
-    const unsigned char *ss = s;
-    if(dd < ss){
-        for(size_t i = 0; i < n; i++) dd[i] = ss[i];
-    } else {
-        for(size_t i = n; i > 0; i--) dd[i-1] = ss[i-1];
-    }
+    if((unsigned char*)d <= (const unsigned char*)s || (unsigned char*)d >= (const unsigned char*)s + n)
+        return memcpy(d, s, n);              /* a forward copy is safe */
+    unsigned char *dd = (unsigned char*)d + n - 1;
+    const unsigned char *ss = (const unsigned char*)s + n - 1;
+    __asm__ volatile("std; rep movsb; cld" : "+D"(dd), "+S"(ss), "+c"(n) : : "memory");
     return d;
 }

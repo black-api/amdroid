@@ -3,6 +3,7 @@
 #include "amdroid/fb.h"
 #include "amdroid/rtc.h"
 #include "amdroid/timer.h"
+#include "gui_internal.h"
 
 /* ---- settings ---- */
 static const u32 accent_colors[UI_NACCENT] = { 0x4CC2FF, 0x7C6CFF, 0x3DDC97, 0xFF8C42 };
@@ -12,7 +13,11 @@ static int accent_idx = 0;
 int ui_anim_on = 1;
 
 int         ui_accent_index(void){ return accent_idx; }
-void        ui_set_accent(int i){ if(i >= 0 && i < UI_NACCENT) accent_idx = i; }
+void        ui_set_accent(int i){
+    if(i < 0 || i >= UI_NACCENT || i == accent_idx) return;
+    accent_idx = i;
+    gui_damage_all();                       /* the colour is all over the desktop */
+}
 u32         ui_accent(void){ return accent_colors[accent_idx]; }
 u32         ui_accent_color_of(int i){ return accent_colors[i]; }
 const char *ui_accent_name(int i){ return accent_names[i]; }
@@ -36,13 +41,9 @@ void ui_app_leave(void){
 }
 u64 ui_app_cycles(int a){ return a >= 0 && a < UI_MAX_APPS ? app_cyc[a] : 0; }
 
-/* ---- status message ---- */
-static char msg_buf[72];
-void ui_msg_set(const char *s){
-    ui_copy(msg_buf, s, sizeof msg_buf);
-    if(s[0]) ui_notify(-1, s, "");
-}
-const char *ui_msg(void){ return msg_buf; }
+void ui_redraw(void){ win_mark_dirty(cur_app); }
+
+void ui_msg_set(const char *s){ ui_notify(-1, s, ""); }
 int ui_app_index(const struct app *app){
     for(int i = 0; i < UI_MAX_APPS && ui_apps[i]; i++) if(ui_apps[i] == app) return i;
     return -1;
@@ -129,30 +130,49 @@ static u32 isqrt(u32 v){
     return r;
 }
 
+/* Coverage of one corner of radius r (r x r bytes, 255 = inside), for the top left; the
+ * other three are mirrors. Built once per radius and kept. */
+#define RR_MAXR 32
+static u8 *corner_cache[RR_MAXR + 1];
+static const u8 *corner_mask(u32 r){
+    if(corner_cache[r]) return corner_cache[r];
+    int save = heap_owner; heap_owner = 0;
+    u8 *m = kmalloc(r * r);
+    heap_owner = save;
+    if(!m) return 0;
+    for(u32 py = 0; py < r; py++)
+        for(u32 px = 0; px < r; px++){
+            int dx = (int)(px * 256 + 128) - (int)(r * 256);
+            int dy = (int)(py * 256 + 128) - (int)(r * 256);
+            int cov = (int)(r * 256) - (int)isqrt((u32)(dx * dx + dy * dy)) + 128;   /* 1px-wide edge ramp */
+            m[py * r + px] = (u8)(cov <= 0 ? 0 : cov >= 256 ? 255 : cov);
+        }
+    corner_cache[r] = m;
+    return m;
+}
+
 /* Rounded rectangle with anti-aliased corners. The corner pixels blend over
  * whatever is already behind them, so the curve reads smooth, not stair-stepped. */
 void ui_rrect(u32 x, u32 y, u32 w, u32 h, u32 r, u32 c){
+    if(!fb_clip_hits((i32)x, (i32)y, (i32)w, (i32)h)) return;
     if(r > h / 2) r = h / 2;
     if(r > w / 2) r = w / 2;
-    if(r == 0){ fb_fill_rect(x, y, w, h, c); return; }
+    if(r > RR_MAXR) r = RR_MAXR;
+    const u8 *m = r ? corner_mask(r) : 0;
+    if(!m){ fb_fill_rect(x, y, w, h, c); return; }
     /* solid interior: middle band full width, then the straight top/bottom edges */
     fb_fill_rect(x,     y + r,         w,           h - 2 * r, c);
     fb_fill_rect(x + r, y,             w - 2 * r,   r,         c);
     fb_fill_rect(x + r, y + h - r,     w - 2 * r,   r,         c);
-    /* four corners: coverage from the pixel's distance to the corner's circle */
+    /* the four corners, from the one mask, mirrored */
+    u8 row[RR_MAXR];
     for(u32 py = 0; py < r; py++){
-        for(u32 px = 0; px < r; px++){
-            int dx = (int)(px * 256 + 128) - (int)(r * 256);
-            int dy = (int)(py * 256 + 128) - (int)(r * 256);
-            u32 dist = isqrt((u32)(dx * dx + dy * dy));
-            int cov = (int)(r * 256) - (int)dist + 128;      /* 1px-wide edge ramp */
-            if(cov <= 0) continue;
-            if(cov > 256) cov = 256;
-            fb_blend(x + px,             y + py,             c, (u32)cov);
-            fb_blend(x + w - 1 - px,     y + py,             c, (u32)cov);
-            fb_blend(x + px,             y + h - 1 - py,     c, (u32)cov);
-            fb_blend(x + w - 1 - px,     y + h - 1 - py,     c, (u32)cov);
-        }
+        const u8 *src = m + py * r;
+        fb_blend_mask((i32)x, (i32)(y + py),         r, 1, src, c);
+        fb_blend_mask((i32)x, (i32)(y + h - 1 - py), r, 1, src, c);
+        for(u32 px = 0; px < r; px++) row[px] = src[r - 1 - px];
+        fb_blend_mask((i32)(x + w - r), (i32)(y + py),         r, 1, row, c);
+        fb_blend_mask((i32)(x + w - r), (i32)(y + h - 1 - py), r, 1, row, c);
     }
 }
 
@@ -160,7 +180,7 @@ void ui_rrect(u32 x, u32 y, u32 w, u32 h, u32 r, u32 c){
  * Coverage comes from the pixel centre's distance to the shape edge, giving a
  * 1px soft edge blended over the background. */
 void ui_disc(int cx, int cy, int r, u32 c){
-    if(r <= 0) return;
+    if(r <= 0 || !fb_clip_hits(cx - r - 1, cy - r - 1, 2 * r + 3, 2 * r + 3)) return;
     int R = r * 256;
     for(int py = cy - r - 1; py <= cy + r + 1; py++)
         for(int px = cx - r - 1; px <= cx + r + 1; px++){
@@ -175,7 +195,7 @@ void ui_disc(int cx, int cy, int r, u32 c){
 }
 
 void ui_ring(int cx, int cy, int r, int thick, u32 c){
-    if(r <= 0 || thick <= 0) return;
+    if(r <= 0 || thick <= 0 || !fb_clip_hits(cx - r - 1, cy - r - 1, 2 * r + 3, 2 * r + 3)) return;
     int Ro = r * 256, Ri = (r - thick) * 256;
     for(int py = cy - r - 1; py <= cy + r + 1; py++)
         for(int px = cx - r - 1; px <= cx + r + 1; px++){
@@ -209,6 +229,7 @@ void ui_line(int x0, int y0, int x1, int y1, int thick, u32 c){
     int half = thick * 128;                     /* half thickness, 1/256 px */
     int minx = (x0 < x1 ? x0 : x1) - thick - 1, maxx = (x0 > x1 ? x0 : x1) + thick + 1;
     int miny = (y0 < y1 ? y0 : y1) - thick - 1, maxy = (y0 > y1 ? y0 : y1) + thick + 1;
+    if(!fb_clip_hits(minx, miny, maxx - minx + 1, maxy - miny + 1)) return;
     for(int py = miny; py <= maxy; py++)
         for(int px = minx; px <= maxx; px++){
             u32 dist = seg_dist(px * 256 + 128, py * 256 + 128, ax, ay, bx, by);
@@ -270,32 +291,24 @@ static const unsigned char *glyph_mask(unsigned char c, int scale){
 void ui_text(u32 x, u32 y, const char *s, u32 fg, u32 scale){
     if(scale == 0) scale = 1;
     int W = FONT_W * (int)scale, H = FONT_H * (int)scale;
+    if(!fb_clip_hits((i32)x, (i32)y, (i32)(ui_len(s) * (u32)W), H)) return;
     u32 cx = x;
     for(; *s; s++, cx += (u32)W){
         unsigned char c = (unsigned char)*s;
         if(c > 127) c = '?';
+        if(c == ' ' || !fb_clip_hits((i32)cx, (i32)y, W, H)) continue;
         const unsigned char *m = glyph_mask(c, (int)scale);
-        if(m){
-            for(int oy = 0; oy < H; oy++)
-                for(int ox = 0; ox < W; ox++){
-                    unsigned char a = m[oy * W + ox];
-                    if(!a) continue;
-                    fb_blend(cx + (u32)ox, y + (u32)oy, fg, a == 255 ? 256 : a);
-                }
-        } else {                                    /* uncached scale: resample directly */
-            const unsigned char *g = font8x16[c];
-            int any = 0;
-            for(int i = 0; i < FONT_H; i++) if(g[i]){ any = 1; break; }
-            if(!any) continue;
-            for(int oy = 0; oy < H; oy++){
-                int fy = ((oy * 2 + 1) << 7) / (int)scale - 128;
-                for(int ox = 0; ox < W; ox++){
-                    int fx = ((ox * 2 + 1) << 7) / (int)scale - 128;
-                    int cov = glyph_cov(g, fx, fy);
-                    if(cov <= 0) continue;
-                    if(cov > 256) cov = 256;
-                    fb_blend(cx + (u32)ox, y + (u32)oy, fg, (u32)cov);
-                }
+        if(m){ fb_blend_mask((i32)cx, (i32)y, (u32)W, (u32)H, m, fg); continue; }
+        /* a scale too big to cache: resample directly */
+        const unsigned char *g = font8x16[c];
+        for(int oy = 0; oy < H; oy++){
+            int fy = ((oy * 2 + 1) << 7) / (int)scale - 128;
+            for(int ox = 0; ox < W; ox++){
+                int fx = ((ox * 2 + 1) << 7) / (int)scale - 128;
+                int cov = glyph_cov(g, fx, fy);
+                if(cov <= 0) continue;
+                if(cov > 256) cov = 256;
+                fb_blend(cx + (u32)ox, y + (u32)oy, fg, (u32)cov);
             }
         }
     }

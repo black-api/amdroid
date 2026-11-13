@@ -41,22 +41,21 @@ static char num_buf[4];
 static int num_len = 0;
 static int scroll = 0;              /* pixels */
 static int have_page = 0;
-static rect_t last_body;
+static rect_t last_body;            /* from the last draw; w is 0 until the window has been drawn */
 static int hover_btn = -1;          /* toolbar button under the pointer */
+static int last_hx = -1, last_hy = -1;   /* the pointer position Husser was last told */
 /* husser protocol bookkeeping */
 static u32 need_seq_consumed = 0;   /* the need list we last saw */
 static u32 nav_seq_consumed = 0;    /* a navigation Husser asked for */
 static u8  res_done[2][32];         /* [kind-1][idx]: fetched or in flight */
 static int waiting_link = -1;       /* the link index we are waiting a url for */
 static u32 waiting_link_seq = 0;    /* the link_url_seq it answers */
-static int b_focused = 0;           /* the window had focus at its last draw */
-static u32 ticks_n = 0, drawn_at = 0;   /* frames: to tell when it is minimized (not drawn) */
 extern const app_t app_browser;
 
 /* A notification when the user is looking at something else. */
 static void tell(const char *title, const char *body){
-    int visible = b_focused && ticks_n - drawn_at <= 2;
-    if(!visible) ui_notify(ui_app_index(&app_browser), title, body);
+    int me = ui_app_index(&app_browser);
+    if(!ui_app_is_front(me)) ui_notify(me, title, body);
 }
 
 /* ---- small string helpers ---- */
@@ -276,9 +275,11 @@ static void push_history(void){
 }
 
 /* Shows html as the page for url: spawns or reuses Husser, hands it the page. */
+static rect_t area_of(rect_t b);
 static int show(const char *url, const char *html, u32 len){
     scroll = ld_scroll >= 0 ? ld_scroll : 0;
-    if(husser_open(1280, 720) < 0) return -1;
+    rect_t area = area_of(last_body);
+    if(husser_open(area.w, area.h) < 0) return -1;
     husser_set_url(url);
     husser_load(html, len, (u32)scroll);
     for(int k = 0; k < 32; k++){ res_done[0][k] = 0; res_done[1][k] = 0; }
@@ -579,8 +580,8 @@ static void loaded_status(void){
 
 /* Reads whatever has arrived, without waiting. */
 static void ld_recv(void){
-    /* read for up to 2 ticks (20 ms) per frame: fast, and the desktop stays smooth */
-    u64 now = timer_ticks(), until = now + 2;
+    /* read for at most a tick (10 ms) at a time: fast, and the desktop stays smooth */
+    u64 now = timer_ticks(), until = now + 1;
     for(;;){
         net_poll();
         u32 room = BODY_MAX - ld_len;
@@ -622,7 +623,7 @@ static void ld_recv(void){
     }
 }
 
-/* One step of loading; called every frame. */
+/* One step of loading; called every tick. */
 static void ld_step(void){
     if(ld == LD_START){ ld = LD_CONNECT; return; }   /* draw one frame of "Connecting" first */
     if(ld == LD_CONNECT){ ld_connect(); return; }
@@ -643,6 +644,17 @@ static void reload(void){
     if(cur_url[0]) go(cur_url, 0, scroll);
 }
 
+/* Scrolls the page to v pixels from its top, as far as it goes. */
+static void scroll_to(int v){
+    const volatile husser_shm_t *h = husser_header();
+    int maxs = h ? (int)h->page_h - (int)area_of(last_body).h : 0;
+    if(v > maxs) v = maxs;
+    if(v < 0) v = 0;
+    if(v == scroll) return;
+    scroll = v;
+    husser_paint((u32)scroll);
+}
+
 static void follow_number(int n){
     /* links are shown as [1], [2]... from 1; the engine numbers them from 0 */
     if(n < 1){ ui_copy(status, "No such link.", sizeof status); return; }
@@ -661,7 +673,10 @@ static rect_t back_btn(rect_t b){ return (rect_t){ b.x, b.y, 96, BAR_H }; }
 static rect_t reload_btn(rect_t b){ return (rect_t){ b.x + 104, b.y, 112, BAR_H }; }
 static rect_t go_btn(rect_t b){ return (rect_t){ b.x + b.w - 104, b.y, 104, BAR_H }; }
 static rect_t addr_box(rect_t b){ return (rect_t){ b.x + 224, b.y, b.w - 224 - 112, BAR_H }; }
-static rect_t area_of(rect_t b){ return (rect_t){ b.x, b.y + BAR_H + 12, b.w, b.h - BAR_H - 12 - 36 }; }
+static rect_t area_of(rect_t b){
+    if(b.h < BAR_H + 12 + 36 + 8) return (rect_t){ b.x, b.y, b.w, 8 };
+    return (rect_t){ b.x, b.y + BAR_H + 12, b.w, b.h - BAR_H - 12 - 36 };
+}
 
 static void button(rect_t r, const char *label, u32 bg, u32 fg){
     ui_rrect(r.x, r.y, r.w, r.h, 10, bg);
@@ -676,23 +691,21 @@ static void b_close(void){
     img_done = 0;
     husser_close();
     have_page = 0;
+    last_body.w = 0;
     cur_url[0] = 0;
     addr[0] = 0; addr_len = 0;
     nhist = 0;
     scroll = 0;
     status[0] = 0;
-}
-
-static void b_open(void){
-    if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
+    last_hx = -1; last_hy = -1;
 }
 
 /* Polls the shared region: the subresources Husser wants fetched, and the
- * navigation/link answers it gives back. Called every frame. */
+ * navigation/link answers it gives back. Called every tick. */
 static void poll_husser(void){
     const volatile husser_shm_t *h = husser_header();
     if(husser_alive()){
-        if(h && have_page && !no_more_needs && ld == LD_IDLE &&
+        if(h && have_page && !no_more_needs && ld == LD_IDLE && !husser_busy() &&
            h->need_count && h->need_seq != need_seq_consumed){
             need_seq_consumed = h->need_seq;
             for(u32 k = 0; k < h->need_count; k++){
@@ -720,7 +733,7 @@ static void poll_husser(void){
                 return;                                      /* one at a time */
             }
         }
-        if(h && have_page && ld == LD_IDLE && h->need_count == 0 && resources_busy){
+        if(h && have_page && ld == LD_IDLE && !husser_busy() && h->need_count == 0 && resources_busy){
             resources_busy = 0;
             loaded_status();                                 /* all stylesheets and images are in */
         }
@@ -745,16 +758,45 @@ static void poll_husser(void){
     }
 }
 
+/* What the window showed when it was last drawn: a change means it is drawn again. */
+static struct { u32 frame, title, console, error, state; int alive, ld; u64 phase; } seen;
+
 static void b_tick(void){
-    ticks_n++;
+    if(!last_body.w) return;                                    /* not drawn yet: the page size is not known */
     if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
     ld_step();                                                  /* loading goes on while minimized */
+    husser_pump();
     poll_husser();
+
+    const volatile husser_shm_t *h = husser_header();
+    int alive = husser_alive();
+    if(h && alive && have_page){
+        /* the page is laid out for the size of the window */
+        static u32 asked_w, asked_h;
+        rect_t area = area_of(last_body);
+        u32 w = area.w > HUSSER_MAX_W ? HUSSER_MAX_W : area.w, hh = area.h > HUSSER_MAX_H ? HUSSER_MAX_H : area.h;
+        if(h->frame_seq && (w != h->vw || hh != h->vh) && (w != asked_w || hh != asked_h || !husser_busy())){
+            asked_w = w; asked_h = hh;
+            husser_resize(w, hh);
+        }
+    }
+    /* the caret blinks twice a second; the progress bar moves 30 times a second */
+    u64 now = timer_ticks();
+    u64 phase = ld != LD_IDLE ? now / 3 : editing ? now / 50 : 0;
+    if(h && (h->frame_seq != seen.frame || h->title_seq != seen.title || h->console_seq != seen.console ||
+             h->js_error_seq != seen.error || h->state != seen.state)){
+        seen.frame = h->frame_seq; seen.title = h->title_seq; seen.console = h->console_seq;
+        seen.error = h->js_error_seq; seen.state = h->state;
+        ui_redraw();
+    }
+    if(alive != seen.alive || ld != seen.ld || phase != seen.phase){
+        seen.alive = alive; seen.ld = ld; seen.phase = phase;
+        ui_redraw();
+    }
 }
 
 static void b_draw(rect_t b, int focused){
-    b_focused = focused;
-    drawn_at = ticks_n;
+    (void)focused;
     last_body = b;
     u64 now = timer_ticks();
 
@@ -803,10 +845,8 @@ static void b_draw(rect_t b, int focused){
             ui_text(area.x + 24, area.y + 40, "Husser stopped", C_TEXT, UI_SCALE);
             ui_text(area.x + 24, area.y + 96, "This page crashed the Husser renderer; the desktop is fine.", C_MUTED, 1);
             ui_text(area.x + 24, area.y + 120, "Close this window and open Browser again to try once more.", C_MUTED, 1);
-        } else if((u32)area.w != hv->vw || (u32)area.h != hv->vh){
-            husser_resize((u32)area.w, (u32)area.h);            /* relayouts only if the width changed */
         } else if(hv->state == H_STATE_READY){
-            husser_blit(area.x, area.y, hv->vw, hv->vh);
+            husser_blit(area.x, area.y, area.w, area.h);        /* the last finished frame, while a new size is laid out */
         } else if(hv->state == H_STATE_BOOT){
             ui_text(area.x + 24, area.y + 40, "Loading...", C_MUTED, UI_SCALE);
         } else {                                                /* H_STATE_FAILED */
@@ -861,11 +901,15 @@ static void b_draw(rect_t b, int focused){
 }
 
 static void b_move(rect_t b, int x, int y){
-    hover_btn = ui_contains(back_btn(b), x, y) ? 0 : ui_contains(reload_btn(b), x, y) ? 1 :
-                ui_contains(go_btn(b), x, y) ? 2 : -1;
+    int hb = ui_contains(back_btn(b), x, y) ? 0 : ui_contains(reload_btn(b), x, y) ? 1 :
+             ui_contains(go_btn(b), x, y) ? 2 : -1;
+    if(hb != hover_btn){ hover_btn = hb; ui_redraw(); }
     rect_t area = area_of(b);
     if(!have_page || !ui_contains(area, x, y)) return;
-    husser_move(x - (int)area.x, y - (int)area.y);
+    int hx = x - (int)area.x, hy = y - (int)area.y;
+    if(hx == last_hx && hy == last_hy) return;
+    last_hx = hx; last_hy = hy;
+    husser_move(hx, hy);
 }
 
 static void b_click(rect_t b, int x, int y){
@@ -922,10 +966,12 @@ static int b_key(int c){
         back();
         return 1;
     }
-    if(c == KEY_UP){ scroll -= SCROLL_STEP; husser_paint((u32)scroll); return 1; }
-    if(c == KEY_DOWN){ scroll += SCROLL_STEP; husser_paint((u32)scroll); return 1; }
-    if(c == KEY_PGUP){ scroll -= (int)area_of(last_body).h - 48; husser_paint((u32)scroll); return 1; }
-    if(c == KEY_PGDN){ scroll += (int)area_of(last_body).h - 48; husser_paint((u32)scroll); return 1; }
+    if(c == KEY_UP){ scroll_to(scroll - SCROLL_STEP); return 1; }
+    if(c == KEY_DOWN){ scroll_to(scroll + SCROLL_STEP); return 1; }
+    if(c == KEY_PGUP){ scroll_to(scroll - ((int)area_of(last_body).h - 48)); return 1; }
+    if(c == KEY_PGDN){ scroll_to(scroll + ((int)area_of(last_body).h - 48)); return 1; }
+    if(c == KEY_HOME){ scroll_to(0); return 1; }
+    if(c == KEY_END){ scroll_to(1 << 30); return 1; }
     /* any other letter starts typing an address, like a real address bar */
     if(c >= 32 && c <= 126){
         editing = 1; addr_len = 0; addr[0] = 0;
@@ -935,15 +981,19 @@ static int b_key(int c){
     return 0;
 }
 
+static void b_scroll(rect_t b, int x, int y, int dz){
+    (void)b; (void)x; (void)y;
+    scroll_to(scroll + dz * 2 * SCROLL_STEP);
+}
+
 const app_t app_browser = {
     .name = "Browser",
     .icon = UI_ICO_BROWSER,
-    .pinned = 0,
-    .open = b_open,
     .close = b_close,
     .draw = b_draw,
     .key = b_key,
     .click = b_click,
     .move = b_move,
     .tick = b_tick,
+    .scroll = b_scroll,
 };

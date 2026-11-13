@@ -194,11 +194,6 @@ int elf_run_args(const char *path, int argc, char **argv){
     return code;
 }
 
-int elf_run(const char *path){
-    char *argv[1] = { (char*)path };
-    return elf_run_args(path, 1, argv);
-}
-
 /* Loads and starts a program without waiting for it (run <file> &). */
 int elf_spawn(const char *path){
     char *argv[1] = { (char*)path };

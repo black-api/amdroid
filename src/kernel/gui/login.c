@@ -29,7 +29,7 @@ static rect_t pw_box(rect_t card, int n){
 }
 
 static void draw_screen(u32 sw, u32 sh, const char *names[], const int uids[], int n,
-                        int sel, int hover, int pw_mode, const char *pw, int pw_len, const char *msg){
+                        int sel, int hover, int pw_mode, int pw_len, const char *msg){
     wall_draw();
 
     rtc_time_t t;
@@ -88,7 +88,6 @@ static void draw_screen(u32 sw, u32 sh, const char *names[], const int uids[], i
         ui_text(b.x + 14, b.y + 12, dots, C_TEXT, UI_SCALE);
         u32 cx = b.x + 14 + (u32)(pw_len < PW_MAX ? pw_len : PW_MAX) * UI_CW;
         ui_fill((rect_t){ cx, b.y + 10, 3, UI_CH - 4 }, ui_accent());
-        (void)pw;
     }
     if(msg && msg[0]){
         ui_text(card.x + 24, card.y + card.h - 34, msg, C_WARN, 1);
@@ -121,17 +120,20 @@ int gui_login(void){
     /* auto-login: skip the login screen when the only account has no password */
     if(n == 1 && auth_login(names[0], "") == 0){ mouse_disable(); return 0; }
 
-    int sel = 0, hover = -1, prev_btn = 0, mx = (int)sw / 2, my = (int)sh / 2;
+    int sel = 0, hover = -1, mx = (int)sw / 2, my = (int)sh / 2;
+    int redraw = 1;                         /* the screen is drawn when something on it changed */
+    u8 shown_min = 255;
     int pw_mode = 0, pw_len = 0;
     char pw[PW_MAX + 1];
     char msg[64] = "";
     int result = -1;
     while(result != 0){
-        int mdx, mdy, btns;
-        if(mouse_poll(&mdx, &mdy, &btns)){
-            mx = mx + mdx < 0 ? 0 : (mx + mdx >= (int)sw ? (int)sw - 1 : mx + mdx);
-            my = my + mdy < 0 ? 0 : (my + mdy >= (int)sh ? (int)sh - 1 : my + mdy);
-            if((btns & 1) && !(prev_btn & 1)){
+        mouse_event_t ev;
+        if(mouse_poll(&ev)){
+            redraw = 1;
+            mx = mx + ev.dx < 0 ? 0 : (mx + ev.dx >= (int)sw ? (int)sw - 1 : mx + ev.dx);
+            my = my + ev.dy < 0 ? 0 : (my + ev.dy >= (int)sh ? (int)sh - 1 : my + ev.dy);
+            if(ev.pressed & 1){
                 rect_t card = card_rect(sw, sh, n, pw_mode);
                 for(int i = 0; i < n; i++)
                     if(ui_contains(account_row(card, i), mx, my)){
@@ -141,7 +143,6 @@ int gui_login(void){
                         msg[0] = 0;
                     }
             }
-            prev_btn = btns;
         }
         rect_t card = card_rect(sw, sh, n, pw_mode);
         hover = -1;
@@ -150,6 +151,7 @@ int gui_login(void){
 
         if(keyboard_has_input() && n > 0){
             int c = keyboard_getchar();
+            redraw = 1;
             if(!pw_mode){
                 if(c == KEY_UP && sel > 0) sel--;
                 else if(c == KEY_DOWN && sel < n - 1) sel++;
@@ -169,10 +171,16 @@ int gui_login(void){
         }
         if(result == 0) break;
 
-        draw_screen(sw, sh, names, uids, n, sel, hover, pw_mode, pw, pw_len, msg);
-        ui_cursor(mx, my);
-        fb_swap();
-        timer_sleep(16);
+        rtc_time_t t;
+        rtc_read(&t);
+        if(t.min != shown_min){ shown_min = t.min; redraw = 1; }      /* the clock */
+        if(redraw){
+            draw_screen(sw, sh, names, uids, n, sel, hover, pw_mode, pw_len, msg);
+            ui_cursor(mx, my);
+            fb_swap();
+            redraw = 0;
+        }
+        timer_sleep(10);
     }
     mouse_disable();
     return 0;

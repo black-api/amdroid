@@ -7,6 +7,7 @@
 #include "amdroid/keyboard.h"
 #include "amdroid/fat32.h"
 #include "amdroid/fb.h"
+#include "amdroid/mouse.h"
 #include "amdroid/timer.h"
 #include "amdroid/kmath.h"
 #include "amdroid/sched.h"
@@ -331,6 +332,22 @@ BI(fb_text){
     return fz_num(0);
 }
 BI(fb_present){ UNUSED_ARGS; need_fb(); fb_swap(); return fz_num(0); }
+/* Non-blocking key read for full-screen apps: a key code, or -1 when none is waiting. */
+BI(poll_key){
+    UNUSED_ARGS;
+    if(serial_has_input()) return fz_num((double)serial_getc());
+    if(keyboard_has_input()) return fz_num((double)keyboard_getchar());
+    proc_yield();
+    return fz_num(-1);
+}
+/* Non-blocking mouse click poll: 1 if a button went down since the last call,
+ * else 0. Lets full-screen apps offer a reliable mouse exit. */
+BI(poll_click){
+    UNUSED_ARGS;
+    mouse_event_t ev;
+    if(mouse_poll(&ev) && ev.pressed) return fz_num(1);
+    return fz_num(0);
+}
 
 static const BDef BUILTINS[] = {
     { "len", 1, bi_len }, { "push", 2, bi_push }, { "pop", 1, bi_pop }, { "type", 1, bi_type },
@@ -351,6 +368,7 @@ static const BDef BUILTINS[] = {
     { "fb_width", 0, bi_fb_width }, { "fb_height", 0, bi_fb_height },
     { "fb_clear", 1, bi_fb_clear }, { "fb_rect", 5, bi_fb_rect },
     { "fb_text", 5, bi_fb_text }, { "fb_present", 0, bi_fb_present },
+    { "poll_key", 0, bi_poll_key }, { "poll_click", 0, bi_poll_click },
 };
 
 int fz_builtin_find(const char *name){

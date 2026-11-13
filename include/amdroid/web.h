@@ -14,6 +14,7 @@ typedef struct web_cmd {
     u32 color;
     int scale;                /* text: 1 = 16 px glyphs, 2 = 32 px, ... */
     int bold;                 /* text: draw heavier */
+    int italic;               /* text: slant the glyphs */
     const char *text;         /* text commands */
     int link;                 /* index into the link table, or -1 */
     const void *dom;          /* the element this text belongs to (for clicks) */

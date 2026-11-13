@@ -7,6 +7,7 @@
 #include "gui_internal.h"
 #include "amdroid/pmm.h"
 #include "amdroid/net.h"
+#include "amdroid/fb.h"
 
 #define ISL_TOP     14
 #define NOTE_TICKS  400                /* 4 seconds on screen */
@@ -40,10 +41,11 @@ void ui_notify(int app, const char *title, const char *body){
     n->at = last_now;
 }
 
+/* One timer tick of easing towards the target size. */
 static int step_to(int cur_v, int target){
     int d = target - cur_v;
     if(d == 0) return cur_v;
-    int s = d / 4;
+    int s = d / 6;
     if(s == 0) s = d > 0 ? 1 : -1;
     return cur_v + s;
 }
@@ -51,6 +53,7 @@ static int step_to(int cur_v, int target){
 static int open_height(void){ return 128 + 24 + (nrecent ? nrecent * 56 : 40); }
 
 void isl_update(u32 sw, u64 now, int animate){
+    u64 steps = now - last_now > 8 ? 8 : now - last_now;      /* ticks since the last frame */
     last_now = now;
     if(showing && now - shown_at >= NOTE_TICKS) showing = 0;
     if(!showing && nqueue > 0 && !isl_open){
@@ -67,8 +70,10 @@ void isl_update(u32 sw, u64 now, int animate){
     if(isl_open){ tw = 640; th = open_height(); }
     else if(showing){ tw = 640; th = 88; }
     if(animate){
-        isl_w = step_to(isl_w, tw);
-        isl_h = step_to(isl_h, th);
+        for(u64 k = 0; k < steps; k++){
+            isl_w = step_to(isl_w, tw);
+            isl_h = step_to(isl_h, th);
+        }
     } else {
         isl_w = tw; isl_h = th;
     }
@@ -98,13 +103,46 @@ static void fit(char *out, u32 cap, const char *s, u32 max){
     if(n > max && max > 3){ out[max - 2] = '.'; out[max - 1] = '.'; out[max] = 0; }
 }
 
+/* What the island shows: 0 nothing yet (it is changing size), 1 its name, 2 a notification,
+ * 3 the open panel. */
+static int mode(void){
+    if(isl_open && isl_w >= 620 && isl_h >= open_height() - 6) return 3;
+    if(!isl_open && showing && isl_w >= 620 && isl_h >= 82) return 2;
+    if(!isl_open && !showing && isl_w <= 260) return 1;
+    return 0;
+}
+/* The part of a notification's time bar that is left, in pixels. */
+static u32 note_left(u64 now){
+    u64 el = now - shown_at;
+    u32 full = box.w - 120;
+    return el >= NOTE_TICKS ? 0 : (u32)((u64)full * (NOTE_TICKS - el) / NOTE_TICKS);
+}
+
+/* Redraw when the pill moves or grows, or when what it says changes. */
+void isl_damage(u64 now){
+    static rect_t sh_box;
+    static int sh_mode = -1, sh_nrecent = -1;
+    static u32 sh_left;
+    static u64 sh_sec, sh_note;
+    int m = mode();
+    u32 left = m == 2 ? note_left(now) : 0;
+    u64 sec = m == 3 ? now / 100 : 0;                /* the open panel shows the uptime */
+    if(box.x != sh_box.x || box.w != sh_box.w || box.h != sh_box.h || m != sh_mode || left != sh_left ||
+       sec != sh_sec || nrecent != sh_nrecent || shown_at != sh_note){
+        gui_damage((int)sh_box.x, (int)sh_box.y, (int)sh_box.w + 2, (int)sh_box.h + 6);
+        gui_damage((int)box.x, (int)box.y, (int)box.w + 2, (int)box.h + 6);
+        sh_box = box; sh_mode = m; sh_left = left; sh_sec = sec; sh_nrecent = nrecent; sh_note = shown_at;
+    }
+}
+
 void isl_draw(u64 now){
     rect_t b = box;
+    if(!fb_clip_hits((i32)b.x, (i32)b.y, (i32)b.w + 2, (i32)b.h + 6)) return;
     ui_rrect(b.x + 2, b.y + 6, b.w, b.h, b.h / 2 > 30 ? 30 : b.h / 2, C_SHADOW);
     ui_rrect(b.x, b.y, b.w, b.h, b.h / 2 > 30 ? 30 : b.h / 2, 0x000000);
 
-    int settled_open = isl_open && isl_w >= 620 && isl_h >= open_height() - 6;
-    int settled_note = !isl_open && showing && isl_w >= 620 && isl_h >= 82;
+    int settled_open = mode() == 3;
+    int settled_note = mode() == 2;
 
     if(settled_open){
         char up[12] = "", l1[64] = "", l2[64] = "", n[12];
@@ -146,12 +184,11 @@ void isl_draw(u64 now){
             ui_text(b.x + 92, b.y + 50, bd, C_MUTED, 1);
         }
         /* the time it has left, as a bar that shrinks */
-        u64 el = now - shown_at;
         u32 full = b.w - 120;
-        u32 left = el >= NOTE_TICKS ? 0 : (u32)((u64)full * (NOTE_TICKS - el) / NOTE_TICKS);
+        u32 left = note_left(now);
         ui_fill((rect_t){ b.x + 92, b.y + b.h - 10, full - 20, 2 }, 0x22282C);
         if(left > 20) ui_fill((rect_t){ b.x + 92, b.y + b.h - 10, left - 20, 2 }, ui_accent());
-    } else if(!isl_open && !showing && isl_w <= 260){
+    } else if(mode() == 1){
         const char *t = "am-droid";
         ui_text(b.x + (b.w - ui_text_w(t, UI_SCALE)) / 2, b.y + (b.h - UI_CH) / 2, t, C_TEXT, UI_SCALE);
     }
@@ -168,4 +205,3 @@ int isl_click(void){
     isl_open = !isl_open;
     return -1;
 }
-void isl_toggle(void){ isl_open = !isl_open; }

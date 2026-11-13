@@ -9,6 +9,7 @@
 #include "amdroid/sched.h"
 #include "amdroid/fb.h"
 #include "amdroid/console.h"
+#include "amdroid/timer.h"
 #include <string.h>
 
 #define HUSSER_SHM_PAGES (HUSSER_SHM_BYTES / 4096)
@@ -22,7 +23,6 @@ extern char husser_entry[];                 /* absolute address of _start in the
 static u64 shm_pages[HUSSER_SHM_PAGES];
 static int shm_ready = 0;
 static int husser_pid = -1;
-static u32 husser_vw = 0, husser_vh = 0;
 
 static void shm_free_all(void){
     for(u64 i = 0; i < HUSSER_SHM_PAGES; i++) if(shm_pages[i]) pmm_free_page((void*)(unsigned long)shm_pages[i]);
@@ -62,19 +62,50 @@ static void shm_write(u64 off, const void *src, u64 len){
     }
 }
 
-static void send_cmd(u32 cmd, i32 i, i32 j){
-    const volatile husser_shm_t *h = husser_header();
-    if(!h) return;
-    volatile husser_shm_t *m = (volatile husser_shm_t *)h;
-    m->cmd = cmd; m->cmd_i = i; m->cmd_j = j; m->cmd_seq++;
-    u32 want = m->cmd_seq;
-    /* wait for husser to finish this command, so commands are never skipped
-     * (the browser can queue LOAD and RESIZE before husser's first iteration) */
-    for(int t = 0; t < 200; t++){
-        if(m->ack_seq == want) return;
-        if(!husser_alive()) return;
-        proc_sleep_ticks(1);
+/* ---- commands ----
+ * The browser never waits for the renderer: a command goes into a short queue and is handed
+ * over when the one before it is done (husser_pump, every tick). A page that takes seconds
+ * to lay out keeps Husser busy, not the desktop. */
+#define Q_MAX 16
+typedef struct { u32 cmd; i32 i, j; } qcmd_t;
+static qcmd_t queue[Q_MAX];
+static int qn = 0;
+static int inflight = 0;            /* a command Husser has not finished */
+static u32 inflight_seq = 0;
+
+void husser_pump(void){
+    volatile husser_shm_t *m = (volatile husser_shm_t *)husser_header();
+    if(!m || !husser_alive()){ qn = 0; inflight = 0; return; }
+    if(inflight && m->ack_seq == inflight_seq) inflight = 0;
+    if(inflight || !qn) return;
+    m->cmd = queue[0].cmd; m->cmd_i = queue[0].i; m->cmd_j = queue[0].j;
+    for(int k = 1; k < qn; k++) queue[k - 1] = queue[k];
+    qn--;
+    inflight_seq = ++m->cmd_seq;
+    inflight = 1;
+    proc_wake(husser_pid);          /* it sleeps between commands */
+}
+
+int husser_busy(void){ return inflight || qn; }
+
+/* Lets Husser run until it has nothing left to do, or for at most `ticks`. */
+static void wait_idle(u64 ticks){
+    u64 deadline = timer_ticks() + ticks;
+    for(husser_pump(); husser_busy() && timer_ticks() < deadline; husser_pump()) proc_yield();
+}
+
+static void post(u32 cmd, i32 i, i32 j){
+    if(husser_pid < 0) return;
+    /* the pointer, the scroll position and the size: only the newest one matters */
+    int latest = cmd == H_CMD_MOVE || cmd == H_CMD_PAINT || cmd == H_CMD_RESIZE;
+    if(latest && qn && queue[qn - 1].cmd == cmd) qn--;
+    if(qn == Q_MAX){
+        if(cmd == H_CMD_MOVE) return;
+        wait_idle(200);
+        if(qn == Q_MAX) return;     /* Husser is stuck; the browser shows that it stopped */
     }
+    queue[qn++] = (qcmd_t){ cmd, i, j };
+    husser_pump();
 }
 
 int husser_open(u32 vw, u32 vh){
@@ -87,9 +118,9 @@ int husser_open(u32 vw, u32 vh){
     volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
     memset((void*)m, 0, HUSSER_VRAM_OFF);        /* the whole header, zeroed */
     m->magic = HUSSER_MAGIC; m->ver = HUSSER_VER;
-    m->vw = vw; m->vh = vh; m->pitch = vw * 4;
+    m->vw = vw; m->vh = vh;
     m->state = H_STATE_BOOT;
-    husser_vw = vw; husser_vh = vh;
+    qn = 0; inflight = 0;
 
     u64 cr3 = vm_new_space();
     if(!cr3) return -1;
@@ -126,20 +157,17 @@ int husser_open(u32 vw, u32 vh){
     return pid;
 }
 
+/* The renderer holds nothing worth saving: it is simply ended, and its memory comes back. */
 void husser_close(void){
     if(husser_pid < 0) return;
-    send_cmd(H_CMD_SHUTDOWN, 0, 0);
+    proc_kill(husser_pid);
     husser_pid = -1;
+    qn = 0; inflight = 0;
 }
 
 int husser_alive(void){
-    if(husser_pid < 0) return 0;
-    proc_info_t pi[MAX_PROCS];
-    u64 idle = 0;
-    int n = proc_info(pi, MAX_PROCS, &idle);
-    for(int i = 0; i < n; i++) if(pi[i].pid == husser_pid) return 1;
-    husser_pid = -1;                     /* it is gone: stop asking */
-    return 0;
+    if(husser_pid >= 0 && !proc_alive(husser_pid)) husser_pid = -1;      /* it is gone: stop asking */
+    return husser_pid >= 0;
 }
 
 void husser_set_url(const char *url){
@@ -150,19 +178,23 @@ void husser_set_url(const char *url){
     m->page_url[i] = 0;
 }
 
+/* The page and resource areas are read by Husser while it works on them, so they are
+ * written only once it has finished what it was doing (normally at once). */
 int husser_load(const void *html, u32 len, u32 scroll){
     if(husser_pid < 0 || !shm_ready) return -1;
     if(len > HUSSER_PAGE_BYTES) len = HUSSER_PAGE_BYTES;
+    wait_idle(200);
+    qn = 0;
     shm_write(HUSSER_PAGE_OFF, html, len);
     volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
     m->page_len = len;
-    m->scroll = scroll;
-    send_cmd(H_CMD_LOAD, (i32)len, (i32)scroll);
+    post(H_CMD_LOAD, (i32)len, (i32)scroll);
     return 0;
 }
 
 void husser_res(u32 kind, u32 idx, const void *bytes, u32 len){
     if(husser_pid < 0 || !shm_ready) return;
+    wait_idle(200);
     if(bytes && len){
         if(len > HUSSER_RES_BYTES) len = HUSSER_RES_BYTES;
         shm_write(HUSSER_RES_OFF, bytes, len);
@@ -171,60 +203,26 @@ void husser_res(u32 kind, u32 idx, const void *bytes, u32 len){
     m->res_kind = kind;
     m->res_idx = idx;
     m->res_len = bytes ? len : 0xFFFFFFFFu;
-    m->res_done_seq++;
-    send_cmd(H_CMD_RES_DONE, 0, 0);
+    post(H_CMD_RES_DONE, 0, 0);
 }
 
-void husser_link_url(u32 idx){ if(husser_pid >= 0) send_cmd(H_CMD_LINK_URL, (i32)idx, 0); }
-
-void husser_paint(u32 scroll){
-    if(husser_pid < 0) return;
-    volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
-    m->scroll = scroll;
-    send_cmd(H_CMD_PAINT, (i32)scroll, 0);
-}
-void husser_key(u32 code){ if(husser_pid >= 0) send_cmd(H_CMD_KEY, (i32)code, 0); }
-void husser_click(i32 x, i32 y){ if(husser_pid >= 0) send_cmd(H_CMD_CLICK, x, y); }
-void husser_move(i32 x, i32 y){ if(husser_pid >= 0) send_cmd(H_CMD_MOVE, x, y); }
+void husser_link_url(u32 idx){ post(H_CMD_LINK_URL, (i32)idx, 0); }
+void husser_paint(u32 scroll){ post(H_CMD_PAINT, (i32)scroll, 0); }
+void husser_key(u32 code){ post(H_CMD_KEY, (i32)code, 0); }
+void husser_click(i32 x, i32 y){ post(H_CMD_CLICK, x, y); }
+void husser_move(i32 x, i32 y){ post(H_CMD_MOVE, x, y); }
 void husser_resize(u32 vw, u32 vh){
-    if(husser_pid < 0) return;
-    volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
-    m->vw = vw; m->vh = vh; m->pitch = vw * 4;
-    husser_vw = vw; husser_vh = vh;
-    send_cmd(H_CMD_RESIZE, (i32)vw, (i32)vh);
+    if(vw > HUSSER_MAX_W) vw = HUSSER_MAX_W;
+    if(vh > HUSSER_MAX_H) vh = HUSSER_MAX_H;
+    post(H_CMD_RESIZE, (i32)vw, (i32)vh);
 }
 
+/* Copies the frame Husser last finished to (x, y), cut to w x h. Nothing is drawn while
+ * the frame is being replaced by one of another size. */
 void husser_blit(u32 x, u32 y, u32 w, u32 h){
-    if(!shm_ready) return;
-    if(w > husser_vw) w = husser_vw;
-    if(h > husser_vh) h = husser_vh;
-    static u32 last_x = 0xFFFFFFFF, last_y = 0xFFFFFFFF, last_w = 0xFFFFFFFF, last_h = 0xFFFFFFFF;
-    if(x != last_x || y != last_y || w != last_w || h != last_h){
-        console_printf("[blit] x=%u y=%u w=%u h=%u vw=%u vh=%u\n", x, y, w, h, husser_vw, husser_vh);
-        /* sample the viewport: what did husser actually paint? */
-        {
-            u64 o0 = 0;
-            u64 om = (u64)(h / 2) * husser_vw * 4 + (u64)(w / 2) * 4;
-            u64 o100 = (u64)100 * husser_vw * 4 + (u64)100 * 4;
-            console_printf("[blit] px(0,0)=%06x px(w/2,h/2)=%06x px(100,100)=%06x\n",
-                *(u32 *)(unsigned long)(shm_pages[HUSSER_VRAM_OFF / 4096 + o0 / 4096] + o0 % 4096),
-                *(u32 *)(unsigned long)(shm_pages[HUSSER_VRAM_OFF / 4096 + om / 4096] + om % 4096),
-                *(u32 *)(unsigned long)(shm_pages[HUSSER_VRAM_OFF / 4096 + o100 / 4096] + o100 % 4096));
-        }
-        last_x = x; last_y = y; last_w = w; last_h = h;
-    }
-    /* the viewport starts at HUSSER_VRAM_OFF; pitch comes from the viewport width */
-    fb_copy_region_pages(x, y, w, h, shm_pages + (HUSSER_VRAM_OFF / 4096), husser_vw);
-}
-
-u32 husser_vram_nonzero(void){
-    if(!shm_ready) return 0;
-    u32 count = 0;
-    u64 bytes = (u64)husser_vh * husser_vw * 4;
-    for(u64 off = HUSSER_VRAM_OFF; off < HUSSER_VRAM_OFF + bytes; off += 4){
-        u64 page = off / 4096;
-        u32 inner = (u32)(off % 4096);
-        if(*(u32*)(unsigned long)(shm_pages[page] + inner)) count++;
-    }
-    return count;
+    const volatile husser_shm_t *m = husser_header();
+    if(!m) return;
+    u32 fw = m->frame_w, fh = m->frame_h;
+    if(!fw || !fh || fw > HUSSER_MAX_W || fh > HUSSER_MAX_H) return;
+    fb_copy_region_pages(x, y, w < fw ? w : fw, h < fh ? h : fh, shm_pages + (HUSSER_VRAM_OFF / 4096), fw);
 }

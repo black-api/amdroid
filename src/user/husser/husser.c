@@ -25,12 +25,14 @@ static i64 sc3(i64 n, i64 a, i64 b, i64 c){
  * the top of the user stack the kernel maps (STACK_TOP in the bridge) */
 __asm__(".global stack_top\nstack_top = 0x7F000000");
 static void sys_exit(i64 code){ sc3(SYS_EXIT, code, 0, 0); for(;;){} }
-static void yield(void){ sc3(SYS_YIELD, 0, 0, 0); }
 static void idle_sleep(void){ sc3(SYS_SLEEP, 1, 0, 0); }   /* 10 ms: no CPU while idle */
 
-volatile husser_shm_t *husser_vshm = (husser_shm_t *)HUSSER_SHM_VA;
 static volatile husser_shm_t *const shm = (husser_shm_t *)HUSSER_SHM_VA;
-volatile u32 *husser_vram = (u32 *)(HUSSER_SHM_VA + HUSSER_VRAM_OFF);
+
+/* A frame is painted here, then copied whole into the shared viewport: the browser,
+ * which may look at any moment, never sees a page half painted. */
+static u32 frame_buf[HUSSER_MAX_W * HUSSER_MAX_H];
+static u32 frame_w, frame_h;
 
 #define RES_FAIL 0xFFFFFFFFu
 #define PAGE_SRC ((const u8 *)(HUSSER_SHM_VA + HUSSER_PAGE_OFF))
@@ -45,7 +47,7 @@ static void *focus_node = NULL;
 static char sheet_done[16];
 static u32 last_cmd_seq = 0;
 
-void painter_set_size(u32 w, u32 h);
+void painter_target(u32 *buf, u32 w, u32 h);
 void painter_clear(u32 c);
 void painter_cmds(const web_cmd_t *cmds, int n, int scroll, const void *hover_node);
 
@@ -77,8 +79,15 @@ static void update_stats(void){
     const char *c = web_console();
     if(c && c[0] && strcmp(c, shm->console) != 0){ str_copy((char *)shm->console, c, HUSSER_MSG_MAX); shm->console_seq++; }
 }
+static void set_size(u32 w, u32 h){
+    frame_w = w; frame_h = h;
+    painter_target(frame_buf, w, h);
+}
 static void frame_ready(void){
     update_stats();
+    if(shm->frame_w != frame_w || shm->frame_h != frame_h) shm->frame_w = shm->frame_h = 0;   /* rows change length */
+    memcpy((void *)(HUSSER_SHM_VA + HUSSER_VRAM_OFF), frame_buf, (u64)frame_w * frame_h * 4);
+    shm->frame_w = frame_w; shm->frame_h = frame_h;
     shm->state = H_STATE_READY;
     shm->frame_seq++;
 }
@@ -154,7 +163,6 @@ static void load_page(u32 len, u32 initial_scroll){
         shm->state = H_STATE_FAILED;
         return;
     }
-    page_h = web_layout((int)shm->vw);
     have_page = 1;
     focus_node = hover_node = NULL;
     shm->input_focus = 0;
@@ -162,7 +170,6 @@ static void load_page(u32 len, u32 initial_scroll){
     page_h = web_layout((int)shm->vw);
     laid_width = (int)shm->vw;
     scroll = clamp_scroll(initial_scroll);
-    painter_set_size(shm->vw, shm->vh);
     paint_frame();
     frame_ready();
     emit_needs();
@@ -247,9 +254,8 @@ void _start(void){
 }
 
 void husser_main(void){
-    if(shm->magic != HUSSER_MAGIC) sys_exit(3);
-    painter_set_size(shm->vw, shm->vh);
-    painter_clear(0x10181D);
+    if(shm->magic != HUSSER_MAGIC || shm->ver != HUSSER_VER) sys_exit(3);
+    set_size(shm->vw, shm->vh);
     shm->state = H_STATE_BOOT;
 
     for(;;){
@@ -266,10 +272,10 @@ void husser_main(void){
             case H_CMD_KEY:     do_key(i); break;
             case H_CMD_RESIZE:
                 if((u32)i <= HUSSER_MAX_W && (u32)j <= HUSSER_MAX_H && (u32)i > 0 && (u32)j > 0){
-                    shm->vw = (u32)i; shm->vh = (u32)j; shm->pitch = (u32)i * 4;
-                    painter_set_size(shm->vw, shm->vh);
-                    laid_width = -1;
-                    relayout_if_dirty();
+                    shm->vw = (u32)i; shm->vh = (u32)j;
+                    set_size(shm->vw, shm->vh);
+                    scroll = clamp_scroll(scroll);
+                    relayout_if_dirty();            /* lays out again only when the width changed */
                     frame_ready();
                 }
                 break;

@@ -14,15 +14,6 @@ static vfs_node_t *alloc_node(const char *name, int is_dir){
     return n;
 }
 
-static char *strdup_local(const char *s){ 
-    int l=0; while(s[l]) l++;
-    char *p = kmalloc(l+1);
-    for(int i=0;i<=l;i++) p[i]=s[i];
-    return p;
-}
-
-vfs_node_t *vfs_root(void){ return &root; }
-
 static vfs_node_t *find_child(vfs_node_t *dir, const char *name){
     vfs_node_t *c = dir->children;
     while(c){ if(strcmp(c->name,name)==0) return c; c=c->next; }

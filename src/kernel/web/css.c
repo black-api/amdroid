@@ -599,6 +599,8 @@ static void apply_one(wstyle_t *st, int parent_size, const char *prop, u32 pn, c
         else if(strcmp(v, "normal") == 0 || strcmp(v, "lighter") == 0) st->bold = 0;
     } else if(strcmp(p, "font-style") == 0){
         st->italic = strcmp(v, "italic") == 0 || strcmp(v, "oblique") == 0;
+    } else if(strcmp(p, "white-space") == 0){
+        st->white_pre = strcmp(v, "pre") == 0 || strcmp(v, "pre-wrap") == 0 || strcmp(v, "pre-line") == 0;
     } else if(strcmp(p, "text-decoration") == 0 || strcmp(p, "text-decoration-line") == 0){
         st->underline = strcmp(v, "underline") == 0 ? 1 : (strcmp(v, "none") == 0 ? 0 : st->underline);
     } else if(strcmp(p, "text-align") == 0){
@@ -799,13 +801,17 @@ static void defaults(wnode_t *n){
     if(strcmp(t, "blockquote") == 0){
         st->display = W_BLOCK;
         block_margins(st, 16, 16);
-        st->p[3] = 32;
+        st->p[3] = 24;
+        st->bl = 4;                /* a left accent bar, as browsers draw */
+        st->border_color = 0xC2CCD4;
+        st->color = 0x5C6670;      /* a muted tone for the quoted text */
         return;
     }
     if(strcmp(t, "pre") == 0){
         st->display = W_BLOCK;
         block_margins(st, 16, 16);
         st->size = 24;
+        st->white_pre = 1;         /* keep newlines and spaces */
         return;
     }
     if(strcmp(t, "hr") == 0){

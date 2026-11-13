@@ -11,5 +11,4 @@ void fbcon_set_active(int on);         /* 1 when the terminal owns the screen */
 void fbcon_redraw(void);               /* repaint the whole screen */
 void fbcon_flush(int force);           /* show pending output (rate limited unless forced) */
 void fbcon_scroll_view(int lines);     /* PgUp/PgDn: positive = further back */
-int  fbcon_ready(void);
 #endif

@@ -7,8 +7,8 @@
 #define NAME_LEN   15
 #define PATH_LEN   120
 #define FILE_MAX   64
-#define VIEW_LINES 512
-#define VIEW_BYTES 4096
+#define VIEW_LINES 4096
+#define VIEW_BYTES (64 * 1024)
 
 typedef struct { char name[NAME_LEN + 1]; u32 size; int is_dir; } entry_t;
 
@@ -100,7 +100,16 @@ static void viewer_open(const char *name){
     vtop = 0;
 }
 
-static int viewer_rows(rect_t b){ return ((int)b.h - 64) / UI_CH; }
+static int viewer_rows(rect_t b){ return ((int)b.h - 64 - UI_BTN_H - 8) / UI_CH; }
+static rect_t back_btn(rect_t b){ return ui_button(b, 150); }
+
+/* Moves the viewer by d lines, as far as the text goes. */
+static void viewer_scroll(int d){
+    int m = vnlines - viewer_rows(last_body);
+    vtop += d;
+    if(vtop > m) vtop = m;
+    if(vtop < 0) vtop = 0;
+}
 
 static void activate(void){
     if(nents == 0) return;
@@ -130,6 +139,11 @@ static void f_close(void){
 }
 
 static void draw_viewer(rect_t b){
+    rect_t bb = back_btn(b);
+    ui_rrect(bb.x, bb.y, bb.w, bb.h, 10, C_CARD_HI);
+    ui_text(bb.x + (bb.w - ui_text_w("Back", UI_SCALE)) / 2, bb.y + 4, "Back", C_TEXT, UI_SCALE);
+    ui_text(b.x, b.y + 4, vname, C_TEXT, UI_SCALE);
+    b.y += UI_BTN_H + 8; b.h -= UI_BTN_H + 8;        /* the text goes under that row */
     if(vbinary){
         char m[48] = "(binary file, ", n[12];
         ui_num(vsize, n); ui_cat(m, n); ui_cat(m, " bytes)");
@@ -139,7 +153,7 @@ static void draw_viewer(rect_t b){
     }
     int cols = (int)(b.w - 32) / (int)UI_CW;
     if(cols > 120) cols = 120;
-    int rows = viewer_rows(b);
+    int rows = viewer_rows(last_body);
     for(int i = 0; i < rows && !vbinary; i++){
         int ln = vtop + i;
         if(ln >= vnlines) break;
@@ -163,9 +177,9 @@ static void draw_viewer(rect_t b){
         u32 last = (u32)vtop + (u32)rows;
         if(last > (u32)vnlines) last = (u32)vnlines;
         ui_num(last, c2); ui_num((u32)vnlines, c3);
-        ui_cat(foot, vname); ui_cat(foot, "   lines "); ui_cat(foot, a);
+        ui_cat(foot, "Lines "); ui_cat(foot, a);
         ui_cat(foot, "-"); ui_cat(foot, c2); ui_cat(foot, " of "); ui_cat(foot, c3);
-        if(vsize > VIEW_BYTES) ui_cat(foot, "  (first 4 KB)");
+        if(vsize > VIEW_BYTES) ui_cat(foot, "  (the first 64 KB of the file)");
         ui_text(b.x, b.y + b.h - 24, foot, C_DIM, 1);
     }
 }
@@ -183,8 +197,8 @@ static void f_draw(rect_t b, int focused){
     ui_cat(cnt, nents == 1 ? " item" : " items");
     ui_text(b.x + ui_text_w(p, UI_SCALE) + 20, b.y + 14, cnt, C_DIM, 1);
     rect_t upb = ui_button(b, 150);
-    ui_fill(upb, C_CARD_HI);
-    ui_text(upb.x + 40, upb.y + 4, "Up", C_TEXT, UI_SCALE);
+    ui_rrect(upb.x, upb.y, upb.w, upb.h, 10, C_CARD_HI);
+    ui_text(upb.x + (upb.w - ui_text_w("Up", UI_SCALE)) / 2, upb.y + 4, "Up", path[0] ? C_TEXT : C_DIM, UI_SCALE);
 
     rect_t hd = ui_list_head(b);
     ui_text(hd.x + 20, hd.y + 4, "Name", C_DIM, UI_SCALE);
@@ -222,12 +236,13 @@ static void f_draw(rect_t b, int focused){
 static int f_key(int c){
     int rows = ui_list_rows(last_body);
     if(vbuf){
-        int m = vnlines - viewer_rows(last_body);
         if(c == 27 || c == '\b'){ viewer_close(); return 1; }
-        if(c == KEY_UP)   { if(vtop > 0) vtop--; return 1; }
-        if(c == KEY_DOWN) { if(vtop < m) vtop++; return 1; }
-        if(c == KEY_PGUP) { vtop -= viewer_rows(last_body); if(vtop < 0) vtop = 0; return 1; }
-        if(c == KEY_PGDN) { vtop += viewer_rows(last_body); return 1; }
+        if(c == KEY_UP)   { viewer_scroll(-1); return 1; }
+        if(c == KEY_DOWN) { viewer_scroll(1); return 1; }
+        if(c == KEY_PGUP) { viewer_scroll(-viewer_rows(last_body)); return 1; }
+        if(c == KEY_PGDN) { viewer_scroll(viewer_rows(last_body)); return 1; }
+        if(c == KEY_HOME) { viewer_scroll(-vnlines); return 1; }
+        if(c == KEY_END)  { viewer_scroll(vnlines); return 1; }
         return 0;
     }
     if(c == '\b'){ up(); return 1; }
@@ -240,7 +255,10 @@ static int f_key(int c){
 }
 
 static void f_click(rect_t b, int x, int y){
-    if(vbuf) return;
+    if(vbuf){
+        if(ui_contains(back_btn(b), x, y)) viewer_close();
+        return;
+    }
     if(ui_contains(ui_button(b, 150), x, y)){ up(); return; }
     int rows = ui_list_rows(b);
     for(int i = 0; i < rows; i++){
@@ -252,13 +270,25 @@ static void f_click(rect_t b, int x, int y){
     }
 }
 
+/* The wheel: three lines of a file, or three rows of the list. */
+static void f_scroll(rect_t b, int x, int y, int dz){
+    (void)x; (void)y;
+    if(vbuf){ viewer_scroll(dz * 3); return; }
+    int rows = ui_list_rows(b);
+    top += dz * 3;
+    if(top > nents - rows) top = nents - rows;
+    if(top < 0) top = 0;
+    if(sel < top) sel = top;                          /* the selection stays among the rows shown */
+    if(sel >= top + rows) sel = top + rows - 1;
+}
+
 const app_t app_files = {
     .name = "Files",
     .icon = UI_ICO_FILES,
-    .pinned = 1,
     .open = f_open,
     .close = f_close,
     .draw = f_draw,
     .key = f_key,
     .click = f_click,
+    .scroll = f_scroll,
 };

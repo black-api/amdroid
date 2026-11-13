@@ -6,6 +6,7 @@
 #define NOTE_FILE  "NOTES.TXT"
 #define NOTE_MAX   2000
 #define LINES_MAX  256
+#define LINE_MAX   160             /* characters across, in the widest window */
 
 static char text[NOTE_MAX + 1];
 static u32 len = 0;
@@ -84,14 +85,15 @@ static void n_draw(rect_t b, int focused){
     ui_text(sb.x + 30, sb.y + 4, dirty ? "Save*" : "Save", dirty ? C_BAR : C_TEXT, UI_SCALE);
 
     u32 cols = (b.w - 16) / UI_CW;
+    if(cols > LINE_MAX) cols = LINE_MAX;
     wrap((int)cols);
     int rows = (int)(b.h - 64 - 28) / UI_CH;
     if(rows < 1) rows = 1;
     int first = nlines > rows ? nlines - rows : 0;      /* keep the end in view */
     for(int i = first; i < nlines; i++){
-        char line[80];
+        char line[LINE_MAX + 1];
         u32 n = ls_len[i];
-        if(n > 79) n = 79;
+        if(n > LINE_MAX) n = LINE_MAX;
         for(u32 k = 0; k < n; k++) line[k] = text[ls_start[i] + k];
         line[n] = 0;
         ui_text(b.x + 8, b.y + 64 + (u32)(i - first) * UI_CH, line, C_TEXT, UI_SCALE);
@@ -128,7 +130,6 @@ static int n_key(int c){
 const app_t app_notes = {
     .name = "Notes",
     .icon = UI_ICO_NOTES,
-    .pinned = 0,
     .open = n_open,
     .close = n_close,
     .draw = n_draw,

@@ -8,8 +8,8 @@
 #include "amdroid/types.h"
 
 #define HUSSER_SHM_VA       0x60000000ULL
-#define HUSSER_MAX_W        1600
-#define HUSSER_MAX_H        768
+#define HUSSER_MAX_W        1920            /* a maximized window on a full-HD screen */
+#define HUSSER_MAX_H        1080
 #define HUSSER_VRAM_OFF     16384ULL            /* the header fits below this (it is bigger than one page) */
 #define HUSSER_VRAM_BYTES   ((u64)HUSSER_MAX_W * HUSSER_MAX_H * 4)
 #define HUSSER_PAGE_OFF     (HUSSER_VRAM_OFF + HUSSER_VRAM_BYTES)
@@ -19,7 +19,7 @@
 #define HUSSER_SHM_BYTES    (HUSSER_RES_OFF + HUSSER_RES_BYTES)
 
 #define HUSSER_MAGIC        0x52555348u                 /* 'HUSR' */
-#define HUSSER_VER          1u
+#define HUSSER_VER          2u
 
 /* cmd (browser -> husser) */
 #define H_CMD_NONE          0
@@ -57,13 +57,15 @@ typedef struct husser_shm {
     /* set by the kernel before husser starts; husser only checks */
     u32 magic;
     u32 ver;
-    u32 vw, vh;                 /* viewport size in pixels (<= HUSSER_MAX_*) */
-    u32 pitch;                  /* pixels per row * 4 (vw * 4) */
+    u32 vw, vh;                 /* viewport size in pixels (<= HUSSER_MAX_*): the kernel sets the
+                                   first, H_CMD_RESIZE the later ones */
 
     /* husser -> browser */
     u32 state;                  /* H_STATE_* */
     u32 input_focus;            /* 1 while an <input> has focus (typing goes there) */
     u32 frame_seq;              /* bumped each finished frame */
+    u32 frame_w, frame_h;       /* the size of the frame in the viewport area; 0 while a frame
+                                   of another size is being copied in */
     u32 page_len;               /* bytes at HUSSER_PAGE_OFF to parse on H_CMD_LOAD */
     u32 page_h;                 /* the laid-out height (for the scrollbar) */
     char page_url[HUSSER_URL_MAX];  /* window.location, set before H_CMD_LOAD */
@@ -88,7 +90,6 @@ typedef struct husser_shm {
     u32 res_kind;               /* 1 css, 2 image */
     u32 res_idx;                /* image index, or 0xffffffff for a stylesheet */
     u32 res_len;                /* bytes at HUSSER_RES_OFF */
-    u32 res_done_seq;           /* bumped by the kernel per delivered resource */
 
     /* command channel (browser -> husser) */
     u32 cmd;                    /* H_CMD_* */
@@ -96,7 +97,6 @@ typedef struct husser_shm {
     u32 ack_seq;                /* husser sets it to the last seq it finished */
     i32 cmd_i, cmd_j;
 
-    u32 scroll;                 /* current scroll (kept by husser; PAINT carries it) */
 } husser_shm_t;
 
 #endif

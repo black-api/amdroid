@@ -91,19 +91,6 @@ int fz_canon_path(const char *in, char *out, int cap){
     return 1;
 }
 
-int fz_canon_name(const char *in, char *out, int cap){
-    if(strchr(in, '/')) return 0;
-    int n = (int)strlen(in);
-    if(n == 0 || n > 12 || n + 1 > cap) return 0;
-    for(int i = 0; i < n; i++){
-        char c = in[i];
-        if(c >= 'a' && c <= 'z') c = (char)(c - 32);
-        out[i] = c;
-    }
-    out[n] = 0;
-    return 1;
-}
-
 /* ---------- lexer ---------- */
 typedef enum {
     K_EOF, K_NL, K_IDENT, K_NUM, K_STR,

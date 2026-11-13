@@ -22,7 +22,7 @@ typedef struct {
     int x, w;                 /* x within the line, width in px */
     int scale;
     u32 color;
-    int bold, underline, link;
+    int bold, italic, underline, link;
     const char *text;         /* copy in the arena */
     int tlen;
 } frag_t;
@@ -80,7 +80,7 @@ static void flush_line(void){
             emit(&b);
         }
         web_cmd_t c = { .kind = WEB_CMD_TEXT, .x = cx + offset + f->x, .y = top, .w = f->w, .h = 16 * f->scale,
-                        .color = f->color, .scale = f->scale, .bold = f->bold, .text = f->text, .link = f->link,
+                        .color = f->color, .scale = f->scale, .bold = f->bold, .italic = f->italic, .text = f->text, .link = f->link,
                         .dom = f->dom };
         emit(&c);
         if(f->underline){
@@ -114,14 +114,14 @@ static void add_piece(const char *w, int wl, wstyle_t *st, int link){
         if(fit < 1) fit = 1;
         const char *t = arena_put(w, fit);
         if(!t) return;
-        frags[nfrag++] = (frag_t){ cur_dom, cur_bg_set, cur_bg, used, fit * cwpx, sc, st->color, st->bold, st->underline, link, t, fit };
+        frags[nfrag++] = (frag_t){ cur_dom, cur_bg_set, cur_bg, used, fit * cwpx, sc, st->color, st->bold, st->italic, st->underline, link, t, fit };
         used += fit * cwpx;
         flush_line();
         w += fit; wl -= fit;
     }
     const char *t = arena_put(w, wl);
     if(!t) return;
-    frags[nfrag++] = (frag_t){ cur_dom, cur_bg_set, cur_bg, used + space, wl * cwpx, sc, st->color, st->bold, st->underline, link, t, wl };
+    frags[nfrag++] = (frag_t){ cur_dom, cur_bg_set, cur_bg, used + space, wl * cwpx, sc, st->color, st->bold, st->italic, st->underline, link, t, wl };
     used += space + wl * cwpx;
     pending_space = 0;
 }
@@ -219,6 +219,31 @@ int web_entity(const char *s, u32 n, const char **out){
 /* Splits text into words (collapsing white space) and adds them. */
 static void add_text(const char *s, u32 n, wstyle_t *st, int link){
     if(st->hide_text) return;
+    if(st->white_pre){
+        /* keep spaces and newlines: emit each line as pieces, break on '\n' */
+        char buf[160]; int bl = 0;
+        u32 i = 0;
+        if(n > 0 && s[0] == '\n') i = 1;             /* a single leading newline after <pre> is dropped */
+        pending_space = 0;
+        for(; i < n; ){
+            char c = s[i];
+            if(c == '\r'){ i++; continue; }
+            if(c == '\n'){ if(bl){ add_piece(buf, bl, st, link); bl = 0; } flush_line(); pending_space = 0; i++; continue; }
+            if(c == '\t'){ i++; for(int k = 0; k < 4 && bl < 159; k++) buf[bl++] = ' '; }
+            else if(c == '&'){
+                const char *rep = NULL; int used = web_entity(s + i, n - i, &rep);
+                if(used) i += (u32)used; else { rep = "&"; i++; }
+                for(; rep && *rep; rep++) if(bl < 159) buf[bl++] = *rep;
+            } else if((unsigned char)c >= 0x80){
+                u32 cp; i += (u32)web_utf8(s + i, n - i, &cp);
+                const char *rep = web_uni_ascii(cp);
+                for(; rep && *rep; rep++) if(bl < 159) buf[bl++] = *rep;
+            } else { if(bl < 159) buf[bl++] = c; i++; }
+            if(bl >= 150){ add_piece(buf, bl, st, link); bl = 0; }   /* flush long lines in chunks */
+        }
+        if(bl) add_piece(buf, bl, st, link);
+        return;
+    }
     char word[160];
     int wl = 0;
     for(u32 i = 0; i < n; ){
@@ -658,7 +683,20 @@ static void layout_node(wnode_t *n){
     if(st->display == W_LISTITEM && !st->no_bullet){
         wstyle_t bullet = *st;
         bullet.color = 0x9AA7B0;
-        add_text("*", 1, &bullet, -1);
+        if(n->parent && strcmp(n->parent->tag, "ol") == 0){
+            /* ordered list: a number, not a disc */
+            int num = 1;
+            for(wnode_t *sib = n->parent->first; sib && sib != n; sib = sib->next)
+                if(!sib->text && strcmp(sib->tag, "li") == 0) num++;
+            char buf[16]; int k = 0; char tmp[12]; int t = 0;
+            if(num <= 0) tmp[t++] = '0';
+            for(int v = num; v > 0; v /= 10) tmp[t++] = (char)('0' + v % 10);
+            while(t > 0) buf[k++] = tmp[--t];
+            buf[k++] = '.';
+            add_text(buf, (u32)k, &bullet, -1);
+        } else {
+            add_text("\x07", 1, &bullet, -1);     /* a centred filled disc, not an asterisk */
+        }
         pending_space = 1;
     }
     int is_table = strcmp(n->tag, "table") == 0 && table_depth < TABLE_DEPTH;

@@ -25,7 +25,5 @@ void serial_putc(char c){
     if(c=='\n'){ while(!serial_tx_ready()); outb(COM1,'\r'); }
 }
 
-void serial_puts(const char *s){ while(*s) serial_putc(*s++); }
-
 int serial_has_input(void){ return serial_rx_ready(); }
 int serial_getc(void){ if(!serial_rx_ready()) return -1; return inb(COM1); }

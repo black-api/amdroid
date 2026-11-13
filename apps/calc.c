@@ -1,4 +1,5 @@
-/* Calculator: whole-number arithmetic with + - * / and parentheses. */
+/* Calculator: whole-number arithmetic with + - * / and parentheses; a minus at the start
+ * or after "(" or another operator makes the next number negative. */
 #include "amdroid/ui.h"
 #include "amdroid/keyboard.h"
 
@@ -30,22 +31,34 @@ static long long eval(const char *s, int *err){
     long long vals[24];
     char ops[24];
     int vn = 0, on = 0;
+    int want_value = 1;                       /* a number or "(" comes next, not an operator */
+    int negate = 0;
     *err = 0;
     for(const char *p = s; *p; ){
         if(*p == ' '){ p++; continue; }
+        if(*p == '-' && want_value && !negate && p[1] >= '0' && p[1] <= '9'){ negate = 1; p++; continue; }
         if(*p >= '0' && *p <= '9'){
             long long n = 0;
             while(*p >= '0' && *p <= '9'){ n = n * 10 + (*p - '0'); p++; }
             if(vn >= 24){ *err = 1; return 0; }
-            vals[vn++] = n;
+            vals[vn++] = negate ? -n : n;
+            negate = 0;
+            want_value = 0;
             continue;
         }
-        if(*p == '('){ if(on >= 24) { *err = 1; return 0; } ops[on++] = '('; p++; continue; }
+        if(*p == '-' && want_value && p[1] == '(' && (on == 0 || ops[on - 1] == '(')){
+            /* "-(" at the start of an expression or of a bracket: 0 - (...) */
+            if(vn >= 24 || on >= 24){ *err = 1; return 0; }
+            vals[vn++] = 0; ops[on++] = '-'; p++;
+            continue;
+        }
+        if(*p == '('){ if(on >= 24) { *err = 1; return 0; } ops[on++] = '('; p++; want_value = 1; continue; }
         if(*p == ')'){
             while(on > 0 && ops[on - 1] != '(') { if(!apply(vals, &vn, ops[--on], err)) return 0; }
             if(on == 0){ *err = 1; return 0; }
             on--;
             p++;
+            want_value = 0;
             continue;
         }
         if(*p == '+' || *p == '-' || *p == '*' || *p == '/'){
@@ -55,6 +68,7 @@ static long long eval(const char *s, int *err){
             if(on >= 24){ *err = 1; return 0; }
             ops[on++] = *p;
             p++;
+            want_value = 1;
             continue;
         }
         *err = 1;
@@ -92,7 +106,13 @@ static void press(char c){
     if(c == '='){ run(); return; }
     int n = (int)ui_len(expr);
     if(n >= EXPR_MAX) return;
-    if(shown[0] && !shown_is_error && c >= '0' && c <= '9'){ expr[0] = 0; shown[0] = 0; n = 0; }
+    if(shown[0] && !shown_is_error){
+        /* after a result: a digit starts a new sum, an operator goes on from the result */
+        if(c >= '0' && c <= '9') expr[0] = 0;
+        else if(c != '(' && c != ')') ui_copy(expr, shown, sizeof expr);
+        shown[0] = 0;
+        n = (int)ui_len(expr);
+    }
     expr[n] = c;
     expr[n + 1] = 0;
 }
@@ -164,7 +184,6 @@ static int c_key(int c){
 const app_t app_calc = {
     .name = "Calculator",
     .icon = UI_ICO_CALC,
-    .pinned = 0,
     .open = NULL,
     .close = NULL,
     .draw = c_draw,

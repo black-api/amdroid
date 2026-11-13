@@ -38,6 +38,8 @@ typedef struct proc {
     int ppid;                   /* the process that started it */
     u32 serial;                 /* tells a new process from an old one that had the same pid */
     u64 cycles;                 /* CPU time used, in TSC cycles */
+    u64 sleep_until;            /* in proc_sleep_ticks: not picked to run before this tick... */
+    int wake;                   /* ...unless proc_wake set this */
     u8 fx[512] __attribute__((aligned(16)));   /* saved SSE/x87 state */
 } proc_t;
 
@@ -136,8 +138,15 @@ static void reap(proc_t *p){
     p->state = P_FREE;
 }
 
+/* READY and not asleep: a sleeper costs no CPU until its tick comes or it is woken,
+ * so two sleeping processes let the machine halt instead of yielding to each other. */
+static int runnable(int i){
+    const proc_t *p = &procs[i];
+    return p->state == P_READY && (p->wake || timer_ticks() >= p->sleep_until);
+}
+
 static int any_other_ready(void){
-    for(int i = 0; i < MAX_PROCS; i++) if(i != cur && procs[i].state == P_READY) return 1;
+    for(int i = 0; i < MAX_PROCS; i++) if(i != cur && runnable(i)) return 1;
     return 0;
 }
 
@@ -238,7 +247,15 @@ u64 *sched_switch(u64 *frame){
         int next = -1;
         for(int k = 1; k <= MAX_PROCS; k++){
             int i = (cur + k) % MAX_PROCS;
-            if(procs[i].state == P_READY){ next = i; break; }
+            if(runnable(i)){ next = i; break; }
+        }
+        if(next < 0 && from->state != P_READY){
+            /* the caller cannot go on (it exited or blocked) and the rest are asleep:
+               run a sleeper, which halts in its own wait loop */
+            for(int k = 1; k <= MAX_PROCS; k++){
+                int i = (cur + k) % MAX_PROCS;
+                if(procs[i].state == P_READY){ next = i; break; }
+            }
         }
         if(next < 0){
             /* nothing else can run: keep the caller */
@@ -289,13 +306,28 @@ void proc_idle(void){
     __asm__ volatile("cli");
 }
 
-/* Waits n timer ticks, letting other processes run (the GUI uses this between frames). */
+/* Waits n timer ticks, letting other processes run (the GUI uses this between frames).
+ * proc_wake on the sleeper ends the wait early. */
 void proc_sleep_ticks(u64 n){
+    int me = cur;
     u64 target = timer_ticks() + n;
-    while(timer_ticks() < target){
+    procs[me].sleep_until = target;
+    while(timer_ticks() < target && !procs[me].wake){
         if(any_other_ready()) yield_now();
         else idle_hlt();
     }
+    procs[me].sleep_until = 0;
+    procs[me].wake = 0;
+}
+
+void proc_wake(int pid){
+    if(pid >= 0 && pid < MAX_PROCS && procs[pid].state != P_FREE) procs[pid].wake = 1;
+}
+
+/* 1 while pid can still run (it has not exited or been killed). */
+int proc_alive(int pid){
+    if(pid < 0 || pid >= MAX_PROCS) return 0;
+    return procs[pid].state != P_FREE && procs[pid].state != P_ZOMBIE;
 }
 
 /* A snapshot of the processes for the task manager. */

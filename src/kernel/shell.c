@@ -788,14 +788,15 @@ int shell_run(void){
             console_printf("hussertest: husser pid %d\n", pid);
             husser_load(test_html, (u32)sizeof(test_html) - 1, 0);
             for(int i = 0; i < 100; i++){
+                husser_pump();
                 proc_sleep_ticks(5);
                 const volatile husser_shm_t *h = husser_header();
                 if(h && h->frame_seq > 0) break;
             }
             const volatile husser_shm_t *h = husser_header();
             if(!h){ console_puts("hussertest: header gone\n"); continue; }
-            console_printf("hussertest: state=%u frame=%u page_h=%u nonzero_px=%u alive=%d\n",
-                           h->state, h->frame_seq, h->page_h, husser_vram_nonzero(), husser_alive());
+            console_printf("hussertest: state=%u frames=%u size=%ux%u page_h=%u alive=%d\n",
+                           h->state, h->frame_seq, h->frame_w, h->frame_h, h->page_h, husser_alive());
             husser_close();
             console_puts("hussertest: done\n");
         }

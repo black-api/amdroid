@@ -124,7 +124,6 @@ int fat32_list_root(void (*cb)(const char*,int,u32)){
 }
 
 int fat32_read_file(const char *name, void *buf, u32 max, u32 *out_size){
-    u32 c = root_cluster;
     u8 *clbuf = kmalloc(sectors_per_cluster*512);
     /* find entry */
     u32 first_cluster=0; u32 fsize=0; int found=0;
@@ -359,13 +358,6 @@ int fat32_write_file(const char *name, const void *data, u32 size){
     if(to_83(name, n83) != 0) return -1;
     if(dir_scan(n83) != 0) return -1;
     return write_entry(data, size, n83);
-}
-
-int fat32_delete_file(const char *name){
-    u8 n83[11];
-    if(to_83(name, n83) != 0) return -1;
-    if(dir_scan(n83) != 0 || !dir_has_found) return -1;
-    return delete_entry();
 }
 
 static int delete_entry(void){

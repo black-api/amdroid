@@ -68,10 +68,26 @@ int cm_click(int x, int y, int *action, int *ctx){
 }
 int cm_inside(int x, int y){ return is_open && ui_contains(card, x, y); }
 
+/* Opening: it drops in and fades from the desktop. 255 once it is in place. */
+static int open_amount(u64 now){
+    return ui_anim_on && now - opened_at < CM_OPEN_TICKS ? ui_ease((int)((now - opened_at) * 255 / CM_OPEN_TICKS)) : 255;
+}
+
+void cm_damage(int mx, int my, u64 now){
+    static int sh_open = 0, sh_t = 0, sh_hov = -1;
+    static rect_t sh_card;
+    int t = is_open ? open_amount(now) : 0;
+    int hov = is_open ? item_at(mx, my + (255 - t) * 10 / 255) : -1;
+    if(is_open == sh_open && t == sh_t && hov == sh_hov && card.x == sh_card.x && card.y == sh_card.y) return;
+    /* the card with its shadow, and the 10 pixels above that it drops through */
+    if(sh_open) gui_damage((int)sh_card.x, (int)sh_card.y - 10, (int)sh_card.w + 3, (int)sh_card.h + 18);
+    if(is_open) gui_damage((int)card.x, (int)card.y - 10, (int)card.w + 3, (int)card.h + 18);
+    sh_open = is_open; sh_t = t; sh_hov = hov; sh_card = card;
+}
+
 void cm_draw(int mx, int my, u64 now){
     if(!is_open) return;
-    /* opening: it drops in and fades from the desktop */
-    int t = ui_anim_on && now - opened_at < CM_OPEN_TICKS ? ui_ease((int)((now - opened_at) * 255 / CM_OPEN_TICKS)) : 255;
+    int t = open_amount(now);
     int dy = (255 - t) * 10 / 255;
     rect_t c = card;
     c.y = (u32)((int)c.y - dy);

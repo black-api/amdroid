@@ -12,8 +12,6 @@ void vga_init(void){
     vga_clear();
 }
 
-void vga_set_color(u8 fg, u8 bg){ vga_color = (bg<<4)|fg; }
-
 static void vga_scroll(void){
     for(int y=1;y<VGA_H;y++)
         for(int x=0;x<VGA_W;x++)
@@ -34,8 +32,6 @@ void vga_putc(char c){
     if(vga_cx>=VGA_W){ vga_cx=0; vga_cy++; }
     if(vga_cy>=VGA_H){ vga_scroll(); vga_cy=VGA_H-1; }
 }
-
-void vga_puts(const char *s){ while(*s) vga_putc(*s++); }
 
 void vga_clear(void){
     for(int i=0;i<VGA_W*VGA_H;i++)

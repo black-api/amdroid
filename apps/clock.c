@@ -85,10 +85,18 @@ static void c_draw(rect_t b, int focused){
     ui_text(b.x, b.y + 224, sw, C_TEXT, 4);
 
     rect_t sb = start_btn(b), rb = reset_btn(b);
-    ui_fill(sb, running ? C_CARD_HI : ui_accent());
+    ui_rrect(sb.x, sb.y, sb.w, sb.h, 10, running ? C_CARD_HI : ui_accent());
     ui_text(sb.x + 28, sb.y + 6, running ? "Stop" : "Start", running ? C_TEXT : C_BAR, UI_SCALE);
-    ui_fill(rb, C_CARD_HI);
+    ui_rrect(rb.x, rb.y, rb.w, rb.h, 10, C_CARD_HI);
     ui_text(rb.x + 28, rb.y + 6, "Reset", C_TEXT, UI_SCALE);
+}
+
+/* The time shows seconds, and a running stopwatch hundredths (drawn 50 times a second). */
+static void c_tick(void){
+    static u64 shown;
+    u64 now = timer_ticks();
+    u64 step = running ? now / 2 : now / 100;
+    if(step != shown){ shown = step; ui_redraw(); }
 }
 
 static void c_click(rect_t b, int x, int y){
@@ -105,10 +113,10 @@ static int c_key(int c){
 const app_t app_clock = {
     .name = "Clock",
     .icon = UI_ICO_CLOCK,
-    .pinned = 0,
     .open = NULL,
     .close = NULL,
     .draw = c_draw,
     .key = c_key,
     .click = c_click,
+    .tick = c_tick,
 };

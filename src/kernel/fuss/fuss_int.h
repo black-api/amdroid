@@ -72,7 +72,6 @@ extern const char *fz_file;
 extern int fz_line;
 
 /* ---------- errors (run.c) ---------- */
-void fz_at(const char *file, int line);
 void fz_die(const char *fmt, ...) __attribute__((noreturn)); /* report at fz_file:fz_line and stop */
 void fz_finish(int code) __attribute__((noreturn));
 void fz_report(const char *file, int line, const char *fmt, ...); /* records a compile error and continues */
@@ -83,7 +82,6 @@ void fz_reset(void);
 void fz_eval_reset(void);
 void fz_compile_main(const char *name, const char *text);
 void fz_resolve(void);
-int  fz_canon_name(const char *in, char *out, int cap);  /* 8.3 upper-case, or 0 */
 int  fz_canon_path(const char *in, char *out, int cap);  /* "DIR/NAME.EXT" upper-case, or 0 */
 
 /* ---------- runtime memory (gc.c) ---------- */

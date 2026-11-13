@@ -26,8 +26,6 @@ static u64 view_off;               /* lines scrolled back from the bottom */
 static u64 last_flush;
 static int cur_drawn_x = -1, cur_drawn_row = -1;
 
-int fbcon_ready(void){ return ready; }
-
 static char *line_of(u64 abs){ return text + (abs % HIST) * cols; }
 
 void fbcon_init(void){

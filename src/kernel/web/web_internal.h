@@ -24,6 +24,7 @@ typedef struct wstyle {
     int bt, br, bb, bl;       /* per-side border widths (0 = no border on that side) */
     int gap;                  /* flex: space between items */
     int no_bullet;            /* list-style: none (inherited) */
+    int white_pre;            /* white-space: pre — keep newlines and runs of spaces (inherited) */
     int hide_text;            /* font-size: 0 or text-indent far to the left: the text is not shown (inherited) */
     int zero_h, ovf_hidden;   /* height: 0 and overflow: hidden (together: nothing shows) */
     int flex_grow;            /* flex-grow (0 = keep its size) */

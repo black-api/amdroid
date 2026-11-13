@@ -8,7 +8,6 @@
  * USERS.DB (accounts) and PERMS.DB (file owners and modes). */
 void auth_init(void);                       /* loads the databases; first boot asks for a root password */
 int  auth_login(const char *name, const char *pass);   /* 0 on success */
-int  auth_login_nopass(const char *name);              /* the GUI login screen: no password (physical console only) */
 int  auth_user_count(void);                            /* accounts in the database */
 const char *auth_user_at(int i, int *uid);             /* the i-th account's name and uid, or NULL */
 void auth_logout(void);                       /* back to nobody */
@@ -21,7 +20,6 @@ int  auth_may_as(int uid, const char *path, int write);
 void auth_claim_as(int uid, const char *path);
 int  auth_chmod(const char *path, int mode);           /* owner or root */
 void auth_claim(const char *path);                     /* a new file belongs to the current user */
-int  auth_mode_of(const char *path, int *owner);       /* for listings and checks */
 void auth_read_secret(char *buf, int max);             /* reads a line with no echo */
 void auth_read_line(char *buf, int max);               /* reads a line with echo */
 

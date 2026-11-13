@@ -87,6 +87,3 @@ int ata_dev_present(int chan, int slave){
 int ata_dev_read(int chan, int slave, u32 lba, u8 count, void *buf){
     return ata_read_at(base_of[chan], lba, count, buf, slave ? 0xF0 : 0xE0);
 }
-int ata_dev_write(int chan, int slave, u32 lba, u8 count, const void *buf){
-    return ata_write_at(base_of[chan], lba, count, buf, slave ? 0xF0 : 0xE0);
-}

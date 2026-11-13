@@ -9,6 +9,8 @@
 #include "amdroid/auth.h"
 #include "amdroid/net.h"
 #include "amdroid/sched.h"
+#include "amdroid/pkg.h"
+#include "amdroid/fuss.h"
 #include "gui_internal.h"
 
 static int start_open = 0;
@@ -17,19 +19,119 @@ static int last_title_app = -1;                    /* for double-clicks on a tit
 static u64 last_title_at = 0;
 static int drag_px = 0, drag_py = 0;               /* where a title-bar drag started */
 static u64 start_opened_at = 0;      /* when the Start menu opened, for its slide */
-static int hov_item = -1, hov_amt = 0;
+static int hov_item = -1;
+static u64 hov_since = 0;            /* when the pointer came onto that taskbar item */
 
 static void set_start(int open, u64 now){
-    if(open && !start_open) start_opened_at = now;
+    if(open && !start_open){ start_opened_at = now; tb_menu_reset(); }
     start_open = open;
 }
 
+/* ---- repainting ----
+ * Only the parts of the screen that changed are drawn again. Each layer reports what
+ * changed (gui_damage); the frame then redraws those rectangles from the wallpaper up and
+ * copies just them to the screen. With nothing reported, nothing is drawn at all. */
+#define DMG_MAX 12
+typedef struct { int x0, y0, x1, y1; } box_t;
+static box_t dmg[DMG_MAX];
+static int ndmg = 0;
+static int scr_w = 0, scr_h = 0;
+
+static long box_area(box_t b){ return (long)(b.x1 - b.x0) * (b.y1 - b.y0); }
+static box_t box_union(box_t a, box_t b){
+    return (box_t){ a.x0 < b.x0 ? a.x0 : b.x0, a.y0 < b.y0 ? a.y0 : b.y0,
+                    a.x1 > b.x1 ? a.x1 : b.x1, a.y1 > b.y1 ? a.y1 : b.y1 };
+}
+
+void gui_damage(int x, int y, int w, int h){
+    box_t b = { x < 0 ? 0 : x, y < 0 ? 0 : y, x + w > scr_w ? scr_w : x + w, y + h > scr_h ? scr_h : y + h };
+    if(b.x1 <= b.x0 || b.y1 <= b.y0) return;
+    /* boxes that overlap or nearly touch become one, so no pixel is drawn twice for nothing */
+    for(int again = 1; again; ){
+        again = 0;
+        for(int i = 0; i < ndmg; i++){
+            box_t u = box_union(dmg[i], b);
+            if(box_area(u) <= box_area(dmg[i]) + box_area(b) + 4096){
+                b = u;
+                dmg[i] = dmg[--ndmg];
+                again = 1;
+                break;
+            }
+        }
+    }
+    if(ndmg == DMG_MAX){                      /* no room left: one box around them all */
+        for(int i = 0; i < ndmg; i++) b = box_union(b, dmg[i]);
+        ndmg = 0;
+    }
+    dmg[ndmg++] = b;
+}
+
+void gui_damage_all(void){
+    ndmg = 0;
+    dmg[ndmg++] = (box_t){ 0, 0, scr_w, scr_h };
+}
+
+/* ---- how the screen is doing, for the Tasks app: measured over the last full second ---- */
+static ui_perf_t perf, perf_run;
+static u64 perf_sec = 0, perf_us_sum = 0, perf_px_sum = 0;
+static u64 cal_tsc = 0, cal_tick = 0, cyc_per_tick = 0;
+
+void ui_perf(ui_perf_t *out){ *out = perf; }
+
+static void perf_frame(u64 cycles, u64 pixels){
+    u32 us = cyc_per_tick ? (u32)(cycles * 10000 / cyc_per_tick) : 0;
+    perf_run.redraws++;
+    perf_us_sum += us;
+    perf_px_sum += pixels;
+    if(us > perf_run.max_us) perf_run.max_us = us;
+}
+
+static void perf_loop(u64 now){
+    u64 tsc = sched_tsc();
+    if(!cal_tick){ cal_tick = now; cal_tsc = tsc; }
+    else if(now - cal_tick >= 50){               /* how many CPU cycles a timer tick lasts */
+        cyc_per_tick = (tsc - cal_tsc) / (now - cal_tick);
+        cal_tick = now; cal_tsc = tsc;
+    }
+    perf_run.loops++;
+    if(now / 100 != perf_sec){
+        perf_sec = now / 100;
+        perf = perf_run;
+        perf.avg_us = perf.redraws ? (u32)(perf_us_sum / perf.redraws) : 0;
+        perf.screen_tenths = (u32)(perf_px_sum * 1000 / ((u64)scr_w * (u64)scr_h * 100));
+#ifdef GUI_PERF_LOG
+        console_printf("[perf] loops %u redraws %u avg %u us max %u us screen %u/10\n",
+                       perf.loops, perf.redraws, perf.avg_us, perf.max_us, perf.screen_tenths);
+#endif
+        perf_run = (ui_perf_t){ 0 };
+        perf_us_sum = perf_px_sum = 0;
+    }
+}
+
 /* Starts an app from the taskbar, the Start menu or a key. Terminal leaves the GUI. */
+/* Runs an installed .adp app full screen until it exits, then repaints. */
+void gui_run_pkg(const char *id){
+    char path[64];
+    if(pkg_entry_path(id, path, sizeof path) != 0) return;
+    mouse_event_t ev; while(mouse_poll(&ev)) { }      /* swallow the launching click */
+    fuss_run_file(path);
+    while(mouse_poll(&ev)) { }                         /* and the exiting click */
+    gui_damage_all();
+}
+
 static void launch(int a, u64 now, int *next_vt){
     if(a == UI_MAX_APPS){ *next_vt = 2; return; }     /* Terminal */
     if(a == UI_MAX_APPS + 1){ *next_vt = 3; return; }  /* Sign out: back to the login screen */
+    const char *pid = tb_menu_pkg(a);                  /* an installed app from the Start menu? */
+    if(pid){ start_open = 0; gui_run_pkg(pid); return; }
     win_open_app(a, now);
     start_open = 0;
+}
+
+/* Leaving for good (sign out): every app closes properly, so Notes saves and the
+ * browser's renderer goes away. */
+static void close_all(void){
+    for(int a = 0; a < ui_app_count(); a++) if(win_is_open(a)) win_close_app(a);
 }
 
 static void run_item(item_t it, u64 now, int *next_vt){
@@ -197,6 +299,49 @@ static void on_press(rect_t bar, int n, int sw, int x, int y, u64 now, int *next
     }
     const app_t *app = ui_apps[a];
     if(app->click){ ui_app_enter(a); app->click(win_body(a), x, y); ui_app_leave(); }
+    win_mark_dirty(a);
+}
+
+/* Draws the desktop, back to front, inside one damaged box (the clip is set to it). */
+static void compose(box_t box, u64 now, const item_t *it, int n, rect_t bar, int hover, int hov_amt, int mx, int my, u32 sw){
+    /* a window that covers the whole box hides the wallpaper, the icons and the windows under it */
+    int from = win_cover(box.x0, box.y0, box.x1, box.y1, now);
+    if(from < 0){
+        wall_draw();
+        desk_draw();
+    }
+    win_draw_all(now, from < 0 ? 0 : from);
+    isl_draw(now);
+    tb_draw(it, n, bar, hover, hov_amt, win_top_app(), start_open);
+    if(start_open) tb_menu_draw(bar, sw, tb_menu_slide(now, start_opened_at), mx, my);
+    cm_draw(mx, my, now);
+    ui_cursor(mx, my);
+}
+
+/* A key press: the Start menu's search, then the focused app, then the desktop's own keys. */
+static void on_key(int c, u64 now, int *next_vt){
+    int top = win_top_app();
+    if(c == 27 && cm_is_open()){ cm_close(); return; }
+    if(start_open){
+        int r = tb_menu_key(c);
+        if(r >= 0){ launch(r, now, next_vt); return; }
+        if(r == TB_KEY_CLOSE){ start_open = 0; return; }
+        if(r == TB_KEY_USED) return;
+    }
+    /* the focused app gets the key first, so typing in Notes or Calculator
+     * never triggers a shortcut */
+    if(top >= 0 && ui_apps[top]->key){
+        ui_app_enter(top);
+        int used = ui_apps[top]->key(c);
+        ui_app_leave();
+        win_mark_dirty(top);
+        if(used) return;
+    }
+    if(c == 27 && top >= 0) win_close_app(top);
+    else if((c == 'q' || c == 'Q') && top < 0) *next_vt = 2;      /* with no window open: to the text shell */
+    else if(c == '\t') win_cycle_focus();
+    else if(c >= '1' && c <= '9' && c - '1' < ui_app_count()) launch(c - '1', now, next_vt);
+    else if(c == '0') launch(UI_MAX_APPS, now, next_vt);            /* Terminal */
 }
 
 int gui_run(void){
@@ -207,13 +352,16 @@ int gui_run(void){
     mouse_init();
 
     u32 sw = fb_width(), sh = fb_height();
+    scr_w = (int)sw; scr_h = (int)sh;
     wall_init(sw, sh);
     win_init(sw, sh);
     desk_init(sw, sh);
-    ui_msg_set("");
+    gui_damage_all();
 
     /* first notifications: who signed in, and the network */
-    {
+    static int greeted_uid = -2;
+    if(greeted_uid != auth_uid()){
+        greeted_uid = auth_uid();
         char body[64] = "Signed in as ";
         ui_cat(body, auth_name()[0] ? auth_name() : "nobody");
         ui_notify(-1, "Welcome to am-droid", body);
@@ -228,8 +376,10 @@ int gui_run(void){
     }
 
     int mx = (int)sw / 2, my = (int)sh / 2;
-    int prev_btn = 0, next_vt = 0;
+    int held = 0, next_vt = 0;
     int apps = ui_app_count();
+    int cur_x = -1, cur_y = -1;              /* where the pointer was last drawn */
+    int move_app = -1, move_x = -1, move_y = -1;
 
     while(!next_vt){
         u64 now = timer_ticks();
@@ -237,26 +387,34 @@ int gui_run(void){
         int n = tb_items(it);
         rect_t bar = tb_bar(n, sw, sh);
 
-        int mdx, mdy, btns;
-        if(mouse_poll(&mdx, &mdy, &btns)){
-            mx = mx + mdx < 0 ? 0 : (mx + mdx >= (int)sw ? (int)sw - 1 : mx + mdx);
-            my = my + mdy < 0 ? 0 : (my + mdy >= (int)sh ? (int)sh - 1 : my + mdy);
-            if((btns & 1) && !(prev_btn & 1)) on_press(bar, n, (int)sw, mx, my, now, &next_vt);
-            if((btns & 2) && !(prev_btn & 2)) on_right_press(bar, n, (int)sw, (int)sh, mx, my, now);
-            prev_btn = btns;
+        mouse_event_t ev;
+        if(mouse_poll(&ev)){
+            mx = mx + ev.dx < 0 ? 0 : (mx + ev.dx >= (int)sw ? (int)sw - 1 : mx + ev.dx);
+            my = my + ev.dy < 0 ? 0 : (my + ev.dy >= (int)sh ? (int)sh - 1 : my + ev.dy);
+            if(ev.pressed & 1) on_press(bar, n, (int)sw, mx, my, now, &next_vt);
+            if(ev.pressed & 2) on_right_press(bar, n, (int)sw, (int)sh, mx, my, now);
+            held = ev.btns;
+            if(ev.wheel && !cm_is_open() && !start_open){
+                int a = win_at(mx, my);
+                if(a >= 0 && ui_apps[a]->scroll){
+                    ui_app_enter(a);
+                    ui_apps[a]->scroll(win_body(a), mx, my, ev.wheel);
+                    ui_app_leave();
+                    win_mark_dirty(a);
+                }
+            }
         }
-        desk_update(mx, my, prev_btn & 1);
+        desk_update(mx, my, held & 1);
         for(int a = 0; a < apps; a++)
             if(win_is_open(a) && ui_apps[a]->tick){ ui_app_enter(a); ui_apps[a]->tick(); ui_app_leave(); }
         if(rs_app >= 0){
-            if(btns & 1){
+            if(held & 1){
                 rect_t r = win_rect_of(rs_app);
                 win_set_size(rs_app, mx + rs_gx - (int)r.x, my + rs_gy - (int)r.y);
             } else rs_app = -1;
         }
-        win_set_pointer(mx, my);
         if(win_drag_app >= 0){
-            if(btns & 1){
+            if(held & 1){
                 /* a maximized or snapped window keeps its place until it is really moved */
                 if(win_is_max(win_drag_app)){
                     int moved = (mx > drag_px ? mx - drag_px : drag_px - mx) + (my > drag_py ? my - drag_py : drag_py - my);
@@ -277,57 +435,73 @@ int gui_run(void){
                 win_drag_app = -1;
             }
         }
-        int hover = tb_hit(bar, n, mx, my);
+
+        /* what the pointer is over, topmost first: a menu, the island, the taskbar, a window, the desktop */
+        int over_menu = cm_inside(mx, my) || (start_open && ui_contains(tb_menu(bar, sw), mx, my));
+        int hover = over_menu ? -1 : tb_hit(bar, n, mx, my);
+        int over_top = over_menu || hover >= 0 || isl_hit(mx, my);
+        int over_win = over_top ? -1 : win_at(mx, my);
+        win_set_pointer(over_top ? -1 : mx, over_top ? -1 : my);
+        desk_set_hover(over_top || over_win >= 0 ? -1 : desk_hit(mx, my));
         {
+            /* the focused app follows the pointer while it is over its window */
             int tp = win_top_app();
-            if(tp >= 0 && ui_apps[tp]->move){ ui_app_enter(tp); ui_apps[tp]->move(win_body(tp), mx, my); ui_app_leave(); }
+            int px = over_win == tp ? mx : -1, py = over_win == tp ? my : -1;
+            if(tp >= 0 && ui_apps[tp]->move && (tp != move_app || px != move_x || py != move_y)){
+                ui_app_enter(tp); ui_apps[tp]->move(win_body(tp), px, py); ui_app_leave();
+            }
+            move_app = tp; move_x = px; move_y = py;
         }
-        if(hover != hov_item){ hov_item = hover; hov_amt = 0; }
-        else if(hov_amt < 255) hov_amt = ui_anim_on ? (hov_amt + 51 > 255 ? 255 : hov_amt + 51) : 255;
+        if(hover != hov_item){ hov_item = hover; hov_since = now; }
+        int hov_amt = !ui_anim_on || now - hov_since >= 10 ? 255 : (int)((now - hov_since) * 255 / 10);
 
         int rv = keyboard_get_requested_vt();
-        if(rv != -1 && rv != 1) next_vt = rv;
-        if(keyboard_has_input()){
-            int c = keyboard_getchar();
-            int top = win_top_app();
-            /* the focused app gets the key first, so typing in Notes or Calculator
-             * never triggers a shortcut */
-            int used = 0;
-            if(c == 27 && cm_is_open()){ cm_close(); used = 1; }
-            else if(top >= 0 && ui_apps[top]->key){ ui_app_enter(top); used = ui_apps[top]->key(c); ui_app_leave(); }
-            if(used){ }
-            else if(c == 27 && start_open) start_open = 0;
-            else if(c == 27 && top >= 0) win_close_app(top);
-            else if(c == 'q' || c == 'Q') next_vt = 2;
-            else if(c == '\t') win_cycle_focus();
-            else if(c >= '1' && c <= '9' && c - '1' < apps){
-                launch(c - '1', now, &next_vt);
-            }
-            else if(c == '0') launch(UI_MAX_APPS, now, &next_vt);     /* Terminal */
-        }
+        if(rv == 1) gui_damage_all();                 /* Ctrl+Alt+F1 while here: paint everything again */
+        else if(rv != -1) next_vt = rv;
+        for(int k = 0; k < 32 && !next_vt && keyboard_has_input(); k++)
+            on_key(keyboard_getchar(), now, &next_vt);
         if(serial_has_input()){
             int c = serial_getc();
             if(c == 'q' || c == 'Q') next_vt = 2;
         }
         if(next_vt) break;
 
+        /* every layer reports what changed since it was last drawn */
         isl_update(sw, now, ui_anim_on);
-        wall_draw();
-        desk_draw(mx, my);
-        win_draw_all(now, ui_anim_on);
-        isl_draw(now);
-        tb_draw(it, n, bar, hover, hov_amt, win_top_app(), start_open);
-        if(start_open){
-            int dy = 0;
-            if(ui_anim_on && now - start_opened_at < 12) dy = (255 - ui_ease((int)((now - start_opened_at) * 255 / 12))) * 24 / 255;
-            tb_menu_draw(bar, sw, dy, mx, my);
+        desk_damage(mx, my);
+        win_damage(now);
+        isl_damage(now);
+        tb_damage(n, bar, hover, hov_amt, win_top_app(), start_open, now);
+        tb_menu_damage(bar, sw, start_open, tb_menu_slide(now, start_opened_at), mx, my);
+        cm_damage(mx, my, now);
+        if(mx != cur_x || my != cur_y){
+            gui_damage(cur_x, cur_y, UI_CURSOR_W, UI_CURSOR_H);
+            gui_damage(mx, my, UI_CURSOR_W, UI_CURSOR_H);
+            cur_x = mx; cur_y = my;
         }
-        cm_draw(mx, my, now);
-        ui_cursor(mx, my);
-        fb_swap();
-        proc_sleep_ticks(2);              /* ~16 ms; programs started from the GUI run meanwhile */
+
+        if(ndmg){
+            box_t todo[DMG_MAX];
+            int ntodo = ndmg;
+            u64 t0 = sched_tsc(), pixels = 0;
+            for(int i = 0; i < ndmg; i++) todo[i] = dmg[i];
+            ndmg = 0;                                 /* drawing may report damage for the next frame */
+            for(int i = 0; i < ntodo; i++){
+                box_t b = todo[i];
+                fb_set_base_clip((u32)b.x0, (u32)b.y0, (u32)(b.x1 - b.x0), (u32)(b.y1 - b.y0));
+                compose(b, now, it, n, bar, hover, hov_amt, mx, my, sw);
+                pixels += (u64)box_area(b);
+            }
+            fb_clear_base_clip();
+            for(int i = 0; i < ntodo; i++)
+                fb_present((u32)todo[i].x0, (u32)todo[i].y0, (u32)(todo[i].x1 - todo[i].x0), (u32)(todo[i].y1 - todo[i].y0));
+            perf_frame(sched_tsc() - t0, pixels);
+        }
+        perf_loop(now);
+        proc_sleep_ticks(1);              /* to the next timer tick; programs started from the GUI run meanwhile */
     }
 
+    if(next_vt == 3) close_all();
     mouse_disable();
     fb_clear(0x000000);
     fb_swap();

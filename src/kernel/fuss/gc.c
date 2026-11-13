@@ -25,12 +25,21 @@ static Blk **mstack;            /* mark stack */
 static size_t nmstack, capmstack;
 
 static void arena_init(void){
-    unsigned char *mem = kmalloc(FZ_ARENA_BYTES + 16);
+    /* Prefer a big arena, but fall back to smaller blocks: the kernel heap is
+     * much fuller when a program is launched from the GUI (the framebuffer
+     * back-buffer alone is several MB) than from the empty-heap text shell. */
+    u32 want = FZ_ARENA_BYTES;
+    unsigned char *mem = NULL;
+    while(want >= (2u << 20)){                 /* down to 2 MB */
+        mem = kmalloc(want + 16);
+        if(mem) break;
+        want /= 2;
+    }
     if(!mem) fz_die("out of memory (interpreter arena)");
     arena_lo = (unsigned char*)(((unsigned long)mem + 15) & ~15ul);
-    arena_hi = arena_lo + FZ_ARENA_BYTES;
+    arena_hi = arena_lo + want;
     Blk *b = (Blk*)arena_lo;
-    b->size = FZ_ARENA_BYTES - HDR;
+    b->size = want - HDR;
     b->flags = 0;
     b->next = NULL;
     freelist = b;

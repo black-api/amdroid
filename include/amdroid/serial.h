@@ -4,7 +4,6 @@
 
 void serial_init(void);
 void serial_putc(char c);
-void serial_puts(const char *s);
 int  serial_getc(void); /* -1 if none */
 int  serial_has_input(void);
 

@@ -2,6 +2,7 @@
  * Click selects one, double-click opens it, and dragging moves it to another grid cell
  * (swapping with an icon already there). Positions last for the session. */
 #include "gui_internal.h"
+#include "amdroid/fb.h"
 
 #define DK_X0     28
 #define DK_Y0     92          /* below the Dynamic Island */
@@ -18,6 +19,10 @@ static int press_x, press_y;
 static int dragging = 0;
 static int last_app = -1;             /* for double-clicks */
 static u64 last_at = 0;
+static int hov = -1;                  /* the icon under the pointer */
+static int sh_cells[UI_MAX_APPS];     /* where each icon was last drawn */
+
+void desk_set_hover(int a){ hov = a; }
 
 void desk_sort(void){
     for(int a = 0; a < UI_MAX_APPS; a++) cell_of[a] = a;
@@ -25,6 +30,7 @@ void desk_sort(void){
 
 void desk_init(u32 sw, u32 sh){
     scr_w = sw; scr_h = sh;
+    for(int a = 0; a < UI_MAX_APPS; a++) sh_cells[a] = -1;
     rows = ((int)sh - DK_Y0 - 48 - 2 * 12 - 16) / DK_CELL_H;
     if(rows < 1) rows = 1;
     static int done = 0;
@@ -92,6 +98,7 @@ void desk_update(int x, int y, int down){
 }
 
 static void tile(int a, u32 x, u32 y, int selected, int hover){
+    if(!fb_clip_hits((i32)x, (i32)y, DK_CELL_W, DK_CELL_H)) return;
     /* the cell's highlight */
     if(selected || hover){
         u32 bg = selected ? ui_lerp(0x1A2026, ui_accent(), 70) : 0x252E35;
@@ -113,9 +120,59 @@ static void tile(int a, u32 x, u32 y, int selected, int hover){
     ui_text(lx, ly, name, C_TEXT, 1);
 }
 
-void desk_draw(int mx, int my){
+/* While an icon is dragged: the cell it would land in, and where it floats. */
+static int drag_x, drag_y, drag_cell;
+static void drag_place(int mx, int my){
+    drag_cell = cell_at(mx, my);
+    drag_x = mx - DK_CELL_W / 2; drag_y = my - 40;
+    if(drag_x < 0) drag_x = 0;
+    if(drag_y < 0) drag_y = 0;
+}
+
+/* What was last drawn, to tell what changed. */
+static int sh_hov = -1, sh_sel = -1;
+static int sh_drag = -1, sh_drag_x, sh_drag_y, sh_drag_cell = -1;
+
+static void damage_cell(int c){
+    if(c < 0) return;
+    rect_t r = cell_rect(c);
+    gui_damage((int)r.x, (int)r.y, (int)r.w, (int)r.h);
+}
+
+void desk_damage(int mx, int my){
+    int n = ui_app_count(), moved = 0;
+    for(int a = 0; a < n; a++) if(sh_cells[a] != cell_of[a]){ damage_cell(sh_cells[a]); damage_cell(cell_of[a]); moved = 1; }
+    if(moved) for(int a = 0; a < n; a++) sh_cells[a] = cell_of[a];
+    int h = dragging ? -1 : hov;
+    if(h != sh_hov){
+        if(sh_hov >= 0) damage_cell(cell_of[sh_hov]);
+        if(h >= 0) damage_cell(cell_of[h]);
+        sh_hov = h;
+    }
+    if(sel != sh_sel){
+        if(sh_sel >= 0) damage_cell(cell_of[sh_sel]);
+        if(sel >= 0) damage_cell(cell_of[sel]);
+        sh_sel = sel;
+    }
+    int drag = dragging && press_app >= 0 ? press_app : -1;
+    if(drag >= 0) drag_place(mx, my);
+    if(drag != sh_drag || (drag >= 0 && (drag_x != sh_drag_x || drag_y != sh_drag_y || drag_cell != sh_drag_cell))){
+        if(sh_drag >= 0){
+            gui_damage(sh_drag_x, sh_drag_y, DK_CELL_W, DK_CELL_H);
+            damage_cell(sh_drag_cell);
+            damage_cell(cell_of[sh_drag]);
+        }
+        if(drag >= 0){
+            gui_damage(drag_x, drag_y, DK_CELL_W, DK_CELL_H);
+            damage_cell(drag_cell);
+            damage_cell(cell_of[drag]);
+        }
+        sh_drag = drag; sh_drag_x = drag_x; sh_drag_y = drag_y; sh_drag_cell = drag_cell;
+    }
+}
+
+void desk_draw(void){
     int n = ui_app_count();
-    int hov = desk_hit(mx, my);
     for(int a = 0; a < n; a++){
         if(dragging && a == press_app) continue;
         rect_t r = cell_rect(cell_of[a]);
@@ -123,18 +180,14 @@ void desk_draw(int mx, int my){
     }
     if(dragging && press_app >= 0){
         /* where it will land, then the icon under the pointer */
-        int c = cell_at(mx, my);
-        if(c >= 0){
-            rect_t r = cell_rect(c);
+        if(drag_cell >= 0){
+            rect_t r = cell_rect(drag_cell);
             u32 ac = ui_accent();
             ui_fill((rect_t){ r.x + 8, r.y + 4, r.w - 16, 2 }, ac);
             ui_fill((rect_t){ r.x + 8, r.y + r.h - 10, r.w - 16, 2 }, ac);
             ui_fill((rect_t){ r.x + 8, r.y + 4, 2, r.h - 12 }, ac);
             ui_fill((rect_t){ r.x + r.w - 10, r.y + 4, 2, r.h - 12 }, ac);
         }
-        int x = mx - DK_CELL_W / 2, y = my - 40;
-        if(x < 0) x = 0;
-        if(y < 0) y = 0;
-        tile(press_app, (u32)x, (u32)y, 1, 0);
+        tile(press_app, (u32)drag_x, (u32)drag_y, 1, 0);
     }
 }

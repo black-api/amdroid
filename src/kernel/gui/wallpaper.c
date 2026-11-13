@@ -18,14 +18,6 @@ int         ui_wall_index(void){ return wall_idx; }
 const char *ui_wall_name(int i){ return wall_names[i]; }
 u32         ui_wall_swatch(int i){ return wall_swatch[i]; }
 
-static u32 lerp_color(u32 a, u32 b, int t){       /* t: 0..255 */
-    u32 out = 0;
-    for(int sh = 16; sh >= 0; sh -= 8){
-        int ca = (a >> sh) & 255, cb = (b >> sh) & 255;
-        out |= (u32)(ca + (cb - ca) * t / 255) << sh;
-    }
-    return out;
-}
 static u32 clamp255(int v){ return v < 0 ? 0 : (v > 255 ? 255 : (u32)v); }
 
 /* Adds a soft light stroke along a quadratic curve (integer maths). */
@@ -73,7 +65,7 @@ static void build(int style){
     for(u32 y = 0; y < wall_h; y++)
         for(u32 x = 0; x < wall_w; x++){
             int t = (int)((x * 255 / wall_w + y * 255 / wall_h) / 2);
-            wall[y * wall_w + x] = lerp_color(c0, c1, t);
+            wall[y * wall_w + x] = ui_lerp(c0, c1, t);
         }
     /* soft light swooshes in the lower right */
     for(int k = 0; k < 3; k++){
@@ -90,12 +82,13 @@ void ui_wall_set(int i){
     if(i < 0 || i >= NWALL || i == wall_idx) return;
     wall_idx = i;
     build(i);
+    gui_damage_all();
 }
 
 void wall_init(u32 w, u32 h){
     wall_w = w; wall_h = h;
     if(!wall) wall = kmalloc(w * h * 4);
-    build(wall_idx);
+    if(built != wall_idx) build(wall_idx);     /* kept from the login screen to the desktop */
 }
 
 void wall_draw(void){

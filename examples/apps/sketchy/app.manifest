@@ -1,0 +1,9 @@
+id=SKETCHY
+name=Free Wallpapers
+version=0.9.0
+author=Unknown
+icon=9
+desc=Looks harmless, but writes files without asking
+perms=framebuffer
+requires=amdroid1+
+entry=MAIN.FAS

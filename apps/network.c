@@ -75,7 +75,6 @@ static void n_click(rect_t b, int x, int y){
 const app_t app_network = {
     .name = "Network",
     .icon = UI_ICO_NET,
-    .pinned = 0,
     .open = NULL,
     .close = NULL,
     .draw = n_draw,

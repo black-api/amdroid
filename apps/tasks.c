@@ -372,7 +372,7 @@ static void dot(u32 x, u32 y, u32 d, u32 c){ ui_rrect(x, y, d, d, d / 2, c); }
 
 static void t_tick(void){
     u64 now = timer_ticks();
-    if(!sampled || now - last_sample >= SAMPLE_TICKS) sample(now);
+    if(!sampled || now - last_sample >= SAMPLE_TICKS){ sample(now); ui_redraw(); }
 }
 
 static void t_open(void){
@@ -507,6 +507,18 @@ static void t_draw(rect_t b, int focused){
         lx += 22 + ui_text_w(ln[i], 1) + (nar ? 16 : 28);
     }
 
+    /* how the screen itself is doing: redraws in the last second and what one cost */
+    if(!nar){
+        ui_perf_t pf;
+        ui_perf(&pf);
+        char line[80] = "Screen: ", n[12];
+        ui_num(pf.redraws, n); ui_cat(line, n); ui_cat(line, " redraws/s, ");
+        ui_num(pf.avg_us / 1000, n); ui_cat(line, n); ui_cat(line, ".");
+        ui_num(pf.avg_us % 1000 / 100, n); ui_cat(line, n); ui_cat(line, " ms each, input ");
+        ui_num(pf.loops, n); ui_cat(line, n); ui_cat(line, " Hz");
+        if(lx + ui_text_w(line, 1) < b.x + b.w) ui_text_right(b, ly, line, C_DIM, 1);
+    }
+
     /* "New task": the programs on the disk */
     if(picking){
         u32 pw = 340, ph = 56 + (u32)(nprogs ? nprogs : 1) * 40;
@@ -632,14 +644,19 @@ static void t_click(rect_t b, int x, int y){
     }
 }
 
+static void t_scroll(rect_t b, int x, int y, int dz){
+    (void)b; (void)x; (void)y;
+    move_sel(dz);
+}
+
 const app_t app_tasks = {
     .name = "Tasks",
     .icon = UI_ICO_TASKS,
-    .pinned = 1,
     .open = t_open,
     .close = NULL,
     .draw = t_draw,
     .key = t_key,
     .click = t_click,
     .tick = t_tick,
+    .scroll = t_scroll,
 };

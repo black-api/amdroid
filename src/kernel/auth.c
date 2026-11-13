@@ -273,18 +273,6 @@ static int is_system_file(const char *path){
 
 void auth_logout(void){ current = -1; proc_set_uid(0, -1); }
 
-/* Signs in without a password. Only the graphical login screen calls this; the
- * text shell still asks for one. */
-int auth_login_nopass(const char *name){
-    for(int i = 0; i < MAX_USERS; i++){
-        if(!users[i].used || !upper_eq(users[i].name, name)) continue;
-        current = i;
-        proc_set_uid(0, (int)users[i].uid);
-        return 0;
-    }
-    return -1;
-}
-
 int auth_user_count(void){
     int n = 0;
     for(int i = 0; i < MAX_USERS; i++) if(users[i].used) n++;
@@ -427,12 +415,6 @@ void auth_claim_as(int uid, const char *path){
 }
 
 void auth_claim(const char *path){ auth_claim_as(auth_uid(), path); }
-
-int auth_mode_of(const char *path, int *owner){
-    perm_t *p = find_perm(path);
-    if(owner) *owner = p ? (int)p->owner : 0;
-    return p ? (int)p->mode : 0644;
-}
 
 /* ---------- console input for passwords ---------- */
 static int readkey(void){

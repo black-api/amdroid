@@ -56,7 +56,6 @@ struct app;
  * ui_msg_set(s) is a short form: a notification with just a title. */
 void        ui_notify(int app, const char *title, const char *body);
 void        ui_msg_set(const char *s);
-const char *ui_msg(void);
 int         ui_app_index(const struct app *app);   /* the index of an app in ui_apps, or -1 */
 /* Accounting (the GUI wraps every call into an app with these): CPU cycles used by an app's
  * code, and its heap blocks are tagged with owner app+1. */
@@ -64,9 +63,13 @@ void        ui_app_enter(int a);
 void        ui_app_leave(void);
 u64         ui_app_cycles(int a);
 int         ui_app_is_open(int a);          /* the app has a window (maybe minimized) */
+int         ui_app_is_front(int a);         /* its window is the one in front, where keys go */
 void        ui_app_close(int a);            /* closes its window */
 
-/* ---- drawing ---- */
+/* ---- drawing ----
+ * A window is drawn again when its app gets a key, a click or the wheel. An app whose
+ * picture changes at any other time (a clock, a download: in its tick or its move) says so: */
+void ui_redraw(void);
 void ui_fill(rect_t r, u32 c);
 /* Animation helpers: t runs 0..255. ui_ease gives an ease-out curve, ui_lerp blends colours. */
 int  ui_ease(int t);
@@ -82,6 +85,8 @@ void ui_text_right(rect_t r, u32 y, const char *s, u32 fg, u32 scale);
 int  ui_contains(rect_t r, int x, int y);
 void ui_icon(int which, u32 x, u32 y, u32 c);               /* 32x32 icon */
 void ui_cursor(int x, int y);                              /* the mouse pointer */
+#define UI_CURSOR_W 12
+#define UI_CURSOR_H 16
 
 /* ---- text helpers (no libc in the kernel) ---- */
 void ui_num(u32 v, char *out);
@@ -102,7 +107,8 @@ rect_t ui_button(rect_t b, u32 w);         /* a button at the top right of the b
 /* ---- icons ---- */
 enum { UI_ICO_START, UI_ICO_SEARCH, UI_ICO_FILES, UI_ICO_TASKS,
        UI_ICO_SETTINGS, UI_ICO_ABOUT, UI_ICO_TERM,
-       UI_ICO_CALC, UI_ICO_CLOCK, UI_ICO_NOTES, UI_ICO_NET, UI_ICO_BROWSER };
+       UI_ICO_CALC, UI_ICO_CLOCK, UI_ICO_NOTES, UI_ICO_NET, UI_ICO_BROWSER,
+       UI_ICO_STORE };
 
 /* ---- apps ----
  * open/close are optional (NULL). draw is called every frame with the
@@ -111,19 +117,28 @@ enum { UI_ICO_START, UI_ICO_SEARCH, UI_ICO_FILES, UI_ICO_TASKS,
 typedef struct app {
     const char *name;
     int icon;                                /* UI_ICO_* */
-    int pinned;                              /* kept on the taskbar when closed */
     void (*open)(void);
     void (*close)(void);
     void (*draw)(rect_t body, int focused);
     int  (*key)(int c);                      /* return 1 if used; Esc closes the window when 0 */
     void (*click)(rect_t body, int x, int y);
-    void (*move)(rect_t body, int x, int y);  /* the mouse pointer, each frame, for the focused window */
-    void (*tick)(void);                       /* each frame while the app is open, even minimized (optional) */
+    void (*move)(rect_t body, int x, int y);  /* the pointer moved, for the focused window; (-1, -1) when it left */
+    void (*tick)(void);                       /* every timer tick while the app is open, even minimized (optional) */
+    void (*scroll)(rect_t body, int x, int y, int dz);   /* the wheel over the window: dz > 0 is down (optional) */
 } app_t;
 
 /* The apps, in the order of their keys (1, 2, 3, ...). NULL-terminated. */
 #define UI_MAX_APPS 10
 extern const app_t *const ui_apps[UI_MAX_APPS + 1];
 int ui_app_count(void);
+
+/* ---- how the screen is doing, over the last second (for the Tasks app) ---- */
+typedef struct {
+    u32 loops;           /* turns of the GUI loop: input is read this often */
+    u32 redraws;         /* turns that had something to draw */
+    u32 avg_us, max_us;  /* time to draw and show one of those */
+    u32 screen_tenths;   /* pixels drawn, in tenths of a screen (10 = the whole screen once) */
+} ui_perf_t;
+void ui_perf(ui_perf_t *out);
 
 #endif

@@ -1,7 +1,8 @@
 /* Images: fetched by the browser over HTTP(S), decoded here, drawn by the layout engine.
- * Formats: PNG (zlib/DEFLATE, all colour types, no interlace), GIF (LZW, first frame,
- * interlace handled), BMP (uncompressed 8/24/32-bit). Anything else is reported as failed
- * and the page keeps the <img> alt text instead. */
+ * Formats: PNG (zlib/DEFLATE, all colour types, no interlace), JPEG (baseline DCT,
+ * Huffman, grey/YCbCr with any chroma subsampling; progressive is declined), GIF (LZW,
+ * first frame, interlace handled), BMP (uncompressed 8/24/32-bit). Anything else is
+ * reported as failed and the page keeps the <img> alt text instead. */
 #include "amdroid/web.h"
 #include "amdroid/heap.h"
 #include "web_internal.h"
@@ -571,6 +572,334 @@ static int gif_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
 
 /* ================= entry point ================= */
 
+/* ================= JPEG (baseline DCT, Huffman) ================= */
+/* Decodes baseline (SOF0/SOF1) JFIF/Exif JPEGs: the common web case. Progressive
+ * JPEGs (SOF2) are declined and fall back to the <img> alt text. Integer IDCT and
+ * fixed-point YCbCr, so no floating point at run time. */
+
+typedef struct {
+    u8  fast[512];          /* 9-bit fast path: code -> symbol index, or 255 */
+    u8  size[257];
+    u16 code[257];
+    u8  values[256];
+    u32 maxcode[18];
+    int delta[17];
+} jhuff_t;
+
+typedef struct {
+    const u8 *s, *end;      /* entropy byte stream */
+    u32 code_buffer;        /* MSB-aligned bit buffer */
+    int code_bits;
+    u8  marker;             /* a marker that stopped the stream, else 0 */
+    int nomore;
+} jbits_t;
+
+typedef struct {
+    int id, h, v, tq;       /* component id, h/v sampling, quant table */
+    int td, ta;             /* DC/AC Huffman tables (from the scan header) */
+    int dcpred;
+    int w2, h2;             /* decoded plane size (block-padded) */
+    u8 *data;               /* the plane, w2*h2, one byte per sample */
+} jcomp_t;
+
+typedef struct {
+    u16 quant[4][64];       /* natural order */
+    jhuff_t hdc[4], hac[4];
+    jcomp_t comp[4];
+    int ncomp, W, H, hmax, vmax, mcux, mcuy, restart;
+    jbits_t b;
+} jpeg_t;
+
+static const u8 jdezig[64] = {
+     0, 1, 8,16, 9, 2, 3,10,17,24,32,25,18,11, 4, 5,
+    12,19,26,33,40,48,41,34,27,20,13, 6, 7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,
+    58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63
+};
+static const u32 jbmask[17] = {0,1,3,7,15,31,63,127,255,511,1023,2047,4095,8191,16383,32767,65535};
+static const int jbias[17]  = {0,-1,-3,-7,-15,-31,-63,-127,-255,-511,-1023,-2047,-4095,-8191,-16383,-32767,-65535};
+
+static inline u8 jclamp(int x){ return x < 0 ? 0 : x > 255 ? 255 : (u8)x; }
+
+static int jbuild_huff(jhuff_t *h, const u8 *count, const u8 *vals){
+    int i, j, k = 0; u32 code;
+    for(i = 0; i < 16; i++) for(j = 0; j < count[i]; j++){ if(k > 255) return -1; h->size[k++] = (u8)(i + 1); }
+    h->size[k] = 0;
+    code = 0; { int kk = 0;
+    for(j = 1; j <= 16; j++){
+        h->delta[j] = (int)((u32)kk - code);
+        if(h->size[kk] == j){ while(h->size[kk] == j) h->code[kk++] = (u16)(code++); if(code - 1 >= (1u << j)) return -1; }
+        h->maxcode[j] = code << (16 - j);
+        code <<= 1;
+    }
+    h->maxcode[17] = 0xffffffff;
+    memset(h->fast, 255, sizeof h->fast);
+    for(i = 0; i < kk; i++){ int s = h->size[i]; if(s <= 9){ int c = h->code[i] << (9 - s), m = 1 << (9 - s); for(j = 0; j < m; j++) h->fast[c + j] = (u8)i; } }
+    memcpy(h->values, vals, (u32)kk);
+    }
+    return 0;
+}
+
+static void jgrow(jbits_t *j){
+    do {
+        u32 b = j->nomore ? 0 : (j->s < j->end ? *j->s++ : (j->nomore = 1, 0));
+        if(b == 0xff){
+            int c = j->s < j->end ? *j->s++ : 0;
+            while(c == 0xff) c = j->s < j->end ? *j->s++ : 0;
+            if(c != 0){ j->marker = (u8)c; j->nomore = 1; }   /* keep b=0xff only if stuffed */
+            if(c != 0) b = 0; /* a real marker: feed zeros from here */
+        }
+        if(j->nomore && b == 0 && j->marker) { j->code_bits += 8; continue; }
+        j->code_buffer |= b << (24 - j->code_bits);
+        j->code_bits += 8;
+    } while(j->code_bits <= 24);
+}
+
+static int jdecode(jbits_t *j, const jhuff_t *h){
+    if(j->code_bits < 16) jgrow(j);
+    int c = (int)((j->code_buffer >> 23) & 511);
+    int k = h->fast[c];
+    if(k < 255){
+        int s = h->size[k];
+        if(s > j->code_bits) return -1;
+        j->code_buffer <<= s; j->code_bits -= s;
+        return h->values[k];
+    }
+    u32 temp = j->code_buffer >> 16;
+    for(k = 10; k < 17; k++) if(temp < h->maxcode[k]) break;
+    if(k == 17 || k > j->code_bits) return -1;
+    c = (int)(((j->code_buffer >> (32 - k)) & jbmask[k]) + (u32)h->delta[k]);
+    j->code_bits -= k; j->code_buffer <<= k;
+    return h->values[c];
+}
+
+static int jreceive(jbits_t *j, int n){     /* n bits, sign-extended (JPEG coefficient) */
+    if(n <= 0) return 0;
+    if(j->code_bits < n) jgrow(j);
+    int sgn = (i32)j->code_buffer >> 31;     /* 0 or -1 */
+    u32 k = (j->code_buffer << n) | (j->code_buffer >> (32 - n));
+    j->code_buffer = k & ~jbmask[n];
+    k &= jbmask[n];
+    j->code_bits -= n;
+    return (int)k + (jbias[n] & ~sgn);
+}
+
+#define jf2f(x) ((int)((x) * 4096 + 0.5))
+#define jfsh(x) ((x) * 4096)
+#define JIDCT_1D(s0,s1,s2,s3,s4,s5,s6,s7) \
+    int t0,t1,t2,t3,p1,p2,p3,p4,p5,x0,x1,x2,x3; \
+    p2 = (s2); p3 = (s6); \
+    p1 = (p2 + p3) * jf2f(0.5411961f); \
+    t2 = p1 + p3 * jf2f(-1.847759065f); \
+    t3 = p1 + p2 * jf2f(0.765366865f); \
+    p2 = (s0); p3 = (s4); \
+    t0 = jfsh(p2 + p3); t1 = jfsh(p2 - p3); \
+    x0 = t0 + t3; x3 = t0 - t3; x1 = t1 + t2; x2 = t1 - t2; \
+    t0 = (s7); t1 = (s5); t2 = (s3); t3 = (s1); \
+    p3 = t0 + t2; p4 = t1 + t3; p1 = t0 + t3; p2 = t1 + t2; \
+    p5 = (p3 + p4) * jf2f(1.175875602f); \
+    t0 = t0 * jf2f(0.298631336f); t1 = t1 * jf2f(2.053119869f); \
+    t2 = t2 * jf2f(3.072711026f); t3 = t3 * jf2f(1.501321110f); \
+    p1 = p5 + p1 * jf2f(-0.899976223f); p2 = p5 + p2 * jf2f(-2.562915447f); \
+    p3 = p3 * jf2f(-1.961570560f); p4 = p4 * jf2f(-0.390180644f); \
+    t3 += p1 + p4; t2 += p2 + p3; t1 += p2 + p4; t0 += p1 + p3;
+
+static void jidct(u8 *out, int stride, short *data){
+    int i, val[64], *v = val; short *d = data;
+    for(i = 0; i < 8; i++, d++, v++){
+        if(d[8]==0 && d[16]==0 && d[24]==0 && d[32]==0 && d[40]==0 && d[48]==0 && d[56]==0){
+            int dc = d[0] * 4;
+            v[0]=v[8]=v[16]=v[24]=v[32]=v[40]=v[48]=v[56] = dc;
+        } else {
+            JIDCT_1D(d[0],d[8],d[16],d[24],d[32],d[40],d[48],d[56])
+            x0+=512; x1+=512; x2+=512; x3+=512;
+            v[0]=(x0+t3)>>10; v[56]=(x0-t3)>>10;
+            v[8]=(x1+t2)>>10; v[48]=(x1-t2)>>10;
+            v[16]=(x2+t1)>>10; v[40]=(x2-t1)>>10;
+            v[24]=(x3+t0)>>10; v[32]=(x3-t0)>>10;
+        }
+    }
+    for(i = 0, v = val; i < 8; i++, v += 8, out += stride){
+        JIDCT_1D(v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7])
+        x0 += 65536 + (128<<17); x1 += 65536 + (128<<17);
+        x2 += 65536 + (128<<17); x3 += 65536 + (128<<17);
+        out[0]=jclamp((x0+t3)>>17); out[7]=jclamp((x0-t3)>>17);
+        out[1]=jclamp((x1+t2)>>17); out[6]=jclamp((x1-t2)>>17);
+        out[2]=jclamp((x2+t1)>>17); out[5]=jclamp((x2-t1)>>17);
+        out[3]=jclamp((x3+t0)>>17); out[4]=jclamp((x3-t0)>>17);
+    }
+}
+
+static int jdecode_block(jpeg_t *J, jcomp_t *c, short data[64]){
+    memset(data, 0, 64 * sizeof(short));
+    int t = jdecode(&J->b, &J->hdc[c->td]);
+    if(t < 0) return -1;
+    int diff = t ? jreceive(&J->b, t) : 0;
+    c->dcpred += diff;
+    u16 *q = J->quant[c->tq];
+    data[0] = (short)(c->dcpred * q[0]);
+    int k = 1;
+    do {
+        int rs = jdecode(&J->b, &J->hac[c->ta]);
+        if(rs < 0) return -1;
+        int s = rs & 15, r = rs >> 4;
+        if(s == 0){ if(r != 15) break; k += 16; }
+        else { k += r; if(k > 63) return -1; int z = jdezig[k]; data[z] = (short)(jreceive(&J->b, s) * q[z]); k++; }
+    } while(k < 64);
+    return 0;
+}
+
+static void jrestart(jpeg_t *J){
+    if(J->b.code_bits < 24) jgrow(&J->b);
+    J->b.code_buffer = 0; J->b.code_bits = 0; J->b.nomore = 0; J->b.marker = 0;
+    for(int i = 0; i < J->ncomp; i++) J->comp[i].dcpred = 0;
+}
+
+static int jpeg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h){
+    if(len < 2 || data[0] != 0xFF || data[1] != 0xD8) return -1;
+    jpeg_t *J = kmalloc(sizeof *J);
+    if(!J) return -1;
+    memset(J, 0, sizeof *J);
+    const u8 *p = data + 2, *end = data + len;
+    int got_sof = 0, rc = -1;
+
+    for(;;){
+        if(p >= end) goto done;
+        if(*p != 0xFF){ p++; continue; }
+        while(p < end && *p == 0xFF) p++;         /* skip fill bytes */
+        if(p >= end) goto done;
+        u8 m = *p++;
+        if(m == 0xD9) goto done;                   /* EOI */
+        if(m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;   /* standalone */
+        if(p + 2 > end) goto fail;
+        int L = (p[0] << 8) | p[1];
+        const u8 *seg = p + 2, *segend = p + L;
+        if(segend > end || L < 2) goto fail;
+        p = segend;
+
+        if(m == 0xDB){                              /* DQT */
+            while(seg < segend){
+                int pq = seg[0] >> 4, tq = seg[0] & 15; seg++;
+                if(tq > 3) goto fail;
+                for(int i = 0; i < 64; i++){
+                    int val = pq ? ((seg[0] << 8) | seg[1]) : seg[0];
+                    seg += pq ? 2 : 1;
+                    J->quant[tq][jdezig[i]] = (u16)val;
+                }
+            }
+        } else if(m == 0xC4){                        /* DHT */
+            while(seg < segend){
+                int tc = seg[0] >> 4, th = seg[0] & 15; seg++;
+                if(th > 3) goto fail;
+                int total = 0; for(int i = 0; i < 16; i++) total += seg[i];
+                if(seg + 16 + total > segend) goto fail;
+                if(jbuild_huff(tc ? &J->hac[th] : &J->hdc[th], seg, seg + 16) != 0) goto fail;
+                seg += 16 + total;
+            }
+        } else if(m == 0xDD){                        /* DRI */
+            if(seg + 2 > segend) goto fail;
+            J->restart = (seg[0] << 8) | seg[1];
+        } else if(m == 0xC0 || m == 0xC1){           /* SOF0/SOF1 baseline */
+            if(seg[0] != 8) goto fail;               /* 8-bit only */
+            J->H = (seg[1] << 8) | seg[2];
+            J->W = (seg[3] << 8) | seg[4];
+            J->ncomp = seg[5];
+            if(J->ncomp < 1 || J->ncomp > 4) goto fail;
+            if(J->W < 1 || J->H < 1 || J->W > IMG_MAX_SIDE || J->H > IMG_MAX_SIDE) goto fail;
+            const u8 *c = seg + 6;
+            for(int i = 0; i < J->ncomp; i++){
+                J->comp[i].id = c[0];
+                J->comp[i].h  = c[1] >> 4;
+                J->comp[i].v  = c[1] & 15;
+                J->comp[i].tq = c[2];
+                if(J->comp[i].h < 1 || J->comp[i].h > 4 || J->comp[i].v < 1 || J->comp[i].v > 4) goto fail;
+                c += 3;
+            }
+            got_sof = 1;
+        } else if(m == 0xC2){                         /* progressive: not supported */
+            goto fail;
+        } else if(m == 0xDA){                         /* SOS */
+            if(!got_sof) goto fail;
+            int ns = seg[0]; const u8 *c = seg + 1;
+            for(int i = 0; i < ns; i++){
+                int cs = c[0], td = c[1] >> 4, ta = c[1] & 15; c += 2;
+                for(int k = 0; k < J->ncomp; k++) if(J->comp[k].id == cs){ J->comp[k].td = td; J->comp[k].ta = ta; }
+            }
+            /* entropy data starts at p (== segend) */
+            J->b.s = p; J->b.end = end;
+            J->b.code_buffer = 0; J->b.code_bits = 0; J->b.marker = 0; J->b.nomore = 0;
+
+            J->hmax = J->vmax = 1;
+            for(int i = 0; i < J->ncomp; i++){
+                if(J->comp[i].h > J->hmax) J->hmax = J->comp[i].h;
+                if(J->comp[i].v > J->vmax) J->vmax = J->comp[i].v;
+            }
+            J->mcux = (J->W + 8 * J->hmax - 1) / (8 * J->hmax);
+            J->mcuy = (J->H + 8 * J->vmax - 1) / (8 * J->vmax);
+            for(int i = 0; i < J->ncomp; i++){
+                J->comp[i].w2 = J->mcux * J->comp[i].h * 8;
+                J->comp[i].h2 = J->mcuy * J->comp[i].v * 8;
+                J->comp[i].data = kmalloc((u32)J->comp[i].w2 * J->comp[i].h2);
+                if(!J->comp[i].data) goto fail;
+            }
+            int todo = J->restart ? J->restart : 0x7fffffff;
+            for(int my = 0; my < J->mcuy; my++){
+                for(int mx = 0; mx < J->mcux; mx++){
+                    for(int ci = 0; ci < J->ncomp; ci++){
+                        jcomp_t *cp = &J->comp[ci];
+                        for(int by = 0; by < cp->v; by++){
+                            for(int bx = 0; bx < cp->h; bx++){
+                                short blk[64];
+                                if(jdecode_block(J, cp, blk) != 0) goto fail;
+                                int ox = (mx * cp->h + bx) * 8, oy = (my * cp->v + by) * 8;
+                                jidct(cp->data + oy * cp->w2 + ox, cp->w2, blk);
+                            }
+                        }
+                    }
+                    if(J->restart && --todo == 0 && !(mx == J->mcux - 1 && my == J->mcuy - 1)){
+                        jrestart(J); todo = J->restart;
+                    }
+                }
+            }
+
+            /* colour convert into the output */
+            u64 need = (u64)J->W * J->H * 4;
+            if(need > IMG_MAX_OUT) goto fail;
+            u32 *out = kmalloc((u32)need);
+            if(!out) goto fail;
+            jcomp_t *Y = &J->comp[0];
+            for(int y = 0; y < J->H; y++){
+                for(int x = 0; x < J->W; x++){
+                    int yy = Y->data[(y * Y->v / J->vmax) * Y->w2 + (x * Y->h / J->hmax)];
+                    int r, g, b;
+                    if(J->ncomp == 1){ r = g = b = yy; }
+                    else {
+                        jcomp_t *Cb = &J->comp[1], *Cr = &J->comp[2];
+                        int cb = Cb->data[(y * Cb->v / J->vmax) * Cb->w2 + (x * Cb->h / J->hmax)] - 128;
+                        int cr = Cr->data[(y * Cr->v / J->vmax) * Cr->w2 + (x * Cr->h / J->hmax)] - 128;
+                        r = yy + ((91881 * cr) >> 16);
+                        g = yy - ((22554 * cb + 46802 * cr) >> 16);
+                        b = yy + ((116130 * cb) >> 16);
+                    }
+                    out[y * J->W + x] = ((u32)jclamp(r) << 16) | ((u32)jclamp(g) << 8) | (u32)jclamp(b);
+                }
+            }
+            *out_px = out; *out_w = (u32)J->W; *out_h = (u32)J->H;
+            rc = 0;
+            goto done;
+        }
+        /* APPn, COM, and anything else: already skipped via p = segend */
+    }
+done:
+    for(int i = 0; i < 4; i++) if(J->comp[i].data) kfree(J->comp[i].data);
+    kfree(J);
+    return rc;
+fail:
+    for(int i = 0; i < 4; i++) if(J->comp[i].data) kfree(J->comp[i].data);
+    kfree(J);
+    return -1;
+}
+
 int web_add_image(int idx, const char *data, u32 len){
     if(idx < 0 || idx >= nimages) return -1;
     image_t *im = &images[idx];
@@ -579,6 +908,7 @@ int web_add_image(int idx, const char *data, u32 len){
     const u8 *d = (const u8 *)data;
     int ok = -1;
     if(len >= 8 && d[0] == 0x89 && d[1] == 'P') ok = png_decode(d, len, &px, &w, &h);
+    else if(len >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) ok = jpeg_decode(d, len, &px, &w, &h);
     else if(len >= 2 && d[0] == 'B' && d[1] == 'M') ok = bmp_decode(d, len, &px, &w, &h);
     else if(len >= 6 && !memcmp(d, "GIF8", 4)) ok = gif_decode(d, len, &px, &w, &h);
     if(ok != 0){ im->state = 2; return -1; }

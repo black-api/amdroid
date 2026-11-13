@@ -2,8 +2,9 @@
 #define AMDROID_JS_H
 /* JavaScript for the browser: variables, functions and closures, arrow functions, classes
  * (new, this, super, extends), objects, arrays, strings, regular expressions, if/while/
- * do/for/for-in/for-of/switch, try/catch/finally/throw, the usual operators, timers, and
- * host objects with get/set hooks. No modules, generators, promises or templates. */
+ * do/for/for-in/for-of/switch, try/catch/finally/throw, the usual operators, timers,
+ * template literals, and host objects with get/set hooks. No modules, generators or
+ * promises. */
 #include "amdroid/types.h"
 
 enum { JS_UNDEF, JS_NULL, JS_BOOL, JS_NUM, JS_STR, JS_OBJ };

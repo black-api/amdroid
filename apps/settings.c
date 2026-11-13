@@ -85,7 +85,6 @@ static int s_key(int c){
 const app_t app_settings = {
     .name = "Settings",
     .icon = UI_ICO_SETTINGS,
-    .pinned = 1,
     .open = NULL,
     .close = NULL,
     .draw = s_draw,

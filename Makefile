@@ -17,16 +17,16 @@ GFX_W := $(word 1,$(subst x, ,$(GFXMODE)))
 GFX_H := $(word 2,$(subst x, ,$(GFXMODE)))
 CFLAGS += -DFB_W=$(GFX_W) -DFB_H=$(GFX_H)
 
+# make PERF_LOG=1: the GUI writes its redraw counts and times to the serial port every second.
+ifdef PERF_LOG
+CFLAGS += -DGUI_PERF_LOG
+endif
+
 # GUI: the core in src/kernel/gui/, and every app in apps/.
 GUI_SRCS = $(wildcard src/kernel/gui/*.c) $(wildcard apps/*.c)
 
-# The web engine: HTML, CSS and layout.
-WEB_SRCS = $(wildcard src/kernel/web/*.c)
-
-# JavaScript: the interpreter (src/kernel/js).
-JS_SRCS = $(wildcard src/kernel/js/*.c)
-
-# The Husser renderer: the same engine, built for ring 3 as an embedded blob.
+# The Husser renderer: the web engine (HTML, CSS, layout, images) and the JavaScript
+# interpreter, built for ring 3 as a blob that the kernel embeds and starts as a process.
 HUSSER_ENGINE = src/kernel/web/html.c src/kernel/web/css.c src/kernel/web/layout.c src/kernel/web/jsdom.c src/kernel/web/image.c src/kernel/js/js.c src/kernel/js/regex.c
 HUSSER_SRCS = src/user/husser/husser.c src/user/husser/heap_shim.c src/user/husser/painter.c $(HUSSER_ENGINE) src/lib/string.c src/lib/klib.c src/lib/kmath.c
 HUSSER_OBJS = $(addprefix out/husser/,$(notdir $(HUSSER_SRCS:.c=.o)))
@@ -50,9 +50,8 @@ C_SRCS = \
  src/kernel/drivers/fb.c \
  src/kernel/drivers/mouse.c \
  $(GUI_SRCS) \
- $(WEB_SRCS) \
- $(JS_SRCS) \
  src/kernel/fs/fat32.c \
+ src/kernel/pkg/pkg.c \
  src/kernel/syscall.c \
  src/lib/console.c \
  src/lib/string.c \
@@ -135,12 +134,18 @@ out/user/%.elf: src/user/c/%.c src/user/c/ulib.c src/user/c/ulib.h src/user/c/li
 # The interpreter is hot code: build it optimised.
 src/kernel/fuss/%.o: CFLAGS += -O2
 
-# The GUI redraws the whole screen every frame; build its drawing code optimised too.
+# Drawing code is hot too.
 src/kernel/gui/%.o: CFLAGS += -O2
 apps/%.o: CFLAGS += -O2
-src/kernel/web/%.o: CFLAGS += -O2
-src/kernel/js/%.o: CFLAGS += -O2
 src/kernel/drivers/fb.o: CFLAGS += -O2
+
+# A change of build options (GFXMODE, PERF_LOG) rebuilds what the old ones compiled.
+FLAGS_STAMP = out/.flags
+$(FLAGS_STAMP): FORCE
+	@mkdir -p out
+	@echo '$(CFLAGS)' | cmp -s - $@ || echo '$(CFLAGS)' > $@
+$(OBJS): $(FLAGS_STAMP)
+FORCE:
 
 %.o: %.asm
 	$(AS) $(ASFLAGS) $< -o $@
@@ -152,8 +157,8 @@ $(ISO): $(KERNEL) grub.cfg
 	grub-mkrescue -o $(ISO) out/iso 2>/dev/null
 
 clean:
-	rm -f $(OBJS) $(OBJS:.o=.d) $(KERNEL) $(ISO)
-	rm -rf out/iso
+	rm -f $(OBJS) $(OBJS:.o=.d) $(KERNEL) $(ISO) $(FLAGS_STAMP)
+	rm -rf out/iso out/husser out/user/husser.elf out/user/husser.bin out/user/husser_defs.inc
 
 run: $(ISO)
 	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 256M
@@ -161,7 +166,41 @@ run: $(ISO)
 run-hd: $(KERNEL)
 	qemu-system-x86_64 -kernel $(KERNEL) -serial stdio -m 256M
 
-.PHONY: all clean run run-hd userprogs
+# ---- app packages (.adp) and a FAT32 disk image to install them from ----
+# `make pkgs`  builds the sample packages in out/pkg/
+# `make disk`  builds disk.img (FAT32) with the packages in its root
+# `make run-disk` boots the ISO with that disk attached (so the App Store sees them)
+PKG_OUT = out/pkg
+ADP_FILES = $(PKG_OUT)/HELLO.ADP $(PKG_OUT)/BARS.ADP $(PKG_OUT)/SKETCHY.ADP
+
+$(PKG_OUT)/HELLO.ADP: examples/apps/hello/app.manifest examples/apps/hello/MAIN.FAS tools/adp-build.py
+	@mkdir -p $(PKG_OUT)
+	python3 tools/adp-build.py examples/apps/hello -o $@
+
+$(PKG_OUT)/BARS.ADP: examples/apps/bars/app.manifest examples/apps/bars/MAIN.FAS tools/adp-build.py
+	@mkdir -p $(PKG_OUT)
+	python3 tools/adp-build.py examples/apps/bars -o $@
+
+$(PKG_OUT)/SKETCHY.ADP: examples/apps/sketchy/app.manifest examples/apps/sketchy/MAIN.FAS tools/adp-build.py
+	@mkdir -p $(PKG_OUT)
+	python3 tools/adp-build.py examples/apps/sketchy -o $@
+
+# A deliberately corrupt package, to show the installer rejecting bad input.
+$(PKG_OUT)/BROKEN.ADP: $(PKG_OUT)/HELLO.ADP
+	head -c 200 $(PKG_OUT)/HELLO.ADP > $@
+
+pkgs: $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP
+
+disk.img: $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP
+	mkfs.fat -C -F 32 -S 512 -s 1 $@ 65536
+	mcopy -o -i $@ $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP ::/
+
+disk: disk.img
+
+run-disk: $(ISO) disk.img
+	qemu-system-x86_64 -cdrom $(ISO) -hda disk.img -boot d -serial stdio -m 256M
+
+.PHONY: all clean run run-hd run-disk disk pkgs userprogs FORCE
 
 # Header dependencies (written by -MMD): a changed header rebuilds the files that use it.
 -include $(OBJS:.o=.d) $(HUSSER_OBJS:.o=.d)

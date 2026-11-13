@@ -29,8 +29,6 @@ typedef struct {
 
 static fd_t fds[MAX_PROCS][FD_MAX];
 
-void syscall_init(void){ }
-
 /* User pointers must lie in the user region; kernel memory is never readable
  * through a system call. */
 static int user_range(u64 p, u64 n){

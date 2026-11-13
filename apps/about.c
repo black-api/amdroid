@@ -49,12 +49,12 @@ static u32 wrap_draw(rect_t b, u32 y, const char *s, u32 fg, u32 scale){
 static void a_draw(rect_t b, int focused){
     (void)focused;
     u32 y = wrap_draw(b, b.y, "am-droid", ui_accent(), 4) + 8;
-    y = wrap_draw(b, y, "A small 32-bit kernel with its own GUI", C_TEXT, UI_SCALE) + 24;
+    y = wrap_draw(b, y, "A small 64-bit kernel with its own GUI", C_TEXT, UI_SCALE) + 24;
     const char *feats[] = {
         "Fuss interpreter built in",
-        "FAT32 read and write, ext2 read-only, USB storage",
+        "FAT32 read and write, ext2 read-only",
         "TCP/IP over e1000 and virtio-net",
-        "Intel HDA audio, PS/2 and USB input",
+        "Intel HDA audio, PS/2 and USB keyboards and mice",
         "Processes, signals, per-user permissions",
     };
     for(int i = 0; i < 5; i++){
@@ -68,13 +68,16 @@ static void a_draw(rect_t b, int focused){
     ui_text(b.x, b.y + b.h - 24, line, C_DIM, 1);
 }
 
+static void a_tick(void){                 /* the uptime counts seconds */
+    static u64 shown;
+    if(timer_ticks() / 100 != shown){ shown = timer_ticks() / 100; ui_redraw(); }
+}
+
 const app_t app_about = {
     .name = "About",
     .icon = UI_ICO_ABOUT,
-    .pinned = 0,
     .open = NULL,
     .close = NULL,
     .draw = a_draw,
-    .key = NULL,
-    .click = NULL,
+    .tick = a_tick,
 };

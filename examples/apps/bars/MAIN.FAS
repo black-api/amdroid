@@ -1,0 +1,42 @@
+# Equalizer - an animated colour bar demo for Am-Droid.
+# Press Esc to return to the desktop.
+
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+
+bg    = rgb(16, 20, 24)
+white = rgb(242, 245, 247)
+
+w = fb_width()
+h = fb_height()
+n = 16
+gap = 20
+bw = (w - gap) / n - gap
+
+none = 0 - 1
+t = 0
+running = true
+while running {
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 or k == 81 { running = false }
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }
+
+    fb_clear(bg)
+    i = 0
+    while i < n {
+        phase = t * 0.08 + i * 0.5
+        mag = (sin(phase) + 1) / 2
+        bh = 60 + mag * (h - 260)
+        bx = gap + i * (bw + gap)
+        by = h - 90 - bh
+        col = rgb(60 + i * 11, 220 - i * 6, 151 + i * 4)
+        fb_rect(bx, by, bw, bh, col)
+        i = i + 1
+    }
+    fb_text(80, 60, "Equalizer  -  click or press Esc to exit", white, bg)
+    fb_present()
+    t = t + 1
+    sleep_ms(16)
+}

@@ -21,7 +21,6 @@
 #define SYS_SIGRETURN 14  /* used by the signal trampoline, not by programs */
 #define SYS_SLEEP 15      /* sleep(ticks): block for N timer ticks (100 Hz) */
 
-void syscall_init(void);
 u64 *syscall_dispatch(u64 *frame);   /* returns the frame to resume */
 void syscall_release(int pid);       /* a process ended: close its files */
 #endif

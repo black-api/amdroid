@@ -17,11 +17,6 @@ int fz_error_count;
 static void *jb[5];
 static int run_status;
 
-void fz_at(const char *file, int line){
-    fz_file = file;
-    fz_line = line;
-}
-
 void fz_finish(int code){
     run_status = code;
     __builtin_longjmp(jb, 1);

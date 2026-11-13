@@ -39,6 +39,11 @@ static int mover = 0;
 static hdr_t **starts = NULL;
 static u32 nstarts = 0;
 extern char stack_top[];          /* the top of the kernel stack (boot.asm) */
+/* Optional runtime override of the stack top the GC scans up to. Left 0 in the
+ * kernel and Husser (they use the stack_top symbol); a host/test build that has
+ * no such symbol at a fixed address sets it with js_set_stack_top(). */
+uintptr_t js_stack_top = 0;
+void js_set_stack_top(uintptr_t t){ js_stack_top = t; }
 
 /* Registers a variable or array that holds pointers into the heap. */
 void js_gc_root(void *p, u32 n){
@@ -156,7 +161,8 @@ static void gc(void){
     /* roots: the stack (spilling registers first), then the registered globals */
     __builtin_unwind_init();
     uintptr_t here = (uintptr_t)__builtin_frame_address(0);
-    for(uintptr_t a = here & ~(uintptr_t)7; a < (uintptr_t)stack_top; a += 8)
+    uintptr_t top = js_stack_top ? js_stack_top : (uintptr_t)stack_top;
+    for(uintptr_t a = here & ~(uintptr_t)7; a < top; a += 8)
         mark_addr(*(uintptr_t *)a);
     for(int i = 0; i < nroots; i++) scan_words(roots[i].p, roots[i].n);
     drain();
@@ -244,6 +250,7 @@ typedef struct regex_data { const char *pat; u32 plen; int icase, global; } rege
 
 struct js_obj {
     int is_array, is_func, is_regex, is_class, default_ctor;
+    int frozen;               /* Object.freeze: property writes are ignored */
     prop_t *props;
     js_obj_t *proto;          /* the prototype (for lookups) */
     js_val_t *items;          /* arrays */
@@ -295,6 +302,7 @@ void js_set(js_obj_t *o, const char *name, js_val_t v){
     if(!p){
         p = jalloc(sizeof(prop_t));
         p->k = jstrdup(name, (u32)strlen(name));
+        p->getter = p->setter = NULL;
         p->next = o->props;
         o->props = p;
     }
@@ -376,6 +384,7 @@ static int has_prop(js_obj_t *o, const char *name){
 }
 
 static void obj_set(js_obj_t *o, const char *name, js_val_t v){
+    if(o->frozen) return;
     if(o->hset && o->hset(o, name, v)) return;
     prop_t *ap = find_own(o, name);
     if(ap && (ap->setter || ap->getter)){
@@ -2179,6 +2188,35 @@ static js_val_t str_trim(js_val_t self, int argc, js_val_t *argv, void *ctx){
     return js_str(o);
 }
 
+/* String.prototype.at(i): the character at i, counting from the end when negative. */
+static js_val_t str_at(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)ctx;
+    const char *s = js_to_str(self);
+    int len = (int)strlen(s);
+    int i = argc ? (int)js_to_num(argv[0]) : 0;
+    if(i < 0) i += len;
+    if(i < 0 || i >= len) return js_undef();
+    char *o = jalloc(2);
+    o[0] = s[i];
+    o[1] = 0;
+    return js_str(o);
+}
+
+static js_val_t str_trim_start(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)argc; (void)argv; (void)ctx;
+    const char *s = js_to_str(self);
+    while(*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    return js_str(jstrdup(s, (u32)strlen(s)));
+}
+
+static js_val_t str_trim_end(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)argc; (void)argv; (void)ctx;
+    const char *s = js_to_str(self);
+    u32 n = (u32)strlen(s);
+    while(n && (s[n-1] == ' ' || s[n-1] == '\t' || s[n-1] == '\n' || s[n-1] == '\r')) n--;
+    return js_str(jstrdup(s, n));
+}
+
 static js_val_t str_char_at(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     const char *s = js_to_str(self);
@@ -2521,6 +2559,107 @@ static js_val_t arr_concat(js_val_t self, int argc, js_val_t *argv, void *ctx){
     }
     return js_objv(out);
 }
+
+/* Array.prototype.at(i): element at i, counting from the end when i is negative. */
+static js_val_t arr_at(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)ctx;
+    if(self.t != JS_OBJ || !self.o->is_array) return js_undef();
+    int i = argc ? (int)js_to_num(argv[0]) : 0;
+    if(i < 0) i += self.o->nitems;
+    if(i < 0 || i >= self.o->nitems) return js_undef();
+    return self.o->items[i];
+}
+
+/* Array.prototype.fill(value, start, end): fills the array in place. */
+static js_val_t arr_fill(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)ctx;
+    if(self.t != JS_OBJ || !self.o->is_array) return self;
+    int len = self.o->nitems;
+    js_val_t v = arg(argc, argv, 0);
+    int a = argc > 1 ? (int)js_to_num(argv[1]) : 0;
+    int b = argc > 2 ? (int)js_to_num(argv[2]) : len;
+    if(a < 0) a += len;
+    if(b < 0) b += len;
+    if(a < 0) a = 0;
+    if(b > len) b = len;
+    for(int i = a; i < b; i++) self.o->items[i] = v;
+    return self;
+}
+
+static void flatten_into(js_obj_t *out, js_obj_t *arr, int depth){
+    for(int i = 0; i < arr->nitems; i++){
+        js_val_t v = arr->items[i];
+        if(depth > 0 && v.t == JS_OBJ && v.o->is_array) flatten_into(out, v.o, depth - 1);
+        else arr_push(out, v);
+    }
+}
+
+/* Array.prototype.flat(depth = 1). */
+static js_val_t arr_flat(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)ctx;
+    js_obj_t *out = new_array();
+    if(self.t != JS_OBJ || !self.o->is_array) return js_objv(out);
+    int depth = argc ? (int)js_to_num(argv[0]) : 1;
+    flatten_into(out, self.o, depth);
+    return js_objv(out);
+}
+
+/* Array.prototype.flatMap(fn): map, then flatten one level. */
+static js_val_t arr_flat_map(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)ctx;
+    js_obj_t *out = new_array();
+    if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_objv(out);
+    for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        js_val_t a[3] = { self.o->items[i], js_num(i), self };
+        js_val_t r = call_value(argv[0], js_undef(), 3, a);
+        if(r.t == JS_OBJ && r.o->is_array)
+            for(int j = 0; j < r.o->nitems; j++) arr_push(out, r.o->items[j]);
+        else arr_push(out, r);
+    }
+    return js_objv(out);
+}
+
+/* Array.of(...args): an array of the given arguments. */
+static js_val_t arr_of(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_obj_t *out = new_array();
+    for(int i = 0; i < argc; i++) arr_push(out, argv[i]);
+    return js_objv(out);
+}
+
+/* Array.from(src, mapFn?): from a string, an array, or an array-like with a length. */
+static js_val_t arr_from(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_obj_t *out = new_array();
+    js_val_t src = arg(argc, argv, 0);
+    js_val_t fn = arg(argc, argv, 1);
+    int has_fn = js_callable(fn);
+    if(src.t == JS_STR){
+        const char *s = src.s ? src.s : "";
+        for(int i = 0; s[i] && !STOP(); i++){
+            char *c = jalloc(2); c[0] = s[i]; c[1] = 0;
+            js_val_t v = js_str(c);
+            if(has_fn){ js_val_t a[2] = { v, js_num(i) }; v = call_value(fn, js_undef(), 2, a); }
+            arr_push(out, v);
+        }
+    } else if(src.t == JS_OBJ){
+        int len = src.o->is_array ? src.o->nitems : (int)js_to_num(js_get(src.o, "length"));
+        for(int i = 0; i < len && !STOP(); i++){
+            js_val_t v;
+            if(src.o->is_array) v = src.o->items[i];
+            else {
+                char b[12]; int k = 0, x = i, tk = 0; char t[12];
+                do { t[tk++] = (char)('0' + x % 10); x /= 10; } while(x);
+                while(tk) b[k++] = t[--tk];
+                b[k] = 0;
+                v = js_get(src.o, b);
+            }
+            if(has_fn){ js_val_t a[2] = { v, js_num(i) }; v = call_value(fn, js_undef(), 2, a); }
+            arr_push(out, v);
+        }
+    }
+    return js_objv(out);
+}
 static js_val_t arr_shift(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)argc; (void)argv; (void)ctx;
     if(self.t != JS_OBJ || !self.o->is_array || self.o->nitems == 0) return js_undef();
@@ -2691,6 +2830,84 @@ static js_val_t obj_keys(js_val_t self, int argc, js_val_t *argv, void *ctx){
     return js_objv(keys_of(arg(argc, argv, 0)));
 }
 
+/* Object.assign(target, ...sources): copies each source's own keys onto target. */
+static js_val_t obj_assign(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t t = arg(argc, argv, 0);
+    if(t.t != JS_OBJ) return t;
+    for(int a = 1; a < argc; a++){
+        js_val_t s = argv[a];
+        if(s.t != JS_OBJ) continue;
+        js_obj_t *ks = keys_of(s);
+        for(int i = 0; i < ks->nitems && !STOP(); i++)
+            obj_set(t.o, ks->items[i].s, js_get(s.o, ks->items[i].s));
+    }
+    return t;
+}
+
+/* Object.entries(obj): an array of [key, value] pairs. */
+static js_val_t obj_entries(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t o = arg(argc, argv, 0);
+    js_obj_t *out = new_array();
+    if(o.t != JS_OBJ) return js_objv(out);
+    js_obj_t *ks = keys_of(o);
+    for(int i = 0; i < ks->nitems; i++){
+        js_obj_t *pair = new_array();
+        arr_push(pair, ks->items[i]);
+        arr_push(pair, js_get(o.o, ks->items[i].s));
+        arr_push(out, js_objv(pair));
+    }
+    return js_objv(out);
+}
+
+/* Object.fromEntries(iterable): builds an object from [key, value] pairs. */
+static js_val_t obj_from_entries(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t it = arg(argc, argv, 0);
+    js_obj_t *out = js_new_object();
+    if(it.t == JS_OBJ && it.o->is_array){
+        for(int i = 0; i < it.o->nitems; i++){
+            js_val_t e = it.o->items[i];
+            if(e.t == JS_OBJ && e.o->is_array && e.o->nitems >= 1){
+                const char *k = js_to_str(e.o->items[0]);
+                js_set(out, k, e.o->nitems >= 2 ? e.o->items[1] : js_undef());
+            }
+        }
+    }
+    return js_objv(out);
+}
+
+/* Object.create(proto): a new object whose prototype is proto. */
+static js_val_t obj_create(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t p = arg(argc, argv, 0);
+    js_obj_t *o = js_new_object();
+    o->proto = (p.t == JS_OBJ) ? p.o : NULL;
+    return js_objv(o);
+}
+
+/* Object.getPrototypeOf(obj). */
+static js_val_t obj_get_proto(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t o = arg(argc, argv, 0);
+    if(o.t == JS_OBJ && o.o->proto) return js_objv(o.o->proto);
+    return js_null();
+}
+
+/* Object.freeze(obj) / Object.isFrozen(obj). */
+static js_val_t obj_freeze(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t o = arg(argc, argv, 0);
+    if(o.t == JS_OBJ) o.o->frozen = 1;
+    return o;
+}
+static js_val_t obj_is_frozen(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    js_val_t o = arg(argc, argv, 0);
+    return js_bool(o.t != JS_OBJ || o.o->frozen);
+}
+
 static js_val_t obj_values(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     js_val_t o = arg(argc, argv, 0);
@@ -2853,6 +3070,10 @@ void js_init(void){
     js_set(array_proto, "findIndex", js_objv(js_new_native(arr_find_index, NULL)));
     js_set(array_proto, "some", js_objv(js_new_native(arr_some, NULL)));
     js_set(array_proto, "every", js_objv(js_new_native(arr_every, NULL)));
+    js_set(array_proto, "at", js_objv(js_new_native(arr_at, NULL)));
+    js_set(array_proto, "fill", js_objv(js_new_native(arr_fill, NULL)));
+    js_set(array_proto, "flat", js_objv(js_new_native(arr_flat, NULL)));
+    js_set(array_proto, "flatMap", js_objv(js_new_native(arr_flat_map, NULL)));
 
     js_set(string_proto, "toUpperCase", js_objv(js_new_native(str_upper, NULL)));
     js_set(string_proto, "toLowerCase", js_objv(js_new_native(str_lower, NULL)));
@@ -2861,6 +3082,9 @@ void js_init(void){
     js_set(string_proto, "slice", js_objv(js_new_native(str_slice, NULL)));
     js_set(string_proto, "substring", js_objv(js_new_native(str_slice, NULL)));
     js_set(string_proto, "trim", js_objv(js_new_native(str_trim, NULL)));
+    js_set(string_proto, "trimStart", js_objv(js_new_native(str_trim_start, NULL)));
+    js_set(string_proto, "trimEnd", js_objv(js_new_native(str_trim_end, NULL)));
+    js_set(string_proto, "at", js_objv(js_new_native(str_at, NULL)));
     js_set(string_proto, "charAt", js_objv(js_new_native(str_char_at, NULL)));
     js_set(string_proto, "repeat", js_objv(js_new_native(str_repeat, NULL)));
     js_set(string_proto, "replace", js_objv(js_new_native(str_replace, NULL)));
@@ -2897,6 +3121,13 @@ void js_init(void){
     js_obj_t *object = js_new_object();
     js_set(object, "keys", js_objv(js_new_native(obj_keys, NULL)));
     js_set(object, "values", js_objv(js_new_native(obj_values, NULL)));
+    js_set(object, "entries", js_objv(js_new_native(obj_entries, NULL)));
+    js_set(object, "fromEntries", js_objv(js_new_native(obj_from_entries, NULL)));
+    js_set(object, "assign", js_objv(js_new_native(obj_assign, NULL)));
+    js_set(object, "create", js_objv(js_new_native(obj_create, NULL)));
+    js_set(object, "getPrototypeOf", js_objv(js_new_native(obj_get_proto, NULL)));
+    js_set(object, "freeze", js_objv(js_new_native(obj_freeze, NULL)));
+    js_set(object, "isFrozen", js_objv(js_new_native(obj_is_frozen, NULL)));
     js_set(global_obj, "Object", js_objv(object));
 
     js_set(global_obj, "parseInt", js_objv(js_new_native(g_parse_int, NULL)));
@@ -2920,6 +3151,8 @@ void js_init(void){
     js_set(object, "isArray", js_objv(js_new_native(array_is_array, NULL)));
     js_obj_t *array_ctor = js_new_object();
     js_set(array_ctor, "isArray", js_objv(js_new_native(array_is_array, NULL)));
+    js_set(array_ctor, "from", js_objv(js_new_native(arr_from, NULL)));
+    js_set(array_ctor, "of", js_objv(js_new_native(arr_of, NULL)));
     js_set(global_obj, "Array", js_objv(array_ctor));
     js_obj_t *date = js_new_object();
     js_set(date, "now", js_objv(js_new_native(date_now, NULL)));

@@ -12,10 +12,12 @@ extern const app_t app_clock;
 extern const app_t app_notes;
 extern const app_t app_network;
 extern const app_t app_browser;
+extern const app_t app_store;
 
 const app_t *const ui_apps[UI_MAX_APPS + 1] = {
     &app_files,
     &app_tasks,
+    &app_store,
     &app_settings,
     &app_about,
     &app_calc,
