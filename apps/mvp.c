@@ -17,7 +17,8 @@
 #include "string.h"
 
 int  jpeg_decode_rgb(const u8 *data, u32 len, u32 **px, u32 *w, u32 *h);   /* web/image.c */
-void *jpeg_job_start(const u8 *data, u32 len);                              /* decoding in steps */
+void *jpeg_job_start(const u8 *data, u32 len, int scale);                   /* decoding in steps */
+void  jpeg_job_size(void *job, u32 *w, u32 *h);
 int   jpeg_job_step(void *job, int work);
 u32  *jpeg_job_take(void *job, u32 *w, u32 *h);
 void  jpeg_job_abort(void *job);
@@ -30,6 +31,10 @@ extern const app_t app_mvp;
 static char files[MAX_FILES][24];
 static u32 file_size[MAX_FILES];
 static int nfiles = 0;
+static u32 *thumb[MAX_FILES]; static u32 thumb_w[MAX_FILES], thumb_h[MAX_FILES];
+static u32 file_secs[MAX_FILES];
+static int thumbs_done = 0;                 /* files looked at so far (one per tick) */
+#define LIB_ROW_H 104
 static int lib_hover = -1;
 
 /* ---- the open video ---- */
@@ -62,7 +67,11 @@ static u8 *rdbuf = NULL; static u32 rdcap = 0;
 static u32 decode_ms_avg = 0;               /* how long a frame takes to decode */
 static int dropped = 0;
 static int theater = 0;                     /* controls hidden (F in a maximized window) */
+static u32 area_w = 0, area_h = 0;          /* where the picture goes (from the last draw) */
+static int shown_scale = 0;                 /* the scale the frame on screen was decoded at */
+static int smooth = 0;                      /* 'scaled' is the smooth (bilinear) version */
 static void *job = NULL;                    /* the frame being decoded, a little each tick */
+static int job_scale = 0;
 static int job_frame = -1;
 static u64 job_cycles = 0;                  /* CPU cycles spent on it */
 static u32 fps_shown = 0, fps_count = 0; static u64 fps_t0 = 0;
@@ -113,11 +122,65 @@ static void add_file(const char *name, int is_dir, u32 size){
     nfiles++;
 }
 static void scan_library(void){
+    for(int i = 0; i < nfiles; i++) if(thumb[i]){ kfree(thumb[i]); thumb[i] = NULL; }
+    thumbs_done = 0;
     nfiles = 0;
     list_prefix = "VIDEOS/";
     fat32_list_path("VIDEOS", add_file);
     list_prefix = "";
     fat32_list_root(add_file);
+}
+
+/* ---- thumbnails: the first frame at 1/8 (or so) size, and the length ---- */
+static void make_thumb(int i){
+    fat32_file_t f;
+    if(fat32_open(files[i], &f) != 0) return;
+    u8 h[12];
+    u32 off = 12, frames = 0, usf = 66666;
+    /* top-level chunks: hdrl (with avih) and movi (with the first frame) */
+    while(off + 12 <= f.size && fat32_read_at(&f, off, h, 12) == 12){
+        u32 size = (u32)h[4] | ((u32)h[5] << 8) | ((u32)h[6] << 16) | ((u32)h[7] << 24);
+        if(h[0] == 'L' && h[1] == 'I' && h[2] == 'S' && h[3] == 'T'){
+            if(h[8] == 'h' && h[9] == 'd' && h[10] == 'r' && h[11] == 'l'){
+                u8 a[48];
+                if(fat32_read_at(&f, off + 12, a, 48) == 48 && a[0] == 'a' && a[1] == 'v' && a[2] == 'i' && a[3] == 'h'){
+                    usf = (u32)a[8] | ((u32)a[9] << 8) | ((u32)a[10] << 16) | ((u32)a[11] << 24);
+                    frames = (u32)a[24] | ((u32)a[25] << 8) | ((u32)a[26] << 16) | ((u32)a[27] << 24);
+                }
+            } else if(h[8] == 'm' && h[9] == 'o' && h[10] == 'v' && h[11] == 'i'){
+                /* the first video chunk in movi */
+                u32 o = off + 12, e = off + 8 + size;
+                while(o + 8 <= e && fat32_read_at(&f, o, h, 8) == 8){
+                    u32 cs = (u32)h[4] | ((u32)h[5] << 8) | ((u32)h[6] << 16) | ((u32)h[7] << 24);
+                    if(h[2] == 'd' && (h[3] == 'c' || h[3] == 'b') && cs > 0 && cs < 4u << 20){
+                        u8 *buf = kmalloc(cs);
+                        if(buf && fat32_read_at(&f, o + 8, buf, cs) == (int)cs){
+                            void *j = jpeg_job_start(buf, cs, 0);
+                            if(j){
+                                u32 W, H; jpeg_job_size(j, &W, &H);
+                                jpeg_job_abort(j);
+                                int sc = 0; while(sc < 3 && (W >> (sc + 1)) >= 140) sc++;
+                                j = jpeg_job_start(buf, cs, sc);
+                                if(j){
+                                    int r; while((r = jpeg_job_step(j, 1 << 20)) == 0) ;
+                                    if(r == 1) thumb[i] = jpeg_job_take(j, &thumb_w[i], &thumb_h[i]);
+                                    else jpeg_job_abort(j);
+                                }
+                            }
+                        }
+                        if(buf) kfree(buf);
+                        break;
+                    }
+                    if(h[0] == 'L' && h[1] == 'I' && h[2] == 'S' && h[3] == 'T') o += 12;
+                    else o += 8 + cs + (cs & 1);
+                }
+                break;
+            }
+        }
+        off += 8 + size + (size & 1);
+    }
+    file_secs[i] = (u32)((u64)frames * usf / 1000000);
+    fat32_close(&f);
 }
 
 /* ---- opening an AVI ---- */
@@ -284,7 +347,11 @@ static void pause_clock(void){
 static void set_playing(int p){
     if(p == playing) return;
     if(p){ if(pos_us >= duration_us()) pos_us = 0; playing = 1; start_clock(); }
-    else { pause_clock(); playing = 0; }
+    else {
+        pause_clock(); playing = 0;
+        if(job){ jpeg_job_abort(job); job = NULL; job_frame = -1; }
+        if(shown >= 0 && shown_scale > 0) decode_frame(shown);   /* a sharp still */
+    }
     ui_redraw();
 }
 static void seek_to(i64 t){
@@ -319,27 +386,50 @@ static int decode_frame(int i){
     if(scaled == frame_px) scaled = NULL;
     if(frame_px) kfree(frame_px);
     frame_px = px; vw = w; vh = h;
-    sw = sh = 0;                     /* scale again */
+    sw = sh = 0; smooth = 0;         /* scale again */
     shown = i;
+    shown_scale = 0;
     return 0;
 }
 
 /* a finished frame from the stepping decoder */
-static void show_decoded(u32 *px, u32 w, u32 h, int i){
+static void show_decoded(u32 *px, u32 w, u32 h, int i, int sc){
     if(scaled == frame_px) scaled = NULL;
     if(frame_px) kfree(frame_px);
     frame_px = px; vw = w; vh = h;
-    sw = sh = 0;
+    sw = sh = 0; smooth = 0;
     shown = i;
+    shown_scale = sc;
     fps_count++;
 }
 
 /* scales the frame to fit w x h (keeping its shape) into 'scaled' */
+/* bilinear: smooth, for a still picture (too slow to do for every frame) */
+static void scale_smooth(u32 dw, u32 dh){
+    for(u32 y = 0; y < dh; y++){
+        u32 fy = (u32)(((u64)y * (vh - 1) << 8) / (dh > 1 ? dh - 1 : 1));
+        u32 y0 = fy >> 8, y1 = y0 + 1 < vh ? y0 + 1 : y0, wy = fy & 255;
+        const u32 *r0 = frame_px + (u64)y0 * vw, *r1 = frame_px + (u64)y1 * vw;
+        u32 *o = scaled + (u64)y * dw;
+        for(u32 x = 0; x < dw; x++){
+            u32 fx = (u32)(((u64)x * (vw - 1) << 8) / (dw > 1 ? dw - 1 : 1));
+            u32 x0 = fx >> 8, x1 = x0 + 1 < vw ? x0 + 1 : x0, wx = fx & 255;
+            u32 a = r0[x0], b = r0[x1], c = r1[x0], d = r1[x1], out = 0;
+            for(int sh8 = 0; sh8 < 24; sh8 += 8){
+                u32 ca = (a >> sh8) & 255, cb = (b >> sh8) & 255, cc = (c >> sh8) & 255, cd = (d >> sh8) & 255;
+                u32 top = ca * (256 - wx) + cb * wx, bot = cc * (256 - wx) + cd * wx;
+                out |= (((top * (256 - wy) + bot * wy) >> 16) & 255) << sh8;
+            }
+            o[x] = out;
+        }
+    }
+}
 static void scale_to(u32 w, u32 h){
     if(!frame_px || !vw || !vh) return;
     u32 dw = w, dh = (u32)((u64)w * vh / vw);
     if(dh > h){ dh = h; dw = (u32)((u64)h * vw / vh); }
-    if(dw == sw && dh == sh && scaled) return;
+    int want_smooth = !playing;
+    if(dw == sw && dh == sh && scaled && (smooth || !want_smooth)) return;
     if(dw == vw && dh == vh){                 /* the window fits the video: no scaling */
         if(scaled && scaled != frame_px) kfree(scaled);
         scaled = frame_px; sw = dw; sh = dh;
@@ -348,6 +438,8 @@ static void scale_to(u32 w, u32 h){
     if(scaled && scaled != frame_px) kfree(scaled);
     scaled = kmalloc(dw * dh * 4);
     if(!scaled){ sw = sh = 0; return; }
+    if(want_smooth){ scale_smooth(dw, dh); sw = dw; sh = dh; smooth = 1; return; }
+    smooth = 0;
     if(xmap_w != dw || xmap_src != vw){
         if(xmap) kfree(xmap);
         xmap = kmalloc(sizeof(int) * dw);
@@ -365,6 +457,7 @@ static void scale_to(u32 w, u32 h){
 
 static void mvp_tick(void){
     calibrate();
+    if(!have_video && thumbs_done < nfiles){ make_thumb(thumbs_done++); ui_redraw(); return; }
     if(!have_video || !playing) return;
     feed_audio();
     u64 t = now_us();
@@ -389,7 +482,18 @@ static void mvp_tick(void){
             if(!rdbuf){ rdcap = 0; return; }
         }
         if(fat32_read_at(&vf, c->off, rdbuf, c->len) != (int)c->len) return;
-        job = jpeg_job_start(rdbuf, c->len);
+        /* decode only as big as the window needs: 1/2, 1/4 size is far less work */
+        int sc = 0;
+        if(area_w && vw){
+            u32 fullw = vw << shown_scale, fullh = vh << shown_scale;
+            /* the size the picture is shown at (it keeps its shape) */
+            u32 dw = area_w, dh = (u32)((u64)area_w * fullh / fullw);
+            if(dh > area_h){ dh = area_h; dw = (u32)((u64)area_h * fullw / fullh); }
+            /* smaller is fine while it is stretched by no more than 1.4x */
+            while(sc < 2 && (fullw >> (sc + 1)) * 10 >= dw * 7) sc++;
+        }
+        job = jpeg_job_start(rdbuf, c->len, sc);
+        job_scale = sc;
         job_frame = want;
         job_cycles = 0;
         if(!job){ shown = want; return; }       /* a broken frame: skip it */
@@ -404,7 +508,7 @@ static void mvp_tick(void){
                 if(r == 1){
                     u32 w, h; u32 *px = jpeg_job_take(job, &w, &h);
                     if(tsc_per_tick){ u32 ms = (u32)((job_cycles + rdtsc() - t0) * 10 / tsc_per_tick); decode_ms_avg = decode_ms_avg ? (decode_ms_avg * 7 + ms) / 8 : ms; }
-                    show_decoded(px, w, h, job_frame);
+                    show_decoded(px, w, h, job_frame, job_scale);
                     ui_redraw();
                 } else jpeg_job_abort(job);
                 job = NULL; job_frame = -1;
@@ -442,27 +546,40 @@ static void draw_library(rect_t b){
     }
     ui_text(b.x + UI_PAD, y, "Your videos", C_MUTED, UI_SCALE);
     y += UI_ROW_H;
-    for(int i = 0; i < nfiles && y + UI_ROW_H <= b.y + b.h; i++, y += UI_ROW_H + 8){
-        rect_t row = { b.x + UI_PAD, y, b.w - 2 * UI_PAD, UI_ROW_H };
-        ui_rrect(row.x, row.y, row.w, row.h, 8, i == lib_hover ? C_HOVER : C_CARD);
-        ui_disc((int)row.x + 22, (int)row.y + 20, 12, ui_accent());
-        ui_line((int)row.x + 18, (int)row.y + 13, (int)row.x + 18, (int)row.y + 27, 3, C_WIN);
-        ui_line((int)row.x + 18, (int)row.y + 13, (int)row.x + 28, (int)row.y + 20, 3, C_WIN);
-        ui_line((int)row.x + 18, (int)row.y + 27, (int)row.x + 28, (int)row.y + 20, 3, C_WIN);
-        ui_text(row.x + 48, row.y + 4, files[i], C_TEXT, UI_SCALE);
-        char sz[24]; ui_num(file_size[i] / (1024 * 1024), sz); ui_cat(sz, " MB");
-        ui_text_right(row, row.y + 4, sz, C_MUTED, UI_SCALE);
+    for(int i = 0; i < nfiles && y + LIB_ROW_H <= b.y + b.h; i++, y += LIB_ROW_H + 8){
+        rect_t row = { b.x + UI_PAD, y, b.w - 2 * UI_PAD, LIB_ROW_H };
+        ui_rrect(row.x, row.y, row.w, row.h, 10, i == lib_hover ? C_HOVER : C_CARD);
+        /* the thumbnail (or a play badge while it is being made) */
+        u32 tx = row.x + 8, ty = row.y + 7, tw = 160, th = 90;
+        ui_fill((rect_t){ tx, ty, tw, th }, 0x000000);
+        if(thumb[i]){
+            u32 w = thumb_w[i] < tw ? thumb_w[i] : tw, h = thumb_h[i] < th ? thumb_h[i] : th;
+            fb_blit_over((i32)(tx + (tw - w) / 2), (i32)(ty + (th - h) / 2), w, h, thumb[i]);
+        } else {
+            ui_disc((int)(tx + tw / 2), (int)(ty + th / 2), 16, ui_accent());
+            ui_line((int)(tx + tw / 2 - 5), (int)(ty + th / 2 - 8), (int)(tx + tw / 2 - 5), (int)(ty + th / 2 + 8), 3, C_WIN);
+            ui_line((int)(tx + tw / 2 - 5), (int)(ty + th / 2 - 8), (int)(tx + tw / 2 + 8), (int)(ty + th / 2), 3, C_WIN);
+            ui_line((int)(tx + tw / 2 - 5), (int)(ty + th / 2 + 8), (int)(tx + tw / 2 + 8), (int)(ty + th / 2), 3, C_WIN);
+        }
+        char num[4] = { (char)('1' + i), 0 };
+        ui_text(tx + tw + 20, row.y + 14, i < 9 ? num : "", ui_accent(), UI_SCALE);
+        ui_text(tx + tw + 52, row.y + 14, files[i], C_TEXT, UI_SCALE);
+        char meta[40] = "", n[12];
+        if(file_secs[i]){ fmt_time((u64)file_secs[i] * 1000000, meta); ui_cat(meta, "   "); }
+        ui_num(file_size[i] / (1024 * 1024), n); ui_cat(meta, n); ui_cat(meta, " MB");
+        ui_text(tx + tw + 52, row.y + 54, meta, C_MUTED, UI_SCALE);
     }
 }
 
 static void draw_player(rect_t b){
     ui_fill(b, 0x000000);
-    u32 area_h = theater ? b.h : b.h - BAR_H;
+    u32 pic_h = theater ? b.h : b.h - BAR_H;
+    area_w = b.w; area_h = pic_h;
     if(frame_px){
-        scale_to(b.w, area_h);
-        if(scaled) fb_blit_over((i32)(b.x + (b.w - sw) / 2), (i32)(b.y + (area_h - sh) / 2), sw, sh, scaled);
+        scale_to(b.w, pic_h);
+        if(scaled) fb_blit_over((i32)(b.x + (b.w - sw) / 2), (i32)(b.y + (pic_h - sh) / 2), sw, sh, scaled);
     } else {
-        ui_text(b.x + b.w / 2 - 80, b.y + area_h / 2 - 16, "Loading...", C_MUTED, UI_SCALE);
+        ui_text(b.x + b.w / 2 - 80, b.y + pic_h / 2 - 16, "Loading...", C_MUTED, UI_SCALE);
     }
     if(theater) return;
     /* the control bar */
@@ -497,7 +614,9 @@ static void draw_player(rect_t b){
     {   /* what the decoder is doing */
         char n[12];
         ui_cat(info, "   ");
-        ui_num(vh, n); ui_cat(info, n); ui_cat(info, "p ");
+        ui_num(vh << shown_scale, n); ui_cat(info, n); ui_cat(info, "p");
+        if(shown_scale){ ui_cat(info, "@1/"); ui_num(1u << shown_scale, n); ui_cat(info, n); }
+        ui_cat(info, " ");
         ui_num(decode_ms_avg, n); ui_cat(info, n); ui_cat(info, " ms ");
         ui_num(fps_shown, n); ui_cat(info, n); ui_cat(info, " fps");
     }
@@ -553,7 +672,7 @@ static void mvp_click(rect_t b, int x, int y){
     if(!have_video){
         u32 top = b.y + 88 + (err[0] ? UI_ROW_H : 0) + UI_ROW_H;
         for(int i = 0; i < nfiles; i++){
-            rect_t row = { b.x + UI_PAD, top + (u32)i * (UI_ROW_H + 8), b.w - 2 * UI_PAD, UI_ROW_H };
+            rect_t row = { b.x + UI_PAD, top + (u32)i * (LIB_ROW_H + 8), b.w - 2 * UI_PAD, LIB_ROW_H };
             if(ui_contains(row, x, y)){ open_video(files[i]); ui_redraw(); return; }
         }
         return;
@@ -571,7 +690,7 @@ static void mvp_move(rect_t b, int x, int y){
     u32 top = b.y + 88 + (err[0] ? UI_ROW_H : 0) + UI_ROW_H;
     int h = -1;
     for(int i = 0; i < nfiles; i++){
-        rect_t row = { b.x + UI_PAD, top + (u32)i * (UI_ROW_H + 8), b.w - 2 * UI_PAD, UI_ROW_H };
+        rect_t row = { b.x + UI_PAD, top + (u32)i * (LIB_ROW_H + 8), b.w - 2 * UI_PAD, LIB_ROW_H };
         if(ui_contains(row, x, y)) h = i;
     }
     if(h != lib_hover){ lib_hover = h; ui_redraw(); }
