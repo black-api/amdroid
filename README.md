@@ -1,4 +1,4 @@
-# am-droid OS
+# Am-Droid OS
 
 A lightweight, from-scratch operating system for x86_64 (AMD64) that boots on both
 emulators (QEMU) and real hardware (BIOS and UEFI via GRUB).
