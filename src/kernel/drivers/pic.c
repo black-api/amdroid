@@ -12,7 +12,3 @@ void pic_init(void){
     outb(0x21,0xFC); outb(0xA1,0xFF);
 }
 
-void pic_eoi(u8 irq){
-    if(irq>=8) { __asm__ volatile("outb %0,%1"::"a"((u8)0x20),"Nd"((u16)0xA0)); }
-    __asm__ volatile("outb %0,%1"::"a"((u8)0x20),"Nd"((u16)0x20));
-}

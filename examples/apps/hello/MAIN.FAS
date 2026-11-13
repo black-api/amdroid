@@ -1,0 +1,42 @@
+# Hello World - a tiny Am-Droid app packaged as a .adp
+# Draws a bouncing box full screen. Press Esc to return to the desktop.
+
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+
+bg     = rgb(16, 20, 24)
+accent = rgb(61, 220, 151)
+white  = rgb(242, 245, 247)
+muted  = rgb(154, 167, 176)
+
+w = fb_width()
+h = fb_height()
+x = 200
+y = 240
+dx = 9
+dy = 6
+box = 140
+
+none = 0 - 1
+running = true
+while running {
+    # drain every key waiting this frame; Esc or Q exits
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 or k == 81 { running = false }
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }   # or click anywhere to exit
+
+    x = x + dx
+    y = y + dy
+    if x < 0 or x + box > w { dx = 0 - dx }
+    if y < 0 or y + box > h { dy = 0 - dy }
+
+    fb_clear(bg)
+    fb_rect(x, y, box, box, accent)
+    fb_text(80, 80,  "Hello from a .adp app!", white, bg)
+    fb_text(80, 120, "Installed through the Am-Droid App Store.", muted, bg)
+    fb_text(80, 160, "Click anywhere or press Esc to return.", muted, bg)
+    fb_present()
+    sleep_ms(16)
+}

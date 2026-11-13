@@ -14,7 +14,17 @@
 #include "amdroid/sched.h"
 #include "amdroid/fb.h"
 #include "amdroid/gui.h"
+#include "amdroid/gdt.h"
+#include "amdroid/fbcon.h"
+#include "amdroid/auth.h"
+#include "amdroid/ext2.h"
+#include "amdroid/pci.h"
+#include "amdroid/nic.h"
+#include "amdroid/net.h"
 #include "amdroid/vmm.h"
+
+int shell_run(void); /* returns the VT the user switched to */
+void shell_login(void);
 
 /* multiboot2 tag parsing for framebuffer */
 static void *fb_addr = NULL;
@@ -43,6 +53,7 @@ static void parse_mb2(u32 magic, u32 mbi){
 
 void kernel_main(u32 magic, u32 mbi){
     console_init();
+    gdt_init();
     console_puts("\n=== am-droid OS ===\n");
     console_printf("multiboot magic: 0x%x\n", magic);
 
@@ -69,12 +80,29 @@ void kernel_main(u32 magic, u32 mbi){
     if(fat32_init()==0) console_puts("[fat32] mounted\n");
     else console_puts("[fat32] no disk\n");
 
+    /* framebuffer: on QEMU's VGA, set the screen size (FB_W x FB_H, from the
+     * build's GFXMODE; defaults to 1920x1080). */
+#ifndef FB_W
+#define FB_W 1920
+#endif
+#ifndef FB_H
+#define FB_H 1080
+#endif
+    {
+        u64 nb = 0; u32 np = 0;
+        if(fb_addr && fb_bochs_set_mode(FB_W, FB_H, &nb, &np)){
+            fb_addr = (void*)nb; fb_pitch = np; fb_w = FB_W; fb_h = FB_H;
+        }
+    }
     /* framebuffer */
     console_printf("[fb] addr=%p pitch=%u w=%u h=%u bpp=%u\n", fb_addr, fb_pitch, fb_w, fb_h, fb_bpp);
     if(fb_addr){
         vmm_map_region((u64)fb_addr, (u64)fb_addr, fb_w*fb_h*4 + 0x1000);
         fb_init(fb_addr, fb_pitch, fb_w, fb_h, fb_bpp);
-        if(fb_ready()) console_printf("[fb] %ux%u %ubpp OK\n", fb_width(), fb_height(), fb_bpp);
+        if(fb_ready()){
+            fbcon_init();
+            console_printf("[fb] %ux%u %ubpp OK\n", fb_width(), fb_height(), fb_bpp);
+        }
         else console_puts("[fb] init failed (bpp?)\n");
     } else {
         console_puts("[fb] no framebuffer (text mode)\n");
@@ -84,25 +112,50 @@ void kernel_main(u32 magic, u32 mbi){
     sched_init();
     console_puts("[sched] ready\n");
 
-    /* shell task */
-    /* run shell in main context */
     console_puts("\nType 'help' for commands.\n");
 
-    /* VT manager */
-    extern void shell_run(void);
-    extern void gui_run(void);
+    if(ext2_mount() == 0) console_puts("[ext2] mounted on the secondary disk\n");
+    pci_init();
+    extern int xhci_init(void);
+    xhci_init();
+    if(nic_init() == 0){
+        int how = net_init();
+        if(how >= 0){
+            u32 ip, gw; u8 m[6];
+            net_info(&ip, &gw, m);
+            console_printf("[net] up at %u.%u.%u.%u (%s)\n", ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,
+                           how == 0 ? "DHCP" : "static");
+        }
+    }
+
+    /* accounts: first boot creates root; then someone must log in */
+    fbcon_set_active(1);
+    auth_init();
+    if(fb_ready()){
+        fbcon_set_active(0);
+        gui_login();                /* graphical login: no password */
+    }
+    else shell_login();
+
+    /* VT manager: each UI returns the VT the user asked for (1..9) */
     int current_vt = fb_ready() ? 1 : 2;
     for(;;){
         if(current_vt == 1 && fb_ready()){
-            console_puts("Launching GUI (press ctrl+alt (1 to 9 (1 is default)) to start new shell)...\n");
-            gui_run();
+            console_puts("Launching GUI (Ctrl+Alt+2 for the text shell)...\n");
+            fbcon_set_active(0);
+            current_vt = gui_run();
+            if(current_vt == 3){                    /* sign out */
+                auth_logout();
+                fbcon_set_active(0);
+                gui_login();
+                current_vt = 1;
+            }
         } else {
-            console_printf("Shell on VT%d (Ctrl+Alt+1 for GUI)\\n", current_vt);
-            shell_run();
+            console_printf("Shell on VT%d (Ctrl+Alt+1 for GUI)\n", current_vt);
+            fbcon_set_active(1);
+            current_vt = shell_run();
         }
-        int rv = keyboard_get_requested_vt();
-        if(rv >= 1 && rv <= 9) current_vt = rv;
-        else current_vt = fb_ready() ? 1 : 2;
+        if(current_vt < 1 || current_vt > 9) current_vt = 2;
     }
 
     for(;;) __asm__ volatile("hlt");

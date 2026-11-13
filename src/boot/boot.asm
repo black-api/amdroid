@@ -12,14 +12,14 @@ multiboot_header:
     .long multiboot_header_end - multiboot_header
     .long -(MB2_MAGIC + MB2_ARCH + (multiboot_header_end - multiboot_header))
 
-    # Information request tag
+    # Information request tag: ask GRUB for the memory map (6) and the
+    # framebuffer info (8).
     .align 8
     .short 1   # type: info request
     .short 0   # flags
-    .long 20   # size
-    .long 1    # memory map
-    .long 6    # framebuffer
-    .long 0    # end
+    .long 16   # size
+    .long 6    # memory map
+    .long 8    # framebuffer info
 
     # Framebuffer request tag: ask GRUB for a 32bpp linear graphics mode.
     # Without this GRUB stays in VGA text mode (80x25, bpp 16) and the GUI
@@ -42,8 +42,9 @@ multiboot_header_end:
 # Stack
 .section .bss
 .align 16
+    .global stack_top
 stack_bottom:
-    .skip 16384
+    .skip 4194304    # 4 MB: the Fuss interpreter recurses deeply
 stack_top:
 
 # Page tables (identity + higher half)
@@ -67,6 +68,15 @@ _start:
     cli
     movl %eax, mb_magic
     movl %ebx, mb_info
+
+    # Enable SSE so the kernel can do floating point (Fuss uses doubles).
+    movl %cr0, %eax
+    andl $0xFFFFFFFB, %eax   # clear EM (no x87/SSE emulation)
+    orl  $0x2, %eax          # set MP
+    movl %eax, %cr0
+    movl %cr4, %eax
+    orl  $0x600, %eax        # OSFXSR (bit 9) | OSXMMEXCPT (bit 10)
+    movl %eax, %cr4
 
     # Set up stack
     movl $stack_top, %esp
@@ -93,7 +103,7 @@ _start:
     testl $(1<<29), %edx
     jz no_longmode
 
-    # Set up paging: identity map first 2MB (and higher half optional)
+    # Set up paging: identity map the first 256MB (2MB huge pages)
     # PML4[0] -> PDPT
     movl $pdpt, %eax
     orl $0x3, %eax
@@ -105,7 +115,7 @@ _start:
     orl $0x3, %eax
     movl %eax, pdpt
 
-    # PD: 2MB huge pages identity map first 64MB
+    # PD: 2MB huge pages identity map first 256MB
     movl $pd, %edi
     movl $0, %ecx
 2:
@@ -116,7 +126,7 @@ _start:
     movl $0, 4(%edi)
     addl $8, %edi
     incl %ecx
-    cmpl $32, %ecx
+    cmpl $128, %ecx
     jl 2b
 
     # Enable PAE

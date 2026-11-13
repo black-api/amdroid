@@ -7,8 +7,11 @@ static char heap_buf[HEAP_SIZE];
 typedef struct block {
     size_t size;
     int free;
+    int owner;                  /* who asked for it: 0 the kernel, n+1 the GUI app n (heap_owner) */
     struct block *next;
 } block_t;
+
+int heap_owner = 0;             /* set by the GUI while an app's code runs */
 
 static block_t *head = NULL;
 
@@ -34,6 +37,7 @@ void *kmalloc(size_t size){
                 cur->next = nb;
             }
             cur->free = 0;
+            cur->owner = heap_owner;
             return (char*)cur + sizeof(block_t);
         }
         cur = cur->next;
@@ -55,6 +59,20 @@ void kfree(void *ptr){
             cur = cur->next;
         }
     }
+}
+
+/* Bytes in use (with headers), in all and for each owner below nowners. */
+void heap_stats(u64 *used, u64 *total, u64 *by_owner, int nowners){
+    u64 u = 0;
+    for(int i = 0; i < nowners; i++) by_owner[i] = 0;
+    for(block_t *b = head; b; b = b->next){
+        if(b->free) continue;
+        u64 n = b->size + sizeof(block_t);
+        u += n;
+        if(b->owner >= 0 && b->owner < nowners) by_owner[b->owner] += n;
+    }
+    if(used) *used = u;
+    if(total) *total = HEAP_SIZE;
 }
 
 void *kcalloc(size_t n, size_t sz){

@@ -1,0 +1,9 @@
+id=BARS
+name=Equalizer
+version=1.2.0
+author=Am-Droid
+icon=3
+desc=An animated colour equalizer
+perms=framebuffer,input
+requires=amdroid.any
+entry=MAIN.FAS

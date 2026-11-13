@@ -15,7 +15,6 @@ struct vfs_node {
     vfs_node_t *next;
 };
 
-vfs_node_t *vfs_root(void);
 vfs_node_t *vfs_lookup(const char *path);
 int vfs_read(vfs_node_t *n, u64 off, u64 len, void *buf);
 vfs_node_t *vfs_create(const char *path, int is_dir);

@@ -1,0 +1,1 @@
+-std=gnu11 -ffreestanding -O0 -Wall -Wextra -fno-stack-protector -fno-pie -mno-red-zone -m64 -Iinclude -MMD -MP -DFB_W=1920 -DFB_H=1080

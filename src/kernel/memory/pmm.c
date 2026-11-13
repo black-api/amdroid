@@ -3,13 +3,16 @@
 #include "amdroid/types.h"
 
 #define PAGE_SIZE 4096
-#define MAX_MEM (256*1024*1024)
-#define MAX_PAGES (MAX_MEM/PAGE_SIZE)
-#define BITMAP_BYTES (MAX_PAGES/8)
+/* the bitmap covers up to 4 GB (128 KiB); the real total comes from the
+ * multiboot memory map, never from a constant */
+#define PMM_MAX_MEM (4ull * 1024 * 1024 * 1024)     /* the bitmap's reach */
+#define MAX_PAGES (PMM_MAX_MEM / PAGE_SIZE)         /* 2^20 pages */
+#define BITMAP_BYTES (MAX_PAGES / 8)                /* 128 KiB */
 
 static u8 bitmap[BITMAP_BYTES];
 static u64 total_pages = 0;
 static u64 free_pages = 0;
+static u64 alloc_hint = 0;
 
 static void bitmap_set(u64 i){ bitmap[i/8] |= (1<<(i%8)); }
 static void bitmap_clear(u64 i){ bitmap[i/8] &= ~(1<<(i%8)); }
@@ -26,7 +29,7 @@ static void mark_free(u64 start_page, u64 num){
 void pmm_init(u32 mbi){
     /* zero bitmap => all free initially */
     for(u64 i=0;i<BITMAP_BYTES;i++) bitmap[i]=0;
-    free_pages=0; total_pages=0;
+    free_pages=0; total_pages=0; alloc_hint=0;
 
     /* parse multiboot2 */
     u8 *ptr = (u8*)(u64)mbi;
@@ -58,7 +61,7 @@ void pmm_init(u32 mbi){
         }
         p += ALIGN_UP(size,8);
     }
-    if(max_addr > MAX_MEM) max_addr = MAX_MEM;
+    if(max_addr > PMM_MAX_MEM) max_addr = PMM_MAX_MEM;    /* the bitmap's reach */
     total_pages = max_addr / PAGE_SIZE;
     /* initially mark all pages used, then free available regions */
     for(u64 i=0;i<total_pages;i++){ bitmap_set(i); }
@@ -103,12 +106,21 @@ void pmm_init(u32 mbi){
         (unsigned long long)(free_pages*4096/1024/1024));
 }
 
+/* The search starts where the last one ended (alloc_hint) and skips full bytes of the
+ * bitmap, so handing out thousands of pages for a new process stays quick. */
 void *pmm_alloc_page(void){
-    for(u64 i=0;i<total_pages;i++){
-        if(!bitmap_test(i)){
-            bitmap_set(i);
-            if(free_pages) free_pages--;
-            return (void*)(i*PAGE_SIZE);
+    if(!free_pages) return NULL;
+    for(int pass = 0; pass < 2; pass++){
+        u64 i = pass ? 0 : alloc_hint, stop = pass ? alloc_hint : total_pages;
+        while(i < stop){
+            if((i & 7) == 0 && bitmap[i / 8] == 0xFF){ i += 8; continue; }
+            if(!bitmap_test(i)){
+                bitmap_set(i);
+                free_pages--;
+                alloc_hint = i + 1;
+                return (void*)(i*PAGE_SIZE);
+            }
+            i++;
         }
     }
     return NULL;
@@ -119,6 +131,7 @@ void pmm_free_page(void *p){
     if(i < total_pages && bitmap_test(i)){
         bitmap_clear(i);
         free_pages++;
+        if(i < alloc_hint) alloc_hint = i;
     }
 }
 
