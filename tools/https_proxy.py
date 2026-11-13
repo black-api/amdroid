@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 
 PORT = 8888
-MAX_BYTES = 1024 * 1024
+MAX_BYTES = 32 * 1024 * 1024       # big pages and scripts (YouTube's app is ~11 MB)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

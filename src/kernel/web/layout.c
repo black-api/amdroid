@@ -297,6 +297,14 @@ static int item_w(const wstyle_t *st, int w){
 
 /* How wide a node wants to be: on one line (max) and at its narrowest, the longest word (min).
  * An estimate from the text, without laying it out; outer sizes (margins, padding, border). */
+/* A pixel attribute (width="320"), or 0 (missing, or a percentage). */
+static int attr_px(wnode_t *n, const char *name){
+    const char *v = wnode_attr_get(n, name);
+    int x = 0;
+    for(const char *q = v; q && *q >= '0' && *q <= '9'; q++) x = x * 10 + (*q - '0');
+    if(v){ const char *q = v; while(*q >= '0' && *q <= '9') q++; if(*q == '%') return 0; }
+    return x;
+}
 static void content_size(wnode_t *n, int *maxw, int *minw){
     *maxw = 0; *minw = 0;
     if(n->text){
@@ -316,9 +324,17 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
     const wstyle_t *st = &n->st;
     if(st->display == W_NONE) return;
     int extra = st->p[1] + st->p[3] + st->bl + st->br + st->m[1] + st->m[3];
-    if(strcmp(n->tag, "img") == 0){ *maxw = *minw = 8 * 8 * scale_of(st->size); return; }
+    if(strcmp(n->tag, "img") == 0){
+        /* the width attribute (or the decoded size) is what the image needs */
+        int w = attr_px(n, "width");
+        if(w <= 0 && n->img){ u32 iw = 0, ih = 0; if(web_image_pixels(n->img - 1, &iw, &ih)) w = (int)iw; }
+        *maxw = *minw = (w > 0 ? w : 8 * 8 * scale_of(st->size)) + extra;
+        return;
+    }
     if(strcmp(n->tag, "input") == 0){ *maxw = *minw = 20 * 8 * scale_of(st->size); return; }
     int fixed = item_w(st, view_w);
+    int attr_fixed = 0;
+    if(!fixed && (strcmp(n->tag, "td") == 0 || strcmp(n->tag, "th") == 0)){ fixed = attr_px(n, "width"); attr_fixed = fixed > 0; }
     int run = 0, best = 0, mn = 0;
     int row = st->display == W_FLEX && !st->flex_col;
     int k = 0;
@@ -334,7 +350,7 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
     if(run > best) best = run;
     if(st->display == W_LISTITEM) best += 16 * scale_of(st->size);
     *maxw = (fixed ? fixed : best + extra);
-    *minw = (fixed ? (fixed < mn + extra ? fixed : mn + extra) : mn + extra);
+    *minw = (fixed ? (attr_fixed ? fixed : (fixed < mn + extra ? fixed : mn + extra)) : mn + extra);
 }
 
 typedef struct { wnode_t *n; int base, minw, w, grow; } flex_item_t;
@@ -573,6 +589,32 @@ static void layout_node(wnode_t *n){
     if(strcmp(n->tag, "tr") == 0){ layout_tr(n); return; }
     if(strcmp(n->tag, "br") == 0){ flush_line(); return; }
     if(strcmp(n->tag, "input") == 0){
+        const char *type = wnode_attr_get(n, "type");
+        if(type && (strcmp(type, "hidden") == 0)) return;          /* form data, never drawn */
+        int button = type && (strcmp(type, "submit") == 0 || strcmp(type, "button") == 0 || strcmp(type, "reset") == 0);
+        if(button){
+            /* a button: its label on a light box */
+            const char *label = n->value && n->value[0] ? n->value : (strcmp(type, "reset") == 0 ? "Reset" : "Submit");
+            char pad[64]; u32 k = 0;
+            pad[k++] = ' ';
+            for(const char *q = label; *q && k < 60; q++) pad[k++] = *q;
+            pad[k++] = ' '; pad[k] = 0;
+            wstyle_t box = *st;
+            box.color = 0x202124;
+            int saved_set = cur_bg_set; u32 saved_bg = cur_bg;
+            cur_bg_set = 1; cur_bg = 0xE8EAED;
+            cur_dom = n;
+            add_piece(pad, (int)k, &box, cur_link);
+            cur_bg_set = saved_set; cur_bg = saved_bg;
+            pending_space = 1;
+            return;
+        }
+        if(type && (strcmp(type, "checkbox") == 0 || strcmp(type, "radio") == 0)){
+            wstyle_t box = *st;
+            add_piece(wnode_attr_get(n, "checked") ? "[x]" : "[ ]", 3, &box, cur_link);
+            pending_space = 1;
+            return;
+        }
         /* a text box: its value, or the placeholder in grey, on a dark box */
         char pad[64];
         u32 k = 0;
@@ -606,8 +648,13 @@ static void layout_node(wnode_t *n){
             if(dw > cw){ dh = (int)((u64)dh * cw / (dw ? dw : 1)); dw = cw; }
             flush_line();
             cy += st->m[0];
+            /* text-align (and <center>) moves images like it moves text */
+            int ox = 0;
+            if(cur_align == 1) ox = (cw - st->m[1] - st->m[3] - dw) / 2;
+            else if(cur_align == 2) ox = cw - st->m[1] - st->m[3] - dw;
+            if(ox < 0) ox = 0;
             if(ncmds < CMD_MAX){
-                web_cmd_t im = { .kind = WEB_CMD_IMAGE, .x = cx + st->m[3], .y = cy, .w = dw, .h = dh,
+                web_cmd_t im = { .kind = WEB_CMD_IMAGE, .x = cx + st->m[3] + ox, .y = cy, .w = dw, .h = dh,
                                  .color = 0, .link = cur_link, .dom = n, .img = idx };
                 emit(&im);
             }
@@ -792,4 +839,19 @@ void web_layout_release(void){
     arena = NULL;
     ncmds = 0;
     arena_n = 0;
+}
+
+/* The page's canvas colour, as browsers paint it behind everything: <html>'s background,
+ * or <body>'s when <html> has none. 0 if the page sets neither. */
+static wnode_t *child_tag(wnode_t *p, const char *tag){
+    for(wnode_t *c = p ? p->first : NULL; c; c = c->next)
+        if(!c->text && strcmp(c->tag, tag) == 0) return c;
+    return NULL;
+}
+int web_canvas_bg(u32 *color){
+    wnode_t *html = child_tag(web_root, "html");
+    wnode_t *body = child_tag(html ? html : web_root, "body");
+    if(html && html->st.bg_set){ *color = html->st.bg; return 1; }
+    if(body && body->st.bg_set){ *color = body->st.bg; return 1; }
+    return 0;
 }

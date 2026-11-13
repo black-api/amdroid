@@ -7,6 +7,8 @@
 #include "amdroid/types.h"
 #include "amdroid/husser_proto.h"
 #include "amdroid/web.h"
+#include "amdroid/js.h"
+void heap_init(void *base, u64 bytes);
 #include "string.h"
 
 /* ---- system calls (same numbers as the kernel's syscall table) ---- */
@@ -65,7 +67,9 @@ static void str_copy(char *dst, const char *src, u32 cap){
 /* ---- page painting ---- */
 static void paint_frame(void){
     if(!have_page){ painter_clear(0x10181D); return; }
-    painter_clear(0x1C2328);                       /* C_WIN */
+    u32 canvas = 0x1C2328;                         /* C_WIN, when the page sets no background */
+    web_canvas_bg(&canvas);
+    painter_clear(canvas);                         /* the page background fills the whole window */
     int n = 0;
     const web_cmd_t *cmds = web_cmds(&n);
     painter_cmds(cmds, n, (int)scroll, hover_node);
@@ -129,6 +133,18 @@ static const void *hit_node(i32 x, i32 y, int *out_link){
 static void emit_needs(void){
     if(!have_page) return;
     u32 slot = 0;
+    /* scripts first: the page's scripts run once every external one is here */
+    int nsc = web_script_count();
+    for(int i = 0; i < nsc && slot < HUSSER_NEED_MAX; i++){
+        const char *src = web_script_src(i);
+        if(!src) continue;
+        if(starts(src, "data:")){ web_add_script(i, "", 0); continue; }
+        shm->need[slot].kind = 3;
+        shm->need[slot].idx = (u32)i;
+        str_copy(shm->need[slot].url, src, HUSSER_URL_NEED);
+        slot++;
+    }
+    if(nsc && !web_scripts_pending() && web_run_scripts()){ page_h = web_layout((int)shm->vw); laid_width = (int)shm->vw; }
     int ns = web_stylesheet_count();
     for(int i = 0; i < ns && slot < HUSSER_NEED_MAX && i < 16; i++){
         if(sheet_done[i]) continue;
@@ -181,10 +197,12 @@ static void res_done(void){
     if(len != RES_FAIL){
         if(kind == 1 && idx < 16){ web_add_css((const char *)RES_SRC, len); sheet_done[idx] = 1; }
         else if(kind == 2){ web_add_image((int)idx, (const char *)RES_SRC, len); }
+        else if(kind == 3){ web_add_script((int)idx, (const char *)RES_SRC, len); }
         else { if(kind == 1 && idx < 16) sheet_done[idx] = 1; }
     } else {
         if(kind == 1 && idx < 16) sheet_done[idx] = 1;      /* the failed sheet is left out */
         else if(kind == 2) web_add_image((int)idx, "", 0);  /* the failed image shows its alt text */
+        else if(kind == 3) web_add_script((int)idx, "", 0); /* the failed script is skipped */
     }
     page_h = web_layout((int)shm->vw);
     laid_width = (int)shm->vw;
@@ -255,6 +273,9 @@ void _start(void){
 
 void husser_main(void){
     if(shm->magic != HUSSER_MAGIC || shm->ver != HUSSER_VER) sys_exit(3);
+    heap_init((void *)HUSSER_HEAP_VA, shm->heap_bytes);
+    /* the script heap: most of the memory in ultra mode, so the collector rarely runs */
+    js_set_heap_size(shm->ultra ? (200u << 20) : (shm->heap_bytes >= (208u << 20) ? (104u << 20) : (shm->heap_bytes / 2)));
     set_size(shm->vw, shm->vh);
     shm->state = H_STATE_BOOT;
 
@@ -290,7 +311,22 @@ void husser_main(void){
             shm->ack_seq = last_cmd_seq;      /* the sender waits for this */
         }
         if(have_page){
-            if(web_tick()){ relayout_if_dirty(); frame_ready(); }
+            /* a script navigated (location.href = ...): the browser loads it */
+            const char *to = web_take_navigation();
+            if(to && to[0]){ str_copy((char *)shm->nav_url, to, HUSSER_URL_MAX); shm->nav_seq++; }
+        }
+        if(have_page){
+            /* scripts changed the page from a timer: lay it out again at most 4 times a second */
+            static u64 last_timer_layout = 0;
+            static int pending = 0;
+            if(web_tick()) pending = 1;
+            u64 now = (u64)sc3(SYS_TICKS, 0, 0, 0);
+            if(pending && now >= last_timer_layout + 25){
+                pending = 0;
+                last_timer_layout = now;
+                relayout_if_dirty();
+                frame_ready();
+            }
         }
         idle_sleep();
     }

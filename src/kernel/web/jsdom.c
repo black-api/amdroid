@@ -416,6 +416,18 @@ static int style_get(js_obj_t *o, const char *name, js_val_t *out){
     return 1;
 }
 
+/* document.title = "..." changes the page title */
+static int doc_set(js_obj_t *o, const char *name, js_val_t v){
+    (void)o;
+    if(strcmp(name, "title") == 0){
+        const char *t = js_to_str(v);
+        u32 k = 0;
+        while(t[k] && k + 1 < sizeof web_title_buf){ web_title_buf[k] = t[k]; k++; }
+        web_title_buf[k] = 0;
+        return 1;
+    }
+    return 0;
+}
 static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
     (void)o;
     if(strcmp(name, "getElementById") == 0){ *out = js_objv(js_new_native(get_by_id, NULL)); return 1; }
@@ -445,6 +457,9 @@ static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
 static js_obj_t *wrap(wnode_t *n){
     if(n->jsobj) return (js_obj_t *)n->jsobj;
     js_obj_t *o = js_new_object();
+    /* elements inherit from HTMLElement.prototype (browser_api.inc), so polyfills can patch them */
+    js_val_t he = js_get(js_global(), "HTMLElement");
+    if(he.t == JS_OBJ){ js_val_t pr = js_get(he.o, "prototype"); if(pr.t == JS_OBJ) js_set_proto(o, pr.o); }
     js_set_hooks(o, elem_get, elem_set, n);
     js_set(o, "appendChild", js_objv(js_new_native(append_child, NULL)));
     js_set(o, "addEventListener", js_objv(js_new_native(add_listener, NULL)));
@@ -601,6 +616,10 @@ int web_key_input(const void *node, int c){
     v[len] = 0;
     if(c == '\b'){
         if(len) v[len - 1] = 0;
+    } else if(c == '\n' || c == '\r'){
+        kfree(v);
+        web_dispatch(n, "keydown", "Enter");      /* a search box submits on Enter */
+        return 1;
     } else if(c >= 32 && c <= 126){
         v[len] = (char)c;
         v[len + 1] = 0;
@@ -697,6 +716,51 @@ static js_val_t computed_style(js_val_t self, int argc, js_val_t *argv, void *ct
     return js_objv(st);
 }
 
+/* ---- navigation started by a script: location.href = ..., location.assign(...) ---- */
+static char nav_req[1024];
+static int nav_pending = 0;
+static void request_nav(const char *url){
+    u32 k = 0;
+    while(url[k] && k + 1 < sizeof nav_req){ nav_req[k] = url[k]; k++; }
+    nav_req[k] = 0;
+    nav_pending = 1;
+}
+/* The address a script asked to go to (once), or NULL. The browser resolves it. */
+const char *web_take_navigation(void){
+    if(!nav_pending) return NULL;
+    nav_pending = 0;
+    return nav_req;
+}
+static js_val_t loc_assign(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    if(argc > 0) request_nav(js_to_str(argv[0]));
+    return js_undef();
+}
+static js_val_t loc_to_string(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)argc; (void)argv; (void)ctx;
+    return js_str(page_url);
+}
+static int loc_set(js_obj_t *o, const char *name, js_val_t v){
+    (void)o;
+    if(strcmp(name, "href") == 0){ request_nav(js_to_str(v)); return 1; }
+    return 0;
+}
+/* The YouTube reader: on youtube.com the browser reads the page's own data (ytInitialData)
+ * and draws the page itself, instead of running YouTube's 15 MB app. "#full" in the
+ * address runs YouTube's own scripts instead. */
+int web_youtube_reader(void){
+    const char *u = page_url;
+    const char *h = u;
+    if(strncmp(h, "https://", 8) == 0) h += 8; else if(strncmp(h, "http://", 7) == 0) h += 7; else return 0;
+    const char *e = h; while(*e && *e != '/' && *e != '?' && *e != '#' && *e != ':') e++;
+    u32 L = (u32)(e - h);
+    int yt = (L == 11 && strncmp(h, "youtube.com", 11) == 0) || (L >= 12 && strncmp(e - 12, ".youtube.com", 12) == 0);
+    if(!yt) return 0;
+    for(const char *q = u; *q; q++) if(*q == '#' && strncmp(q, "#full", 5) == 0) return 0;
+    return 1;
+}
+#include "youtube_reader.inc"
+
 /* window.location from the page address */
 static js_obj_t *make_location(void){
     js_obj_t *l = js_new_object();
@@ -738,8 +802,10 @@ static js_obj_t *make_location(void){
     js_set(l, "hash", js_str(hash));
     js_set(l, "origin", js_str(origin));
     js_set(l, "reload", js_objv(methods[M_NOOP]));
-    js_set(l, "assign", js_objv(methods[M_NOOP]));
-    js_set(l, "replace", js_objv(methods[M_NOOP]));
+    js_set(l, "assign", js_objv(js_new_native(loc_assign, NULL)));
+    js_set(l, "replace", js_objv(js_new_native(loc_assign, NULL)));
+    js_set(l, "toString", js_objv(js_new_native(loc_to_string, NULL)));
+    js_set_hooks(l, NULL, loc_set, NULL);
     return l;
 }
 
@@ -790,6 +856,11 @@ static void fire_global(const char *type){
     }
 }
 
+#include "browser_api.inc"
+static char script_errs[WEB_SCRIPTS_MAX][100];
+/* The error script i stopped with, or "" (for diagnostics). */
+const char *web_script_error(int i){ return i >= 0 && i < WEB_SCRIPTS_MAX ? script_errs[i] : ""; }
+
 void dom_run_scripts(void){
     js_err[0] = 0;
     js_init();
@@ -801,19 +872,40 @@ void dom_run_scripts(void){
     js_gc_root(methods, sizeof methods);
     setup_window();
     document = js_new_object();
-    js_set_hooks(document, doc_get, NULL, NULL);
+    js_set_hooks(document, doc_get, doc_set, NULL);
     js_set(document, "addEventListener", js_get(js_global(), "addEventListener"));
     js_set(document, "removeEventListener", js_objv(methods[M_NOOP]));
     js_set(js_global(), "document", js_objv(document));
+    /* the browser APIs written in JavaScript (browser_api.inc) */
+    js_set_proto(document, js_new_object());
+    if(js_run(browser_api_js, (u32)sizeof browser_api_js - 1) != 0){
+        const char *e = js_error();
+        u32 k = 0;
+        const char *pre = "browser API setup: ";
+        while(pre[k] && k + 1 < sizeof js_err){ js_err[k] = pre[k]; k++; }
+        for(u32 i = 0; e[i] && k + 1 < sizeof js_err; i++) js_err[k++] = e[i];
+        js_err[k] = 0;
+    }
     /* each <script> runs on its own: one that fails does not stop the others */
     for(int i = 0; i < web_nscripts && web_js; i++){
+        script_errs[i][0] = 0;
         if(web_script_len[i] == 0) continue;
         if(js_run(web_js + web_script_start[i], web_script_len[i]) != 0){
             const char *e = js_error();
             u32 k = 0;
             while(e[k] && k + 1 < sizeof js_err){ js_err[k] = e[k]; k++; }
             js_err[k] = 0;
+            for(k = 0; e[k] && k + 1 < sizeof script_errs[i]; k++) script_errs[i][k] = e[k];
+            script_errs[i][k] = 0;
         }
+    }
+    if(web_youtube_reader() && js_run(youtube_reader_js, (u32)sizeof youtube_reader_js - 1) != 0){
+        const char *e = js_error();
+        u32 k = 0;
+        const char *pre = "YouTube reader: ";
+        while(pre[k] && k + 1 < sizeof js_err){ js_err[k] = pre[k]; k++; }
+        for(u32 i = 0; e[i] && k + 1 < sizeof js_err; i++) js_err[k++] = e[i];
+        js_err[k] = 0;
     }
     if(web_root) attach_attributes(web_root);
     fire_global("DOMContentLoaded");

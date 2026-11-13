@@ -730,8 +730,18 @@ static void jidct(u8 *out, int stride, short *data){
     }
 }
 
+/* Returns -1 on error, else 1 if the block has only its DC (flat) coefficient, else 0. */
+/* data must be all zero on entry; after use, jclear_block puts it back (cheaper than a
+ * memset of all 64 for blocks that are mostly empty). */
+static u8 jtouched[64]; static int njtouched;
+static void jclear_block(short data[64]){
+    data[0] = 0;
+    for(int i = 0; i < njtouched; i++) data[jtouched[i]] = 0;
+    njtouched = 0;
+}
 static int jdecode_block(jpeg_t *J, jcomp_t *c, short data[64]){
-    memset(data, 0, 64 * sizeof(short));
+    njtouched = 0;
+    int ac = 0;
     int t = jdecode(&J->b, &J->hdc[c->td]);
     if(t < 0) return -1;
     int diff = t ? jreceive(&J->b, t) : 0;
@@ -744,9 +754,16 @@ static int jdecode_block(jpeg_t *J, jcomp_t *c, short data[64]){
         if(rs < 0) return -1;
         int s = rs & 15, r = rs >> 4;
         if(s == 0){ if(r != 15) break; k += 16; }
-        else { k += r; if(k > 63) return -1; int z = jdezig[k]; data[z] = (short)(jreceive(&J->b, s) * q[z]); k++; }
+        else { k += r; if(k > 63) return -1; int z = jdezig[k]; data[z] = (short)(jreceive(&J->b, s) * q[z]); jtouched[njtouched++] = (u8)z; k++; ac = 1; }
     } while(k < 64);
-    return 0;
+    return ac ? 0 : 1;
+}
+/* a block with only its DC coefficient is one flat colour */
+static void jidct_dc(u8 *out, int stride, int dc){
+    int v = (dc * 4 * 4096 + 65536 + (128 << 17)) >> 17;   /* the same rounding as jidct */
+    u8 c = jclamp(v);
+    u32 four = (u32)c * 0x01010101u;
+    for(int i = 0; i < 8; i++, out += stride){ ((u32 *)out)[0] = four; ((u32 *)out)[1] = four; }
 }
 
 static void jrestart(jpeg_t *J){
@@ -755,21 +772,41 @@ static void jrestart(jpeg_t *J){
     for(int i = 0; i < J->ncomp; i++) J->comp[i].dcpred = 0;
 }
 
-static int jpeg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h){
-    if(len < 2 || data[0] != 0xFF || data[1] != 0xD8) return -1;
-    jpeg_t *J = kmalloc(sizeof *J);
-    if(!J) return -1;
-    memset(J, 0, sizeof *J);
-    const u8 *p = data + 2, *end = data + len;
-    int got_sof = 0, rc = -1;
+/* The decoder works in steps, so a video player can spread a frame over several GUI
+ * ticks: jpeg_setup (headers, up to the scan), jpeg_rows (some rows of blocks), jpeg_colour
+ * (some rows of pixels). jpeg_decode runs them all at once. */
+typedef struct {
+    jpeg_t J;
+    int row, todo;            /* next MCU row; MCUs left until a restart marker */
+    int crow;                 /* next pixel row to colour-convert */
+    u32 *out;
+    int *mapy, *mapb, *mapr;  /* per column: the sample each component uses */
+} jjob_t;
 
+static void jjob_free(jjob_t *jb){
+    if(!jb) return;
+    for(int i = 0; i < 4; i++) if(jb->J.comp[i].data) kfree(jb->J.comp[i].data);
+    if(jb->out) kfree(jb->out);
+    if(jb->mapy) kfree(jb->mapy);
+    kfree(jb);
+}
+
+/* Reads the headers and gets ready to decode the scan. NULL if the JPEG cannot be decoded. */
+static jjob_t *jpeg_setup(const u8 *data, u32 len){
+    if(len < 2 || data[0] != 0xFF || data[1] != 0xD8) return NULL;
+    jjob_t *jb = kmalloc(sizeof *jb);
+    if(!jb) return NULL;
+    memset(jb, 0, sizeof *jb);
+    jpeg_t *J = &jb->J;
+    const u8 *p = data + 2, *end = data + len;
+    int got_sof = 0;
     for(;;){
-        if(p >= end) goto done;
+        if(p >= end) goto fail;
         if(*p != 0xFF){ p++; continue; }
         while(p < end && *p == 0xFF) p++;         /* skip fill bytes */
-        if(p >= end) goto done;
+        if(p >= end) goto fail;
         u8 m = *p++;
-        if(m == 0xD9) goto done;                   /* EOI */
+        if(m == 0xD9) goto fail;                   /* EOI */
         if(m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;   /* standalone */
         if(p + 2 > end) goto fail;
         int L = (p[0] << 8) | p[1];
@@ -825,10 +862,8 @@ static int jpeg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *o
                 int cs = c[0], td = c[1] >> 4, ta = c[1] & 15; c += 2;
                 for(int k = 0; k < J->ncomp; k++) if(J->comp[k].id == cs){ J->comp[k].td = td; J->comp[k].ta = ta; }
             }
-            /* entropy data starts at p (== segend) */
             J->b.s = p; J->b.end = end;
             J->b.code_buffer = 0; J->b.code_bits = 0; J->b.marker = 0; J->b.nomore = 0;
-
             J->hmax = J->vmax = 1;
             for(int i = 0; i < J->ncomp; i++){
                 if(J->comp[i].h > J->hmax) J->hmax = J->comp[i].h;
@@ -842,63 +877,140 @@ static int jpeg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *o
                 J->comp[i].data = kmalloc((u32)J->comp[i].w2 * J->comp[i].h2);
                 if(!J->comp[i].data) goto fail;
             }
-            int todo = J->restart ? J->restart : 0x7fffffff;
-            for(int my = 0; my < J->mcuy; my++){
-                for(int mx = 0; mx < J->mcux; mx++){
-                    for(int ci = 0; ci < J->ncomp; ci++){
-                        jcomp_t *cp = &J->comp[ci];
-                        for(int by = 0; by < cp->v; by++){
-                            for(int bx = 0; bx < cp->h; bx++){
-                                short blk[64];
-                                if(jdecode_block(J, cp, blk) != 0) goto fail;
-                                int ox = (mx * cp->h + bx) * 8, oy = (my * cp->v + by) * 8;
-                                jidct(cp->data + oy * cp->w2 + ox, cp->w2, blk);
-                            }
-                        }
-                    }
-                    if(J->restart && --todo == 0 && !(mx == J->mcux - 1 && my == J->mcuy - 1)){
-                        jrestart(J); todo = J->restart;
-                    }
-                }
-            }
-
-            /* colour convert into the output */
             u64 need = (u64)J->W * J->H * 4;
             if(need > IMG_MAX_OUT) goto fail;
-            u32 *out = kmalloc((u32)need);
-            if(!out) goto fail;
-            jcomp_t *Y = &J->comp[0];
-            for(int y = 0; y < J->H; y++){
-                for(int x = 0; x < J->W; x++){
-                    int yy = Y->data[(y * Y->v / J->vmax) * Y->w2 + (x * Y->h / J->hmax)];
-                    int r, g, b;
-                    if(J->ncomp == 1){ r = g = b = yy; }
-                    else {
-                        jcomp_t *Cb = &J->comp[1], *Cr = &J->comp[2];
-                        int cb = Cb->data[(y * Cb->v / J->vmax) * Cb->w2 + (x * Cb->h / J->hmax)] - 128;
-                        int cr = Cr->data[(y * Cr->v / J->vmax) * Cr->w2 + (x * Cr->h / J->hmax)] - 128;
-                        r = yy + ((91881 * cr) >> 16);
-                        g = yy - ((22554 * cb + 46802 * cr) >> 16);
-                        b = yy + ((116130 * cb) >> 16);
+            jb->out = kmalloc((u32)need);
+            if(!jb->out) goto fail;
+            jb->todo = J->restart ? J->restart : 0x7fffffff;
+            return jb;
+        }
+    }
+fail:
+    jjob_free(jb);
+    return NULL;
+}
+
+/* Decodes up to n rows of MCUs. 1 when every row is done, 0 if more remain, -1 on error. */
+static int jpeg_rows(jjob_t *jb, int n){
+    jpeg_t *J = &jb->J;
+    for(; n > 0 && jb->row < J->mcuy; n--, jb->row++){
+        int my = jb->row;
+        for(int mx = 0; mx < J->mcux; mx++){
+            for(int ci = 0; ci < J->ncomp; ci++){
+                jcomp_t *cp = &J->comp[ci];
+                for(int by = 0; by < cp->v; by++){
+                    for(int bx = 0; bx < cp->h; bx++){
+                        static short blk[64];             /* stays zeroed between blocks */
+                        int flat = jdecode_block(J, cp, blk);
+                        if(flat < 0){ jclear_block(blk); return -1; }
+                        int ox = (mx * cp->h + bx) * 8, oy = (my * cp->v + by) * 8;
+                        if(flat) jidct_dc(cp->data + oy * cp->w2 + ox, cp->w2, blk[0]);
+                        else jidct(cp->data + oy * cp->w2 + ox, cp->w2, blk);
+                        jclear_block(blk);
                     }
-                    out[y * J->W + x] = ((u32)jclamp(r) << 16) | ((u32)jclamp(g) << 8) | (u32)jclamp(b);
                 }
             }
-            *out_px = out; *out_w = (u32)J->W; *out_h = (u32)J->H;
-            rc = 0;
-            goto done;
+            if(J->restart && --jb->todo == 0 && !(mx == J->mcux - 1 && my == J->mcuy - 1)){
+                jrestart(J); jb->todo = J->restart;
+            }
         }
-        /* APPn, COM, and anything else: already skipped via p = segend */
     }
-done:
-    for(int i = 0; i < 4; i++) if(J->comp[i].data) kfree(J->comp[i].data);
-    kfree(J);
-    return rc;
-fail:
-    for(int i = 0; i < 4; i++) if(J->comp[i].data) kfree(J->comp[i].data);
-    kfree(J);
-    return -1;
+    return jb->row >= J->mcuy ? 1 : 0;
 }
+
+/* Converts up to n rows of pixels to RGB (all MCU rows must be decoded first).
+ * 1 when the picture is complete. */
+static int jpeg_colour(jjob_t *jb, int n){
+    jpeg_t *J = &jb->J;
+    jcomp_t *Y = &J->comp[0];
+    u32 *out = jb->out;
+    static int cr_r[256], cb_b[256], cr_g[256], cb_g[256], tables = 0;
+    static u8 rl[1024];
+    if(!tables){
+        for(int i = 0; i < 256; i++){
+            int c = i - 128;
+            cr_r[i] = (91881 * c + 32768) >> 16; cb_b[i] = (116130 * c + 32768) >> 16;
+            cr_g[i] = 46802 * c; cb_g[i] = 22554 * c;
+        }
+        for(int i = 0; i < 1024; i++) rl[i] = jclamp(i - 384);
+        tables = 1;
+    }
+    const u8 *R = rl + 384;
+    if(J->ncomp == 1){
+        for(; n > 0 && jb->crow < J->H; n--, jb->crow++){
+            int y = jb->crow;
+            const u8 *yr = Y->data + (y * Y->v / J->vmax) * Y->w2;
+            u32 *o = out + (u64)y * J->W;
+            for(int x = 0; x < J->W; x++){ u32 v = yr[x * Y->h / J->hmax]; o[x] = (v << 16) | (v << 8) | v; }
+        }
+        return jb->crow >= J->H;
+    }
+    jcomp_t *Cb = &J->comp[1], *Cr = &J->comp[2];
+    if(!jb->mapy){
+        jb->mapy = kmalloc(sizeof(int) * (u32)J->W * 3);
+        if(!jb->mapy) return -1;
+        jb->mapb = jb->mapy + J->W; jb->mapr = jb->mapb + J->W;
+        for(int x = 0; x < J->W; x++){
+            jb->mapy[x] = x * Y->h / J->hmax; jb->mapb[x] = x * Cb->h / J->hmax; jb->mapr[x] = x * Cr->h / J->hmax;
+        }
+    }
+    int *mapy = jb->mapy, *mapb = jb->mapb, *mapr = jb->mapr;
+    int fast = Y->h == J->hmax && Y->v == J->vmax && Cb->h == 1 && Cr->h == 1 && Cb->v == Cr->v && J->hmax == 2;
+    for(; n > 0 && jb->crow < J->H; n--, jb->crow++){
+        int y = jb->crow;
+        const u8 *yr = Y->data + (y * Y->v / J->vmax) * Y->w2;
+        const u8 *br = Cb->data + (y * Cb->v / J->vmax) * Cb->w2;
+        const u8 *rr = Cr->data + (y * Cr->v / J->vmax) * Cr->w2;
+        u32 *o = out + (u64)y * J->W;
+        int x = 0;
+        if(fast){
+            /* 4:2:0 and 4:2:2: one chroma pair for each two pixels */
+            for(; x + 1 < J->W; x += 2){
+                int cb = br[x >> 1], cr = rr[x >> 1];
+                int ra = cr_r[cr], ga = (cb_g[cb] + cr_g[cr] + 32768) >> 16, ba = cb_b[cb];
+                int y0 = yr[x], y1 = yr[x + 1];
+                o[x]     = ((u32)R[y0 + ra] << 16) | ((u32)R[y0 - ga] << 8) | R[y0 + ba];
+                o[x + 1] = ((u32)R[y1 + ra] << 16) | ((u32)R[y1 - ga] << 8) | R[y1 + ba];
+            }
+        }
+        for(; x < J->W; x++){
+            int yy = yr[mapy[x]], cb = br[mapb[x]], cr = rr[mapr[x]];
+            o[x] = ((u32)R[yy + cr_r[cr]] << 16) | ((u32)R[yy - ((cb_g[cb] + cr_g[cr] + 32768) >> 16)] << 8) | R[yy + cb_b[cb]];
+        }
+    }
+    return jb->crow >= J->H;
+}
+
+static int jpeg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h){
+    jjob_t *jb = jpeg_setup(data, len);
+    if(!jb) return -1;
+    if(jpeg_rows(jb, 1 << 30) != 1 || jpeg_colour(jb, 1 << 30) != 1){ jjob_free(jb); return -1; }
+    *out_px = jb->out; *out_w = (u32)jb->J.W; *out_h = (u32)jb->J.H;
+    jb->out = NULL;
+    jjob_free(jb);
+    return 0;
+}
+
+/* ---- steps, for the video player ---- */
+void *jpeg_job_start(const u8 *data, u32 len){ return jpeg_setup(data, len); }
+/* Does about 'work' rows (of 16 pixels decoded, or of pixels converted). 1: the picture
+ * is ready, 0: more to do, -1: broken. */
+int jpeg_job_step(void *job, int work){
+    jjob_t *jb = job;
+    if(jb->row < jb->J.mcuy){ int r = jpeg_rows(jb, work); return r < 0 ? -1 : 0; }
+    return jpeg_colour(jb, work * 16);
+}
+u32 *jpeg_job_take(void *job, u32 *w, u32 *h){
+    jjob_t *jb = job;
+    u32 *px = jb->out; *w = (u32)jb->J.W; *h = (u32)jb->J.H;
+    jb->out = NULL;
+    jjob_free(jb);
+    return px;
+}
+void jpeg_job_abort(void *job){ jjob_free(job); }
+
+/* The JPEG decoder for other users (the video player): RGB pixels in a kmalloc'd buffer. */
+int jpeg_decode_rgb(const u8 *data, u32 len, u32 **px, u32 *w, u32 *h){ return jpeg_decode(data, len, px, w, h); }
 
 int web_add_image(int idx, const char *data, u32 len){
     if(idx < 0 || idx >= nimages) return -1;

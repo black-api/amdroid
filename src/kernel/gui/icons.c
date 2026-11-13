@@ -45,6 +45,12 @@ static void draw_icon(int which, u32 x, u32 y, u32 c){
                 for(int k = 0; k < 3; k++)
                     ui_disc(ix + 11 + k * 6, iy + 18 + r * 6, 2, 0x000000);
             break;
+        case UI_ICO_VIDEO:                               /* a screen with a play button */
+            ui_rrect(x + 3, y + 6, 26, 20, 4, c);
+            ui_line(ix + 13, iy + 11, ix + 13, iy + 21, 3, 0x000000);
+            ui_line(ix + 13, iy + 11, ix + 21, iy + 16, 3, 0x000000);
+            ui_line(ix + 13, iy + 21, ix + 21, iy + 16, 3, 0x000000);
+            break;
         case UI_ICO_CLOCK:                               /* clock face + hands */
             ui_ring(ix + 16, iy + 16, 13, 2, c);
             ui_line(ix + 16, iy + 16, ix + 16, iy + 8,  2, c);   /* minute */

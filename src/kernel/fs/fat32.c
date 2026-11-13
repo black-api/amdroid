@@ -446,6 +446,63 @@ int fat32_read_path(const char *path, void *buf, u32 max, u32 *out_size){
     }
 }
 
+/* ======================= open files: read any range =======================
+   For big files (videos): the cluster chain is walked once at open and kept, so a
+   read anywhere costs only the sectors it needs. */
+int fat32_open(const char *path, fat32_file_t *f){
+    memset(f, 0, sizeof *f);
+    u32 dir = root_cluster;
+    const char *p = path;
+    for(;;){
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        u8 n83[11], ent[32];
+        if(comp_to_83(p, len, n83) != 0) return -1;
+        if(dir_lookup(dir, n83, ent) != 1) return -1;
+        if(!slash){
+            if(ent[11] & 0x10) return -1;
+            u32 first = (*(u16*)(ent + 26)) | ((u32)(*(u16*)(ent + 20)) << 16);
+            f->size = *(u32*)(ent + 28);
+            f->cluster_bytes = sectors_per_cluster * 512;
+            u32 n = (f->size + f->cluster_bytes - 1) / f->cluster_bytes;
+            f->chain = kmalloc((n ? n : 1) * sizeof(u32));
+            if(!f->chain) return -1;
+            u32 c = first, k = 0;
+            while(c >= 2 && c < 0x0FFFFFF8 && k < n){ f->chain[k++] = c; c = fat_next(c); }
+            f->nclusters = k;
+            return 0;
+        }
+        if(!(ent[11] & 0x10)) return -1;
+        dir = (*(u16*)(ent + 26)) | ((u32)(*(u16*)(ent + 20)) << 16);
+        p = slash + 1;
+    }
+}
+
+/* Reads len bytes at off into buf; returns the bytes read (fewer at the end), -1 on error. */
+int fat32_read_at(fat32_file_t *f, u32 off, void *buf, u32 len){
+    if(!f->chain || off >= f->size) return 0;
+    if(len > f->size - off) len = f->size - off;
+    u8 *out = buf;
+    u32 done = 0;
+    while(done < len){
+        u32 pos = off + done;
+        u32 ci = pos / f->cluster_bytes, in = pos % f->cluster_bytes;
+        if(ci >= f->nclusters) break;
+        u32 sec = in / 512, so = in % 512;
+        if(read_sector(cluster_to_lba(f->chain[ci]) + sec) != 0) return -1;
+        u32 take = 512 - so;
+        if(take > len - done) take = len - done;
+        memcpy(out + done, sector_buf + so, take);
+        done += take;
+    }
+    return (int)done;
+}
+
+void fat32_close(fat32_file_t *f){
+    if(f->chain) kfree(f->chain);
+    memset(f, 0, sizeof *f);
+}
+
 /* ======================= paths anywhere in the disk =======================
    Walks the directories before the last component. Works for writes,
    deletes, new directories and listings. */

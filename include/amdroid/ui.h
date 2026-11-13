@@ -108,7 +108,7 @@ rect_t ui_button(rect_t b, u32 w);         /* a button at the top right of the b
 enum { UI_ICO_START, UI_ICO_SEARCH, UI_ICO_FILES, UI_ICO_TASKS,
        UI_ICO_SETTINGS, UI_ICO_ABOUT, UI_ICO_TERM,
        UI_ICO_CALC, UI_ICO_CLOCK, UI_ICO_NOTES, UI_ICO_NET, UI_ICO_BROWSER,
-       UI_ICO_STORE };
+       UI_ICO_STORE, UI_ICO_VIDEO };
 
 /* ---- apps ----
  * open/close are optional (NULL). draw is called every frame with the
@@ -128,7 +128,7 @@ typedef struct app {
 } app_t;
 
 /* The apps, in the order of their keys (1, 2, 3, ...). NULL-terminated. */
-#define UI_MAX_APPS 10
+#define UI_MAX_APPS 12
 extern const app_t *const ui_apps[UI_MAX_APPS + 1];
 int ui_app_count(void);
 

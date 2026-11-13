@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><title>JPEG test</title>
+<style>
+ body{background:#fff;color:#111;font-family:sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ h1{color:#0b5fff}
+ figure{display:inline-block;margin:8px;vertical-align:top}
+ img{border:1px solid #ccc}
+ .cap{color:#555}
+</style></head>
+<body><div class="wrap">
+<h1>JPEG decoder test</h1>
+<p>Each pair should match: PNG reference (left) vs JPEG decoded by the engine (right).</p>
+
+<figure><div class="cap">grad.png (reference)</div><img src="grad.png"></figure>
+<figure><div class="cap">grad.jpg 4:2:0</div><img src="grad.jpg"></figure>
+<figure><div class="cap">grad444.jpg 4:4:4</div><img src="grad444.jpg"></figure>
+<figure><div class="cap">gray.jpg (grayscale)</div><img src="gray.jpg"></figure>
+</div></body></html>

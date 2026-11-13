@@ -292,3 +292,93 @@ int hda_play_tone(int hz, int ms){
     wr8(sd + SDCTL, 0x2);                       /* run */
     return 0;
 }
+
+/* ---- streaming: a ring the controller plays in a loop; the caller keeps it filled ----
+ * 64 pages = 256 KB, about 1.4 s of 48 kHz 16-bit stereo. The hardware's position in
+ * the ring (LPIB) says how far it has played, which also serves as the audio clock. */
+#define SDLPIB 0x04
+#define RING_PAGES 64
+#define RING_BYTES (RING_PAGES * BUF_BYTES)
+static u8 *ring[RING_PAGES];
+static u32 ring_w = 0;            /* where the next byte goes */
+static u64 ring_written = 0;      /* bytes written since start */
+static int streaming = 0;
+
+static u32 stream_sd(void){ return SD_BASE + (u32)stream_index * SD_SIZE; }
+
+int hda_stream_start(void){
+    if(!ready && hda_init() != 0) return -1;
+    for(int i = 0; i < RING_PAGES; i++){
+        if(!ring[i]){ ring[i] = pmm_alloc_page(); if(!ring[i]) return -1; }
+        memset(ring[i], 0, BUF_BYTES);
+        bdl[i*4 + 0] = (u32)(unsigned long)ring[i];
+        bdl[i*4 + 1] = 0;
+        bdl[i*4 + 2] = BUF_BYTES;
+        bdl[i*4 + 3] = 0;
+    }
+    u32 sd = stream_sd();
+    wr8(sd + SDCTL, 0);
+    wr8(sd + SDCTL, 1);
+    for(int t = 0; t < 100000 && !(rd8(sd + SDCTL) & 1); t++) ;
+    wr8(sd + SDCTL, 0);
+    for(int t = 0; t < 100000 && (rd8(sd + SDCTL) & 1); t++) ;
+    wr32(sd + SDBDPL, (u32)(unsigned long)bdl);
+    wr32(sd + SDBDPU, 0);
+    wr32(sd + SDCBL, RING_BYTES);
+    wr16(sd + SDLVI, RING_PAGES - 1);
+    wr16(sd + SDFMT, 0x0011);                       /* 48 kHz, 16-bit, stereo */
+    send(cmd12(dac_nid, 0x706, (1 << 4) | 0));
+    wr8(sd + SDCTL + 2, (u8)(1 << 4));
+    ring_w = 0; ring_written = 0;
+    wr8(sd + SDCTL, 0x2);                           /* run */
+    streaming = 1;
+    return 0;
+}
+
+/* bytes written but not played yet */
+static u32 ring_pending(void){
+    u32 lpib = rd32(stream_sd() + SDLPIB) % RING_BYTES;
+    return (ring_w + RING_BYTES - lpib) % RING_BYTES;
+}
+
+/* Copies up to bytes of 48 kHz 16-bit stereo PCM into the ring; returns how many fit. */
+u32 hda_stream_write(const void *pcm, u32 bytes){
+    if(!streaming) return 0;
+    u32 room = RING_BYTES - ring_pending() - 64;      /* never catch up with the player */
+    if(room > RING_BYTES) room = 0;
+    if(bytes > room) bytes = room;
+    bytes &= ~3u;                                    /* whole frames */
+    const u8 *src = pcm;
+    for(u32 done = 0; done < bytes; ){
+        u32 page = ring_w / BUF_BYTES, in = ring_w % BUF_BYTES;
+        u32 take = BUF_BYTES - in;
+        if(take > bytes - done) take = bytes - done;
+        memcpy(ring[page] + in, src + done, take);
+        done += take;
+        ring_w = (ring_w + take) % RING_BYTES;
+    }
+    ring_written += bytes;
+    return bytes;
+}
+
+/* Space for more PCM right now, in bytes. */
+u32 hda_stream_room(void){
+    if(!streaming) return 0;
+    u32 room = RING_BYTES - ring_pending() - 64;
+    return room > RING_BYTES ? 0 : room & ~3u;
+}
+
+/* Bytes the speaker has actually played since hda_stream_start (the audio clock). */
+u64 hda_stream_played(void){
+    if(!streaming) return 0;
+    u32 p = ring_pending();
+    return ring_written > p ? ring_written - p : 0;
+}
+
+void hda_stream_stop(void){
+    if(!streaming) return;
+    wr8(stream_sd() + SDCTL, 0);
+    streaming = 0;
+}
+
+int hda_present(void){ return ready || hda_init() == 0; }

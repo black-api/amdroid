@@ -13,12 +13,13 @@
 #include "amdroid/husser.h"
 #include "amdroid/fb.h"
 #include "amdroid/timer.h"
+#include "string.h"
 
 #define URL_MAX     1024           /* stylesheet addresses can be long (Wikipedia: ~500) */
 #define HOST_MAX    64
 #define PATH_MAX_B  1024
 #define HIST_MAX    16
-#define BODY_MAX    (1024 * 1024)
+#define BODY_MAX    (16 * 1024 * 1024)     /* big pages and scripts (YouTube's app is ~11 MB) */
 #define SCROLL_STEP 48
 #define MAX_REDIRECTS 5
 #define FIRST_BYTE_TICKS 3000     /* 30 s for the first byte (the proxy may be fetching) */
@@ -47,7 +48,9 @@ static int last_hx = -1, last_hy = -1;   /* the pointer position Husser was last
 /* husser protocol bookkeeping */
 static u32 need_seq_consumed = 0;   /* the need list we last saw */
 static u32 nav_seq_consumed = 0;    /* a navigation Husser asked for */
-static u8  res_done[2][32];         /* [kind-1][idx]: fetched or in flight */
+#define RES_KINDS 3                  /* 1 stylesheet, 2 image, 3 script */
+#define RES_IDX   128
+static u8  res_done[RES_KINDS][RES_IDX];   /* [kind-1][idx]: fetched or in flight */
 static int waiting_link = -1;       /* the link index we are waiting a url for */
 static u32 waiting_link_seq = 0;    /* the link_url_seq it answers */
 extern const app_t app_browser;
@@ -253,10 +256,47 @@ static u32 page_kb;                   /* for the final "Loaded" line */
 static int page_code;
 static int page_cut;
 static int ld_img_idx = -1;
+static int ld_script_idx = -1;
 static int ld_sheet_idx = -1;
 static int no_more_needs = 0;          /* set by Stop; poll_husser_needs stays quiet */
 static int resources_busy = 0;         /* a stylesheet/image fetch is in flight or pending */
 static void loaded_status(void);
+
+/* ---- ultra mode: a memory cache of subresources (scripts, stylesheets, images) ----
+ * On a machine with lots of RAM, what was fetched once is kept, so going back to a site
+ * (YouTube's scripts are 15 MB) skips the network entirely. */
+#define CACHE_MAX_BYTES (48u * 1024 * 1024)
+#define CACHE_SLOTS 64
+static struct { char url[URL_MAX]; u8 *data; u32 len; u64 used; } rcache[CACHE_SLOTS];
+static u32 rcache_bytes = 0;
+static int js_done = 0, cache_hits = 0;
+static int ultra_mode(void){
+    const volatile husser_shm_t *h = husser_header();
+    return h && h->ultra;
+}
+static int cache_find(const char *url){
+    for(int i = 0; i < CACHE_SLOTS; i++) if(rcache[i].data && same(rcache[i].url, url)){ rcache[i].used = timer_ticks(); return i; }
+    return -1;
+}
+static void cache_put(const char *url, const void *data, u32 len){
+    if(!ultra_mode() || len == 0 || len > CACHE_MAX_BYTES / 2 || cache_find(url) >= 0) return;
+    /* make room: drop the least recently used */
+    while(rcache_bytes + len > CACHE_MAX_BYTES){
+        int old = -1;
+        for(int i = 0; i < CACHE_SLOTS; i++) if(rcache[i].data && (old < 0 || rcache[i].used < rcache[old].used)) old = i;
+        if(old < 0) break;
+        kfree(rcache[old].data); rcache_bytes -= rcache[old].len; rcache[old].data = NULL;
+    }
+    int slot = -1;
+    for(int i = 0; i < CACHE_SLOTS && slot < 0; i++) if(!rcache[i].data) slot = i;
+    if(slot < 0) return;
+    u8 *copy = kmalloc(len);
+    if(!copy) return;
+    memcpy(copy, data, len);
+    ui_copy(rcache[slot].url, url, URL_MAX);
+    rcache[slot].data = copy; rcache[slot].len = len; rcache[slot].used = timer_ticks();
+    rcache_bytes += len;
+}
 
 static void ld_cleanup(void){
     if(ld_sock >= 0) tcp_close(ld_sock);
@@ -282,7 +322,7 @@ static int show(const char *url, const char *html, u32 len){
     if(husser_open(area.w, area.h) < 0) return -1;
     husser_set_url(url);
     husser_load(html, len, (u32)scroll);
-    for(int k = 0; k < 32; k++){ res_done[0][k] = 0; res_done[1][k] = 0; }
+    for(int j = 0; j < RES_KINDS; j++) for(int k = 0; k < RES_IDX; k++) res_done[j][k] = 0;
     need_seq_consumed = 0;
     no_more_needs = 0;
     resources_busy = 0;
@@ -297,8 +337,8 @@ static int show(const char *url, const char *html, u32 len){
 static void fail(const char *why){
     static char page[2048];
     ld_cleanup();
-    if(ld_kind == 1 || ld_kind == 2){   /* a stylesheet/image that fails is just left out */
-        int idx = ld_kind == 1 ? ld_sheet_idx : ld_img_idx;
+    if(ld_kind >= 1 && ld_kind <= 3){   /* a stylesheet/image/script that fails is just left out */
+        int idx = ld_kind == 1 ? ld_sheet_idx : ld_kind == 2 ? ld_img_idx : ld_script_idx;
         husser_res((u32)ld_kind, (u32)(idx < 0 ? 0 : idx), NULL, RES_FAIL_LEN);
         ld_kind = 0;
         ld_cleanup();
@@ -324,8 +364,9 @@ static void go(const char *url, int remember, int scroll_to){
     ld_kind = 0;
     css_done = 0;
     img_done = 0;
+    js_done = 0; cache_hits = 0;
     no_more_needs = 0;
-    for(int k = 0; k < 32; k++){ res_done[0][k] = 0; res_done[1][k] = 0; }
+    for(int j = 0; j < RES_KINDS; j++) for(int k = 0; k < RES_IDX; k++) res_done[j][k] = 0;
     need_seq_consumed = 0;
     waiting_link = -1;
     char full[URL_MAX];
@@ -354,8 +395,8 @@ static void go(const char *url, int remember, int scroll_to){
 
 static void stop(void){
     if(ld == LD_IDLE) return;
-    if(ld_kind == 1 || ld_kind == 2){   /* stop a subresource: the page itself is here */
-        int idx = ld_kind == 1 ? ld_sheet_idx : ld_img_idx;
+    if(ld_kind >= 1 && ld_kind <= 3){   /* stop a subresource: the page itself is here */
+        int idx = ld_kind == 1 ? ld_sheet_idx : ld_kind == 2 ? ld_img_idx : ld_script_idx;
         husser_res((u32)ld_kind, (u32)(idx < 0 ? 0 : idx), NULL, RES_FAIL_LEN);
         ld_kind = 0;
     }
@@ -406,6 +447,7 @@ static void ld_connect(void){
     cat_n(req, host, sizeof req);
     cat_n(req, ld_kind == 1 ? "\r\nUser-Agent: BRO-weser\r\nAccept: text/css,*/*\r\nConnection: close\r\n\r\n"
              : ld_kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/*,*/*;q=0.8\r\nConnection: close\r\n\r\n"
+             : ld_kind == 3 ? "\r\nUser-Agent: BRO-weser\r\nAccept: */*\r\nConnection: close\r\n\r\n"
                             : "\r\nUser-Agent: BRO-weser\r\nAccept: text/html,text/plain\r\nConnection: close\r\n\r\n", sizeof req);
     if(tcp_send(ld_sock, req, ui_len(req)) != 0){ fail("Sending the request failed."); return; }
 
@@ -415,7 +457,7 @@ static void ld_connect(void){
     ld_have_clen = 0;
     ld_tlast = timer_ticks();
     ld = LD_RECV;
-    if(ld_kind == 1 || ld_kind == 2) return;   /* the caller already set a status line */
+    if(ld_kind >= 1 && ld_kind <= 3) return;   /* the caller already set a status line */
     ui_copy(status, "Waiting for ", sizeof status);
     cat_n(status, ld_host, sizeof status);
     cat_n(status, "...", sizeof status);
@@ -478,6 +520,15 @@ static void ld_finish(void){
         if(ld_img_idx >= 0 && code < 300) husser_res(2, (u32)ld_img_idx, body, blen);
         else husser_res(2, (u32)(ld_img_idx < 0 ? 0 : ld_img_idx), NULL, RES_FAIL_LEN);
         img_done++;
+        ld_kind = 0;
+        ld_cleanup();
+        return;
+    }
+    if(ld_kind >= 1 && ld_kind <= 3 && code < 300 && blen) cache_put(ld_url, body, blen);
+    if(ld_kind == 3){
+        /* a script: husser runs the page's scripts once all of them are in */
+        if(code < 300){ husser_res(3, (u32)(ld_script_idx < 0 ? 0 : ld_script_idx), body, blen); js_done++; }
+        else husser_res(3, (u32)(ld_script_idx < 0 ? 0 : ld_script_idx), NULL, RES_FAIL_LEN);
         ld_kind = 0;
         ld_cleanup();
         return;
@@ -572,16 +623,25 @@ static void loaded_status(void){
         cat_n(m, " + ", sizeof m); cat_n(m, ns, sizeof m);
         cat_n(m, img_done == 1 ? " image" : " images", sizeof m);
     }
+    if(js_done){
+        ui_num((u32)js_done, ns);
+        cat_n(m, " + ", sizeof m); cat_n(m, ns, sizeof m);
+        cat_n(m, js_done == 1 ? " script" : " scripts", sizeof m);
+    }
     cat_n(m, " in ", sizeof m);
     cat_n(m, sec, sizeof m); cat_n(m, ".", sizeof m); cat_n(m, ten, sizeof m); cat_n(m, " s", sizeof m);
-    if(page_cut) cat_n(m, " (cut off at 1 MB)", sizeof m);
+    if(page_cut) cat_n(m, " (cut off)", sizeof m);
+    if(ultra_mode()){
+        cat_n(m, " | Ultra mode", sizeof m);
+        if(cache_hits){ ui_num((u32)cache_hits, ns); cat_n(m, ", ", sizeof m); cat_n(m, ns, sizeof m); cat_n(m, " from memory", sizeof m); }
+    }
     ui_copy(status, m, sizeof status);
 }
 
 /* Reads whatever has arrived, without waiting. */
 static void ld_recv(void){
     /* read for at most a tick (10 ms) at a time: fast, and the desktop stays smooth */
-    u64 now = timer_ticks(), until = now + 1;
+    u64 now = timer_ticks(), until = now + (ultra_mode() ? 4 : 1);   /* ultra: bigger bites */
     for(;;){
         net_poll();
         u32 room = BODY_MAX - ld_len;
@@ -689,6 +749,7 @@ static void b_close(void){
     ld_kind = 0;
     css_done = 0;
     img_done = 0;
+    js_done = 0; cache_hits = 0;
     husser_close();
     have_page = 0;
     last_body.w = 0;
@@ -710,7 +771,7 @@ static void poll_husser(void){
             need_seq_consumed = h->need_seq;
             for(u32 k = 0; k < h->need_count; k++){
                 u32 kind = h->need[k].kind, idx = h->need[k].idx;
-                if(kind < 1 || kind > 2 || idx >= 32) continue;
+                if(kind < 1 || kind > RES_KINDS || idx >= RES_IDX) continue;
                 if(res_done[kind - 1][idx]) continue;
                 char url_copy[HUSSER_URL_NEED];
                 ui_copy(url_copy, (const char *)h->need[k].url, sizeof url_copy);
@@ -719,14 +780,23 @@ static void poll_husser(void){
                 url_t pu;
                 resolve(cur_url, url_copy, u, sizeof u);
                 res_done[kind - 1][idx] = 1;                 /* once started, don't start twice */
+                int hit = cache_find(u);
+                if(hit >= 0){
+                    /* ultra mode: already in memory, no network */
+                    husser_res(kind, idx, rcache[hit].data, rcache[hit].len);
+                    if(kind == 1) css_done++; else if(kind == 2) img_done++; else js_done++;
+                    cache_hits++;
+                    resources_busy = 1;
+                    return;                                  /* husser is busy with it now */
+                }
                 if(parse_url(u, &pu) != 0){ husser_res(kind, idx, NULL, RES_FAIL_LEN); continue; }
                 ui_copy(ld_url, u, URL_MAX);
                 ui_copy(ld_host, pu.host, sizeof ld_host);
                 ld_kind = (int)kind;
-                if(kind == 1) ld_sheet_idx = (int)idx; else ld_img_idx = (int)idx;
+                if(kind == 1) ld_sheet_idx = (int)idx; else if(kind == 2) ld_img_idx = (int)idx; else ld_script_idx = (int)idx;
                 ld_redirects = 0;
                 ld = LD_START;
-                ui_copy(status, kind == 1 ? "Loading stylesheet from " : "Loading image from ", sizeof status);
+                ui_copy(status, kind == 1 ? "Loading stylesheet from " : kind == 2 ? "Loading image from " : "Loading script from ", sizeof status);
                 cat_n(status, pu.host, sizeof status);
                 cat_n(status, "...", sizeof status);
                 resources_busy = 1;

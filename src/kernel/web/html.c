@@ -4,6 +4,7 @@
 #include "web_internal.h"
 #include "amdroid/js.h"
 #include "string.h"
+int web_youtube_reader(void);
 
 #define W_MAX_NODES 10000
 #define W_MAX_DEPTH 96
@@ -18,6 +19,46 @@ char *web_js = NULL;
 u32 web_js_len = 0;
 u32 web_script_start[WEB_SCRIPTS_MAX], web_script_len[WEB_SCRIPTS_MAX];
 int web_nscripts = 0;
+/* External scripts (<script src>): the address, until the browser hands over the text.
+ * Scripts run in document order once every external one has arrived. */
+static char *script_src[WEB_SCRIPTS_MAX];
+static u8 script_wait[WEB_SCRIPTS_MAX];   /* 1: external, not here yet */
+static int scripts_deferred = 0;          /* web_load held the scripts back */
+
+static void js_append(const char *text, u32 add, int idx){
+    char *grown = kmalloc(web_js_len + add + 2);
+    if(!grown) return;
+    if(web_js) memcpy(grown, web_js, web_js_len);
+    memcpy(grown + web_js_len, text, add);
+    grown[web_js_len + add] = '\n';
+    grown[web_js_len + add + 1] = 0;
+    if(web_js) kfree(web_js);
+    web_js = grown;
+    web_script_start[idx] = web_js_len;
+    web_script_len[idx] = add;
+    web_js_len += add + 1;
+}
+
+int web_script_count(void){ return web_nscripts; }
+const char *web_script_src(int i){ return i >= 0 && i < web_nscripts && script_wait[i] ? script_src[i] : NULL; }
+void web_add_script(int i, const char *text, u32 len){
+    if(i < 0 || i >= web_nscripts || !script_wait[i]) return;
+    script_wait[i] = 0;
+    if(len) js_append(text, len, i);
+}
+int web_scripts_pending(void){
+    int n = 0;
+    for(int i = 0; i < web_nscripts; i++) n += script_wait[i];
+    return n;
+}
+/* Runs the page's scripts if web_load held them back for external ones. 1 if they ran. */
+int web_run_scripts(void){
+    if(!scripts_deferred) return 0;
+    for(int i = 0; i < web_nscripts; i++) script_wait[i] = 0;   /* missing ones are skipped */
+    scripts_deferred = 0;
+    dom_run_scripts();
+    return 1;
+}
 char web_title_buf[128];
 char *web_link_list[WEB_LINKS_MAX];
 char *web_css_ext = NULL;
@@ -290,12 +331,12 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
         int self_close = 0, closing = 0;
         i = read_tag(html, len, i + 1, n, &self_close, &closing);
 
-        if(!fragment && !closing && name_eq(n->tag, "link") && n->css_link == 1 && n->href && nsheets < SHEETS_MAX){
+        if(!fragment && !closing && name_eq(n->tag, "link") && n->css_link == 1 && n->href && nsheets < SHEETS_MAX && !web_youtube_reader()){
             u32 hl = (u32)strlen(n->href);
             char *h = kmalloc(hl + 1);
             if(h){ memcpy(h, n->href, hl + 1); sheet_href[nsheets++] = h; }
         }
-        if(!fragment && !closing && name_eq(n->tag, "img")){
+        if(!closing && name_eq(n->tag, "img")){                 /* also innerHTML: scripts add images */
             const char *src = wnode_attr_get(n, "src");
             if(src && src[0]) n->img = img_register(src) + 1;   /* 0 when the table is full */
         }
@@ -329,18 +370,18 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
                     web_css_len += add + 1;
                 }
             }
-            if(name_eq(n->tag, "script") && !n->skip){
-                u32 add = end - i;
-                if(web_nscripts < WEB_SCRIPTS_MAX){ web_script_start[web_nscripts] = web_js_len; web_script_len[web_nscripts] = add; web_nscripts++; }
-                char *grown = kmalloc(web_js_len + add + 2);
-                if(grown){
-                    if(web_js) memcpy(grown, web_js, web_js_len);
-                    memcpy(grown + web_js_len, html + i, add);
-                    grown[web_js_len + add] = '\n';
-                    grown[web_js_len + add + 1] = 0;
-                    if(web_js) kfree(web_js);
-                    web_js = grown;
-                    web_js_len += add + 1;
+            if(name_eq(n->tag, "script") && !n->skip && web_nscripts < WEB_SCRIPTS_MAX &&
+               !(web_youtube_reader() && wnode_attr_get(n, "src"))){   /* the reader needs no app scripts */
+                const char *src = wnode_attr_get(n, "src");
+                int idx = web_nscripts++;
+                web_script_start[idx] = 0; web_script_len[idx] = 0;
+                if(src && src[0]){
+                    u32 sl = (u32)strlen(src);
+                    script_src[idx] = kmalloc(sl + 1);
+                    if(script_src[idx]){ memcpy(script_src[idx], src, sl + 1); script_wait[idx] = 1; }
+                } else {
+                    script_src[idx] = NULL; script_wait[idx] = 0;
+                    js_append(html + i, end - i, idx);
                 }
             }
             i = end;
@@ -366,7 +407,8 @@ int web_load(const char *html, u32 len){
     web_root->st.display = W_BLOCK;
 
     parse_into(html, len, web_root, 0);
-    dom_run_scripts();
+    if(web_scripts_pending()) scripts_deferred = 1;     /* the browser fetches them, then web_run_scripts */
+    else dom_run_scripts();
     return 0;
 }
 
@@ -388,7 +430,9 @@ void web_free(void){
     web_images_reset();
     if(web_js){ kfree(web_js); web_js = NULL; }
     web_js_len = 0;
+    for(int i = 0; i < web_nscripts; i++){ if(script_src[i]) kfree(script_src[i]); script_src[i] = NULL; script_wait[i] = 0; }
     web_nscripts = 0;
+    scripts_deferred = 0;
     dom_reset();
     web_title_buf[0] = 0;
     web_root = NULL;

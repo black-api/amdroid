@@ -78,7 +78,8 @@ C_SRCS = \
  src/kernel/drivers/xhci.c \
  src/kernel/net/nic.c \
  src/kernel/net/net.c \
- src/kernel/crypto/sha256.c
+ src/kernel/crypto/sha256.c \
+ src/kernel/web/image.c
 
 ASM_SRCS = \
  src/boot/boot.asm \
@@ -88,6 +89,9 @@ ASM_SRCS = \
  src/user/husser/husser_blob.asm
 
 OBJS = $(C_SRCS:.c=.o) $(ASM_SRCS:.asm=.o)
+
+# sound for MVP (the video player) and beep: an HD Audio card on PulseAudio
+QEMU_AUDIO = -audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
 
 all: $(ISO)
 
@@ -138,6 +142,12 @@ src/kernel/fuss/%.o: CFLAGS += -O2
 src/kernel/gui/%.o: CFLAGS += -O2
 apps/%.o: CFLAGS += -O2
 src/kernel/drivers/fb.o: CFLAGS += -O2
+# The video player's path: decoding frames, reading the disk, streaming sound.
+src/kernel/web/image.o: CFLAGS += -O2
+src/kernel/fs/fat32.o: CFLAGS += -O2
+src/kernel/drivers/ata.o: CFLAGS += -O2
+src/kernel/drivers/hda.o: CFLAGS += -O2
+src/lib/kmath.o: CFLAGS += -O2
 
 # A change of build options (GFXMODE, PERF_LOG) rebuilds what the old ones compiled.
 FLAGS_STAMP = out/.flags
@@ -161,10 +171,10 @@ clean:
 	rm -rf out/iso out/husser out/user/husser.elf out/user/husser.bin out/user/husser_defs.inc
 
 run: $(ISO)
-	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 256M
+	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 512M $(QEMU_AUDIO)
 
 run-hd: $(KERNEL)
-	qemu-system-x86_64 -kernel $(KERNEL) -serial stdio -m 256M
+	qemu-system-x86_64 -kernel $(KERNEL) -serial stdio -m 512M
 
 # ---- app packages (.adp) and a FAT32 disk image to install them from ----
 # `make pkgs`  builds the sample packages in out/pkg/
@@ -198,7 +208,7 @@ disk.img: $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP
 disk: disk.img
 
 run-disk: $(ISO) disk.img
-	qemu-system-x86_64 -cdrom $(ISO) -hda disk.img -boot d -serial stdio -m 256M
+	qemu-system-x86_64 -cdrom $(ISO) -hda disk.img -boot d -serial stdio -m 512M $(QEMU_AUDIO)
 
 .PHONY: all clean run run-hd run-disk disk pkgs userprogs FORCE
 

@@ -42,6 +42,9 @@ int web_image_state(int i);         /* 0 pending, 1 ready, 2 failed */
 int web_add_image(int idx, const char *data, u32 len);
 int web_add_image_data_url(int idx, const char *url);   /* data:[mediatype][;base64],... */
 const u32 *web_image_pixels(int i, u32 *w, u32 *h);
+/* The page's canvas colour (<html> or else <body> background): 1 and *color, or 0. Browsers
+   paint it over the whole viewport, not just behind the content. */
+int web_canvas_bg(u32 *color);
 /* The page title (from <title>), or "". */
 const char *web_title(void);
 /* The href of a link (as written in the page; relative links are not resolved), or NULL. */
@@ -50,6 +53,15 @@ const char *web_link(int idx);
 void web_free(void);
 /* Frees the page, the layout buffers and the script heap (when the browser closes). */
 void web_release(void);
+/* External scripts (<script src>): the browser fetches each web_script_src(i) that is not
+   NULL (resolve it against the page URL), hands the text to web_add_script (len 0 when it
+   failed), then calls web_run_scripts. Pages without external scripts run them in web_load. */
+int web_script_count(void);
+const char *web_script_src(int i);
+void web_add_script(int i, const char *text, u32 len);
+int web_scripts_pending(void);
+int web_run_scripts(void);                 /* 1 if held-back scripts ran now */
+const char *web_script_error(int i);      /* the error script i stopped with, or "" */
 /* Scripts: they run when the page loads. web_js_error() is their error, or "". */
 const char *web_js_error(void);
 /* A click on an element: runs its JavaScript click handlers (and its ancestors').
@@ -70,6 +82,10 @@ int web_key_input(const void *node, int c);
 int web_is_input(const void *node);
 /* 1 if a click handler called preventDefault since the last call (clears it). */
 int web_take_prevented(void);
+/* A navigation a script asked for (location.href = ...), once; NULL if none. */
+const char *web_take_navigation(void);
+/* 1 when the page is shown by the browser's YouTube reader (see jsdom.c). */
+int web_youtube_reader(void);
 /* The last console.log line of the scripts, or "". */
 const char *web_console(void);
 

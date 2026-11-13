@@ -1,0 +1,7 @@
+obj/
+render
+jsrun
+out.ppm
+out.png
+jpegbench
+jsrun_dbg

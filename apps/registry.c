@@ -12,6 +12,7 @@ extern const app_t app_clock;
 extern const app_t app_notes;
 extern const app_t app_network;
 extern const app_t app_browser;
+extern const app_t app_mvp;
 extern const app_t app_store;
 
 const app_t *const ui_apps[UI_MAX_APPS + 1] = {
@@ -25,5 +26,6 @@ const app_t *const ui_apps[UI_MAX_APPS + 1] = {
     &app_notes,
     &app_network,
     &app_browser,
+    &app_mvp,
     NULL,
 };

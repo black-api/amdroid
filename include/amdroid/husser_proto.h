@@ -8,6 +8,10 @@
 #include "amdroid/types.h"
 
 #define HUSSER_SHM_VA       0x60000000ULL
+#define HUSSER_HEAP_VA      0x48000000ULL       /* Husser's heap; the kernel sizes it by RAM (below the signal trampoline) */
+#define HUSSER_HEAP_NORMAL  (208u * 1024 * 1024)
+#define HUSSER_HEAP_ULTRA   (352u * 1024 * 1024)  /* ultra mode: more than 900 MB of RAM */
+#define HUSSER_ULTRA_RAM_MB 900
 #define HUSSER_MAX_W        1920            /* a maximized window on a full-HD screen */
 #define HUSSER_MAX_H        1080
 #define HUSSER_VRAM_OFF     16384ULL            /* the header fits below this (it is bigger than one page) */
@@ -15,7 +19,7 @@
 #define HUSSER_PAGE_OFF     (HUSSER_VRAM_OFF + HUSSER_VRAM_BYTES)
 #define HUSSER_PAGE_BYTES   (4u * 1024 * 1024)          /* the page being shown */
 #define HUSSER_RES_OFF      (HUSSER_PAGE_OFF + HUSSER_PAGE_BYTES)
-#define HUSSER_RES_BYTES    (8u * 1024 * 1024)          /* one fetched subresource at a time */
+#define HUSSER_RES_BYTES    (16u * 1024 * 1024)         /* one fetched subresource at a time (YouTube's app is ~11 MB) */
 #define HUSSER_SHM_BYTES    (HUSSER_RES_OFF + HUSSER_RES_BYTES)
 
 #define HUSSER_MAGIC        0x52555348u                 /* 'HUSR' */
@@ -31,7 +35,7 @@
 #define H_CMD_RESIZE        6    /* cmd_i = width, cmd_j = height: lay out for the new size */
 #define H_CMD_SHUTDOWN      7    /* husser exits cleanly */
 #define H_CMD_RES_DONE      8    /* a fetched subresource is at HUSSER_RES_OFF:
-                                    cmd_i = kind (1 css, 2 image), cmd_j = idx (image index; css: -1),
+                                    cmd_i = kind (1 css, 2 image, 3 script), cmd_j = idx,
                                     res_len = bytes */
 #define H_CMD_LINK_URL      9    /* cmd_i = link index: husser resolves web_link(idx) into link_url */
 
@@ -59,6 +63,9 @@ typedef struct husser_shm {
     u32 ver;
     u32 vw, vh;                 /* viewport size in pixels (<= HUSSER_MAX_*): the kernel sets the
                                    first, H_CMD_RESIZE the later ones */
+    u32 heap_bytes;             /* the heap mapped at HUSSER_HEAP_VA */
+    u32 ultra;                  /* 1: ultra-fast mode (lots of RAM): big script heap, resource cache */
+    u32 ram_mb;                 /* the machine's memory */
 
     /* husser -> browser */
     u32 state;                  /* H_STATE_* */
