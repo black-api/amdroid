@@ -25,7 +25,10 @@
 #define RAL0   0x5400
 #define RAH0   0x5404
 
-#define N 16
+/* Receive slots: a burst from the host (a whole TCP window, ~45 frames) must fit, or the
+ * rest is dropped and only resent after a timeout. 256 descriptors fill one page. */
+#define NRX 256
+#define NTX 64
 #define BUFSZ 2048
 
 typedef struct { u64 addr; u16 len; u16 csum; u8 status; u8 errors; u16 special; } __attribute__((packed)) rxdesc_t;
@@ -34,7 +37,7 @@ typedef struct { u64 addr; u16 len; u8 cso; u8 cmd; u8 status; u8 css; u16 speci
 static volatile u8 *mmio;
 static rxdesc_t *rx;
 static txdesc_t *tx;
-static u8 *rxbuf[N], *txbuf[N];
+static u8 *rxbuf[NRX], *txbuf[NTX];
 static int rx_next, tx_next;
 static nic_t nic_e1000;
 
@@ -51,7 +54,7 @@ static int e1000_send(const u8 *frame, u32 len){
     tx[i].len = (u16)len;
     tx[i].cmd = 0x0B;               /* EOP | IFCS | RS */
     tx[i].status = 0;
-    tx_next = (i + 1) % N;
+    tx_next = (i + 1) % NTX;
     wr(TDT, (u32)tx_next);
     return 0;
 }
@@ -65,7 +68,7 @@ static int e1000_recv(u8 *frame, u32 max, u32 *len){
     *len = n;
     d->status = 0;
     wr(RDT, (u32)rx_next);          /* give the slot back to the card */
-    rx_next = (rx_next + 1) % N;
+    rx_next = (rx_next + 1) % NRX;
     return 1;
 }
 
@@ -92,21 +95,24 @@ int e1000_init(void){
     tx = pmm_alloc_page();
     if(!rx || !tx) return -1;
     memset(rx, 0, 4096); memset(tx, 0, 4096);
-    for(int i = 0; i < N; i++){
+    for(int i = 0; i < NRX; i++){
         rxbuf[i] = pmm_alloc_page();
-        txbuf[i] = pmm_alloc_page();
-        if(!rxbuf[i] || !txbuf[i]) return -1;
+        if(!rxbuf[i]) return -1;
         rx[i].addr = (u64)(unsigned long)rxbuf[i];
+    }
+    for(int i = 0; i < NTX; i++){
+        txbuf[i] = pmm_alloc_page();
+        if(!txbuf[i]) return -1;
         tx[i].status = 1;           /* free */
     }
     wr(RDBAL, (u32)(unsigned long)rx); wr(RDBAH, 0);
-    wr(RDLEN, N * sizeof(rxdesc_t));
-    wr(RDH, 0); wr(RDT, N - 1);
+    wr(RDLEN, NRX * sizeof(rxdesc_t));
+    wr(RDH, 0); wr(RDT, NRX - 1);
     rx_next = 0;
     wr(RCTL, (1u << 1) | (1u << 15) | (1u << 26));   /* enable, accept broadcast, strip CRC */
 
     wr(TDBAL, (u32)(unsigned long)tx); wr(TDBAH, 0);
-    wr(TDLEN, N * sizeof(txdesc_t));
+    wr(TDLEN, NTX * sizeof(txdesc_t));
     wr(TDH, 0); wr(TDT, 0);
     tx_next = 0;
     wr(TCTL, (1u << 1) | (1u << 3) | (0x10u << 4) | (0x40u << 12));

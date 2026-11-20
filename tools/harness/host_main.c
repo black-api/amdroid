@@ -8,6 +8,7 @@
 #include "amdroid/types.h"
 #include "amdroid/web.h"
 #include "amdroid/js.h"
+#include "amdroid/markdown.h"
 
 /* painter.c (compiled in) */
 void painter_target(u32 *buf, u32 w, u32 h);
@@ -35,16 +36,47 @@ static char *read_all(const char *path, u32 *out_len){
     return b;
 }
 
-/* resolve a page-relative href to a local file under the html's directory */
+static const char *g_page_url = "http://localhost/index.html";
+
+/* the absolute URL of href on the page (like the browser's resolve()) */
+static void absolute(char *dst, size_t cap, const char *href){
+    while(*href == ' ' || *href == '\n' || *href == '\t') href++;
+    if(strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0){ snprintf(dst, cap, "%s", href); }
+    else {
+        const char *b = g_page_url, *hs = strstr(b, "://");
+        const char *pathp = hs ? strchr(hs + 3, '/') : NULL;
+        size_t olen = pathp ? (size_t)(pathp - b) : strlen(b);
+        if(href[0] == '/' && href[1] == '/'){ size_t sl = hs ? (size_t)(hs - b) + 1 : 5; snprintf(dst, cap, "%.*s%s", (int)sl, b, href); }
+        else if(href[0] == '/') snprintf(dst, cap, "%.*s%s", (int)olen, b, href);
+        else {
+            size_t cut = olen + 1;
+            if(pathp){ const char *q = pathp; size_t last = 0; for(; *q && *q != '?'; q++) if(*q == '/') last = (size_t)(q - b) + 1; cut = last; }
+            else { snprintf(dst, cap, "%s/%s", b, href); goto done; }
+            snprintf(dst, cap, "%.*s%s", (int)cut, b, href);
+        }
+    }
+done:
+    { char *h = strchr(dst, '#'); if(h) *h = 0; }
+}
+
+/* resolve an href to a local file: the mirror keeps each resource as _r/<fnv1a64 of its URL> */
+static char g_last_abs[2048];
 static void resolve(char *dst, size_t cap, const char *href){
+    char *abs = g_last_abs; absolute(abs, sizeof g_last_abs, href);
+    unsigned long long hsh = 1469598103934665603ull;
+    for(const unsigned char *q = (const unsigned char *)abs; *q; q++){ hsh ^= *q; hsh *= 1099511628211ull; }
+    snprintf(dst, cap, "%s/_r/%016llx", g_dir, hsh);
+    FILE *f = fopen(dst, "rb");
+    if(f){ fclose(f); return; }
+    /* older mirrors: the URL's path under the page's directory */
     if(strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0){
-        /* strip scheme+host, keep the path as a sibling file name's tail */
         const char *p = strchr(href + 8, '/');
         snprintf(dst, cap, "%s%s", g_dir, p ? p : "/index.html");
         return;
     }
     if(href[0] == '/') snprintf(dst, cap, "%s%s", g_dir, href);
     else snprintf(dst, cap, "%s/%s", g_dir, href);
+    { char *q = strchr(dst + strlen(g_dir), '?'); if(q) *q = 0; }
 }
 
 int main(int argc, char **argv){
@@ -67,8 +99,24 @@ int main(int argc, char **argv){
     u32 len = 0;
     char *html = read_all(in, &len);
     if(!html){ fprintf(stderr, "cannot read %s\n", in); return 1; }
+    if(md_is_markdown_path(in)){
+        /* a Markdown file: shown the way the browser shows one */
+        u32 hl = 0;
+        char *page = md_page(html, len, in, &hl);
+        if(getenv("MD_HTML")) fwrite(page, 1, hl, stdout);
+        html = page; len = hl;
+    }
 
-    web_set_url(getenv("PAGE_URL") ? getenv("PAGE_URL") : "http://localhost/index.html");
+    if(getenv("PAGE_URL")) g_page_url = getenv("PAGE_URL");
+    else {
+        /* a mirror records the page's address next to it */
+        char up[1100]; snprintf(up, sizeof up, "%s/url.txt", g_dir);
+        u32 ul = 0; char *u = read_all(up, &ul);
+        if(u){ while(ul && (u[ul-1] == '\n' || u[ul-1] == '\r')) u[--ul] = 0; g_page_url = u; }
+    }
+    web_set_url(g_page_url);
+    web_set_viewport(width, 1000);
+    web_set_adblock(getenv("NOADBLOCK") ? 0 : 1);
     { extern int js_debug_pos; js_debug_pos = getenv("JS_DEBUG") != NULL; }
     { const char *hm = getenv("JS_HEAP_MB"); js_set_heap_size((u32)(hm ? atoi(hm) : 256) << 20); }
     if(web_load(html, len) != 0){ fprintf(stderr, "web_load failed\n"); return 1; }
@@ -79,10 +127,9 @@ int main(int argc, char **argv){
         const char *src = web_script_src(i);
         if(!src) continue;
         char path[1200]; resolve(path, sizeof path, src);
-        char *q = strchr(path + strlen(g_dir), '?'); if(q) *q = 0;
         u32 slen = 0; char *js = read_all(path, &slen);
         if(js){ web_add_script(i, js, slen); fprintf(stderr, "script: %s (%u b)\n", path, slen); }
-        else { web_add_script(i, "", 0); fprintf(stderr, "script MISSING: %s\n", path); }
+        else { web_add_script(i, "", 0); fprintf(stderr, "script MISSING: %s\n", g_last_abs); }
     }
     web_run_scripts();
     for(int i = 0; i < nsc; i++){
@@ -95,7 +142,17 @@ int main(int argc, char **argv){
         char src[200]; snprintf(src, sizeof src, "this.__click = document.getElementById('%s');", getenv("CLICK"));
         js_run(src, (u32)strlen(src));
         js_val_t el = js_get(js_global(), "__click");
-        if(el.t == JS_OBJ && js_host(el.o)){ int ran = web_click(js_host(el.o)); fprintf(stderr, "clicked #%s: %d handlers\n", getenv("CLICK"), ran); }
+        if(el.t == JS_OBJ && js_host(el.o)){
+            int ran = web_click(js_host(el.o));
+            const void *box = web_activate(js_host(el.o));
+            fprintf(stderr, "clicked #%s: %d handlers, opened%s\n", getenv("CLICK"), ran, box ? " (focus a text box)" : "");
+            if(box && getenv("TYPE")){
+                for(const char *q = getenv("TYPE"); *q; q++) web_key_input(box, *q);
+                web_key_input(box, '\n');
+                const char *nav = web_take_navigation();
+                fprintf(stderr, "submitted: %s\n", nav ? nav : "(nothing)");
+            }
+        }
         else fprintf(stderr, "no element #%s\n", getenv("CLICK"));
         const char *e = web_js_error(); if(e && e[0]) fprintf(stderr, "after click: %s\n", e);
     }
@@ -107,6 +164,18 @@ int main(int argc, char **argv){
         fprintf(stderr, "idle: %d timer callbacks in %d ticks\n", ran, n);
     }
 
+    if(getenv("PROBE")){
+        /* run timers for a while (simulated seconds), then evaluate an expression */
+        extern int js_timers_tick(u64 now);
+        int secs = getenv("PROBE_SECS") ? atoi(getenv("PROBE_SECS")) : 10;
+        for(int t = 0; t < secs * 100; t++) js_timers_tick(2000000ull + (u64)t);
+        char src[600]; snprintf(src, sizeof src, "this.__probe = String(%s);", getenv("PROBE"));
+        js_run(src, (u32)strlen(src));
+        js_val_t v = js_get(js_global(), "__probe");
+        fprintf(stderr, "probe: %s\n", v.t == JS_STR ? js_to_str(v) : "(not a string)");
+        const char *e = web_js_error(); if(e && e[0]) fprintf(stderr, "probe error: %s\n", e);
+        const char *nav = web_take_navigation(); fprintf(stderr, "navigation: %s\n", nav ? nav : "(none)");
+    }
     /* external stylesheets */
     int ns = web_stylesheet_count();
     for(int i = 0; i < ns; i++){
@@ -114,8 +183,8 @@ int main(int argc, char **argv){
         if(!href) continue;
         char path[1200]; resolve(path, sizeof path, href);
         u32 clen = 0; char *css = read_all(path, &clen);
-        if(css){ web_add_css(css, clen); fprintf(stderr, "css: %s (%u b)\n", path, clen); }
-        else fprintf(stderr, "css MISSING: %s\n", path);
+        if(css){ web_add_css_at(i, css, clen); fprintf(stderr, "css: %s (%u b)\n", path, clen); }
+        else fprintf(stderr, "css MISSING: %s\n", g_last_abs);
     }
 
     int page_h = web_layout(width);
@@ -123,14 +192,14 @@ int main(int argc, char **argv){
     /* images */
     int ni = web_image_count();
     for(int i = 0; i < ni; i++){
-        if(web_image_state(i) != 0) continue;
+        if(web_image_state(i) != 0 || !web_image_wanted(i)) continue;
         const char *href = web_image(i);
         if(!href) continue;
         if(strncmp(href, "data:", 5) == 0){ web_add_image_data_url(i, href); continue; }
         char path[1200]; resolve(path, sizeof path, href);
         u32 dlen = 0; char *data = read_all(path, &dlen);
         if(data){ web_add_image(i, data, dlen); fprintf(stderr, "img: %s (%u b)\n", path, dlen); }
-        else { web_add_image(i, "", 0); fprintf(stderr, "img MISSING: %s\n", path); }
+        else { web_add_image(i, "", 0); fprintf(stderr, "img MISSING: %s\n", g_last_abs); }
     }
     page_h = web_layout(width);
 
@@ -140,7 +209,7 @@ int main(int argc, char **argv){
     u32 *buf = malloc((size_t)width * page_h * 4);
     if(!buf){ fprintf(stderr, "oom frame %dx%d\n", width, page_h); return 1; }
     painter_target(buf, (u32)width, (u32)page_h);
-    u32 canvas = 0x1C2328;                   /* C_WIN, matches the browser */
+    u32 canvas = 0xFFFFFF;                   /* the browser's default canvas */
     if(web_canvas_bg(&canvas)) fprintf(stderr, "canvas: #%06x\n", canvas);
     painter_clear(canvas);
 

@@ -1,10 +1,14 @@
 /* MVP — Mad Vid Player: a video player.
  *
- * Plays AVI files with Motion-JPEG video and PCM audio (what `ffmpeg -c:v mjpeg -c:a
- * pcm_s16le` makes). Every frame is decoded by the OS's own JPEG decoder, the sound goes
- * to the HD Audio driver, and the audio clock keeps the picture in sync.
+ * Plays two kinds of file:
+ *  - MP4 (fragmented, as video sites serve it) and WebM, with H.264, VP9 or AV1 video and
+ *    AAC or Opus sound: MVP feeds the file to Reel, the media process, a piece at a time as
+ *    playback goes (the way a page feeds MSE), and Reel decodes it; the kernel's side of
+ *    Reel keeps the picture on the sound card's clock. Extensions .MP4 .M4V .M4A .WEB .MKV.
+ *  - AVI with Motion-JPEG video and PCM audio: every frame decoded by the OS's own JPEG
+ *    decoder, the sound to the HD Audio driver, the audio clock keeping them in sync.
  *
- * Library: the .AVI files in VIDEOS/ and in the root of the disk.
+ * Library: those files in VIDEOS/ and in the root of the disk.
  * Keys: Space play/pause, Left/Right seek 5 s, Up/Down volume, F fullscreen,
  *       M mute, Esc back to the library. Click the bar to seek. */
 #include "amdroid/ui.h"
@@ -14,6 +18,7 @@
 #include "amdroid/timer.h"
 #include "amdroid/keyboard.h"
 #include "amdroid/fb.h"
+#include "amdroid/reel.h"
 #include "string.h"
 
 int  jpeg_decode_rgb(const u8 *data, u32 len, u32 **px, u32 *w, u32 *h);   /* web/image.c */
@@ -78,6 +83,14 @@ static u32 fps_shown = 0, fps_count = 0; static u64 fps_t0 = 0;
 static u64 last_clock = 0;                  /* the clock never runs backwards */
 static int audio_done = 0;                  /* the file's audio is all sent: silence follows */
 static int *xmap = NULL; static u32 xmap_w = 0, xmap_src = 0;
+/* ---- an MP4/WebM through Reel ---- */
+static int rm = 0;                          /* the open file plays through Reel */
+static u32 rm_off = 0;                      /* bytes of it handed to Reel so far */
+static int rm_eos = 0;                      /* all of it handed over */
+static u32 rm_err_seq = 0;
+static rect_t rm_pic = { 0, 0, 0, 0 };      /* where the last picture was drawn */
+#define RM_PIECE (512u * 1024)              /* read and appended at a time */
+#define RM_AHEAD 30000000                   /* keep this much (us) buffered ahead */
 
 /* CPU cycles (for the decode time budget) */
 static inline u64 rdtsc(void){ u32 lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return ((u64)hi << 32) | lo; }
@@ -107,13 +120,20 @@ static void *grow(void *old, int *cap, int need, u32 elem){
 }
 
 /* ---- library ---- */
-static int has_avi_ext(const char *n){
+static int ext_is(const char *n, const char *e){
     u32 L = ui_len(n);
-    return L > 4 && n[L-4] == '.' && (n[L-3] | 32) == 'a' && (n[L-2] | 32) == 'v' && (n[L-1] | 32) == 'i';
+    if(L < 5 || n[L - 4] != '.') return 0;
+    for(int i = 0; i < 3; i++) if((n[L - 3 + i] | 32) != e[i]) return 0;
+    return 1;
+}
+static int has_avi_ext(const char *n){ return ext_is(n, "avi"); }
+/* the containers Reel plays */
+static int has_media_ext(const char *n){
+    return ext_is(n, "mp4") || ext_is(n, "m4v") || ext_is(n, "m4a") || ext_is(n, "web") || ext_is(n, "mkv");
 }
 static const char *list_prefix;
 static void add_file(const char *name, int is_dir, u32 size){
-    if(is_dir || !has_avi_ext(name) || nfiles >= MAX_FILES) return;
+    if(is_dir || !(has_avi_ext(name) || has_media_ext(name)) || nfiles >= MAX_FILES) return;
     char full[24] = "";
     ui_cat(full, list_prefix);
     ui_cat(full, name);
@@ -133,6 +153,7 @@ static void scan_library(void){
 
 /* ---- thumbnails: the first frame at 1/8 (or so) size, and the length ---- */
 static void make_thumb(int i){
+    if(has_media_ext(files[i])) return;     /* no thumbnail without decoding: a play badge */
     fat32_file_t f;
     if(fat32_open(files[i], &f) != 0) return;
     u8 h[12];
@@ -185,6 +206,7 @@ static void make_thumb(int i){
 
 /* ---- opening an AVI ---- */
 static void close_video(void){
+    if(rm){ reel_end(&app_mvp); rm = 0; }
     if(audio_on){ hda_stream_stop(); audio_on = 0; }
     if(job){ jpeg_job_abort(job); job = NULL; job_frame = -1; }
     if(have_video) fat32_close(&vf);
@@ -238,12 +260,14 @@ static void walk(u32 off, u32 end, int depth){
     }
 }
 
+static void open_media(void);
 static void open_video(const char *name){
     close_video();
     err[0] = 0;
     if(fat32_open(name, &vf) != 0){ ui_copy(err, "Can't open that file.", sizeof err); return; }
     have_video = 1;
     ui_copy(cur_name, name, sizeof cur_name);
+    if(has_media_ext(name)){ open_media(); return; }
     u8 h[12];
     if(read_at(0, h, 12) != 0 || !is4(h, "RIFF") || !is4(h + 8, "AVI ")){
         ui_copy(err, "Not an AVI file.", sizeof err); close_video(); return;
@@ -260,9 +284,13 @@ static void open_video(const char *name){
 }
 
 /* ---- time ---- */
-static u64 duration_us(void){ return (u64)nvframes * us_per_frame; }
+static u64 duration_us(void){
+    if(rm){ i64 d = reel_duration(); return d > 0 ? (u64)d : 0; }
+    return (u64)nvframes * us_per_frame;
+}
 static u64 audio_bps(void){ return (u64)a_rate * a_ch * 2; }
 static u64 now_us(void){
+    if(rm) return (u64)reel_time();
     if(!playing) return pos_us;
     u64 t;
     if(audio_on){
@@ -313,7 +341,7 @@ static void feed_audio(void){
         u32 nin = bytes / in_frame;
         u32 nout = (u32)((u64)nin * 48000 / a_rate);
         if(nout > 4096) nout = 4096;
-        int vol = muted ? 0 : volume;
+        int vol = (muted ? 0 : volume) * ui_prefs.volume / 100;   /* the system volume (Control Center) scales it */
         for(u32 i = 0; i < nout; i++){
             u32 j = (u32)((u64)i * a_rate / 48000);
             if(j >= nin) j = nin - 1;
@@ -346,6 +374,13 @@ static void pause_clock(void){
 }
 static void set_playing(int p){
     if(p == playing) return;
+    if(rm){
+        if(p){ if(reel_ended()) reel_seek(0); reel_play(); }
+        else reel_pause();
+        playing = p;
+        ui_redraw();
+        return;
+    }
     if(p){ if(pos_us >= duration_us()) pos_us = 0; playing = 1; start_clock(); }
     else {
         pause_clock(); playing = 0;
@@ -354,9 +389,11 @@ static void set_playing(int p){
     }
     ui_redraw();
 }
+static void rm_seek(i64 t);
 static void seek_to(i64 t){
     if(t < 0) t = 0;
-    if((u64)t > duration_us()) t = (i64)duration_us();
+    if(duration_us() && (u64)t > duration_us()) t = (i64)duration_us();
+    if(rm){ rm_seek(t); ui_redraw(); return; }
     int was = playing;
     if(was) pause_clock();
     pos_us = (u64)t;
@@ -455,8 +492,95 @@ static void scale_to(u32 w, u32 h){
     sw = dw; sh = dh;
 }
 
+/* ---- MP4/WebM: the file goes to Reel as playback needs it ---- */
+static i64 buffered_end(i64 at){
+    const volatile reel_shm_t *m = reel_header();
+    if(!m) return -1;
+    const volatile reel_sb_status_t *st = &m->sb[0];
+    for(u32 k = 0; k < st->nranges && k < REEL_RANGES; k++)
+        if(at >= st->ranges[k * 2] - 200000 && at < st->ranges[k * 2 + 1]) return st->ranges[k * 2 + 1];
+    return -1;
+}
+static i64 buffered_start(void){
+    const volatile reel_shm_t *m = reel_header();
+    return m && m->sb[0].nranges ? m->sb[0].ranges[0] : -1;
+}
+
+static void feed_media(void){
+    if(!rm) return;
+    if(rm_off >= vf.size){
+        if(!rm_eos && !reel_append_pending(0)){ reel_eos(); rm_eos = 1; }
+        return;
+    }
+    if(reel_queued_bytes() >= 2 * RM_PIECE) return;       /* Reel is still on the last pieces */
+    const volatile reel_shm_t *m = reel_header();
+    if(m && m->sb[0].have_init){
+        i64 now = reel_time(), end = buffered_end(now);
+        if(end >= 0 && end - now > RM_AHEAD) return;
+    }
+    u32 n = vf.size - rm_off;
+    if(n > RM_PIECE) n = RM_PIECE;
+    if(n > rdcap){
+        if(rdbuf) kfree(rdbuf);
+        rdcap = RM_PIECE;
+        rdbuf = kmalloc(rdcap);
+        if(!rdbuf){ rdcap = 0; return; }
+    }
+    if(fat32_read_at(&vf, rm_off, rdbuf, n) != (int)n){ ui_copy(err, "Reading the file failed.", sizeof err); return; }
+    if(reel_append(0, rdbuf, n) != 0) return;               /* no memory now: next tick */
+    rm_off += n;
+}
+
+/* inside what is buffered: at once. Ahead of it: the data comes as the file is read on.
+ * Behind it (Reel forgets what is long played): the file is fed again from the start. */
+static void rm_seek(i64 t){
+    i64 start = buffered_start();
+    if(start >= 0 && t + 200000 < start){
+        reel_abort(0);
+        rm_off = 0;
+        rm_eos = 0;
+    }
+    reel_seek(t);
+}
+
+static void open_media(void){
+    if(reel_begin(&app_mvp) != 0){
+        ui_copy(err, "The media process could not start (out of memory?).", sizeof err);
+        close_video();
+        return;
+    }
+    rm = 1; rm_off = 0; rm_eos = 0;
+    reel_error(&rm_err_seq);
+    playing = 0;
+    feed_media();
+    set_playing(1);
+}
+
+static void rm_tick(void){
+    reel_set_volume((muted ? 0 : volume) * ui_prefs.volume / 100);
+    feed_media();
+    if(reel_tick()){
+        fps_count++;
+        u32 pw, ph;
+        /* a new picture of the same size: its box only (the controls change once a second) */
+        if(rm_pic.w && reel_picture(&pw, &ph) && pw == rm_pic.w && ph == rm_pic.h) ui_redraw_rect(rm_pic);
+        else ui_redraw();
+    }
+    if(timer_ticks() >= fps_t0 + 100){ fps_shown = fps_count; fps_count = 0; fps_t0 = timer_ticks(); if(playing) ui_redraw(); }
+    u32 seq;
+    const char *e = reel_error(&seq);
+    if(seq != rm_err_seq){ rm_err_seq = seq; ui_copy(err, e, sizeof err); ui_redraw(); }
+    if(!reel_alive()){
+        if(!err[0]) ui_copy(err, "The media process stopped.", sizeof err);
+        close_video(); scan_library(); ui_redraw();
+        return;
+    }
+    if(playing && reel_ended()){ reel_pause(); playing = 0; ui_redraw(); }
+}
+
 static void mvp_tick(void){
     calibrate();
+    if(have_video && rm){ rm_tick(); return; }
     if(!have_video && thumbs_done < nfiles){ make_thumb(thumbs_done++); ui_redraw(); return; }
     if(!have_video || !playing) return;
     feed_audio();
@@ -541,7 +665,7 @@ static void draw_library(rect_t b){
     if(err[0]){ ui_text(b.x + UI_PAD, y, err, C_WARN, UI_SCALE); y += UI_ROW_H; }
     if(!nfiles){
         ui_text(b.x + UI_PAD, y, "No videos yet.", C_TEXT, UI_SCALE);
-        ui_text(b.x + UI_PAD, y + 40, "Put .AVI files (Motion-JPEG + PCM) in VIDEOS/ on the disk.", C_MUTED, UI_SCALE);
+        ui_text(b.x + UI_PAD, y + 40, "Put .MP4 / .WEB (H.264, VP9, AV1 + AAC, Opus) or .AVI (Motion-JPEG) files in VIDEOS/.", C_MUTED, UI_SCALE);
         return;
     }
     ui_text(b.x + UI_PAD, y, "Your videos", C_MUTED, UI_SCALE);
@@ -571,11 +695,29 @@ static void draw_library(rect_t b){
     }
 }
 
+static const char *codec_name(u32 c){
+    switch(c){ case 1: return "H.264"; case 2: return "VP9"; case 3: return "AV1"; case 4: return "AAC"; case 5: return "Opus"; }
+    return "";
+}
+
 static void draw_player(rect_t b){
     ui_fill(b, 0x000000);
     u32 pic_h = theater ? b.h : b.h - BAR_H;
     area_w = b.w; area_h = pic_h;
-    if(frame_px){
+    if(rm){
+        const volatile reel_shm_t *m = reel_header();
+        u32 vw2 = m ? m->video_w : 0, vh2 = m ? m->video_h : 0;
+        if(vw2 && vh2){
+            u32 dw = b.w, dh = (u32)((u64)b.w * vh2 / vw2);
+            if(dh > pic_h){ dh = pic_h; dw = (u32)((u64)pic_h * vw2 / vh2); }
+            reel_set_size(dw, dh, !playing);         /* a paused picture is drawn smooth */
+        }
+        u32 pw, ph;
+        if(reel_picture(&pw, &ph)){
+            rm_pic = (rect_t){ b.x + (b.w > pw ? (b.w - pw) / 2 : 0), b.y + (pic_h > ph ? (pic_h - ph) / 2 : 0), pw, ph };
+            reel_blit(rm_pic.x, rm_pic.y, pw, ph);
+        } else ui_text(b.x + b.w / 2 - 80, b.y + pic_h / 2 - 16, m && !m->has_video && m->has_audio ? "(sound only)" : "Loading...", C_MUTED, UI_SCALE);
+    } else if(frame_px){
         scale_to(b.w, pic_h);
         if(scaled) fb_blit_over((i32)(b.x + (b.w - sw) / 2), (i32)(b.y + (pic_h - sh) / 2), sw, sh, scaled);
     } else {
@@ -609,9 +751,20 @@ static void draw_player(rect_t b){
     char info[64] = "";
     if(muted) ui_cat(info, "Muted");
     else { char n[8]; ui_num((u32)volume, n); ui_cat(info, "Vol "); ui_cat(info, n); ui_cat(info, "%"); }
-    if(!has_audio) ui_cat(info, " (no audio)");
+    if(rm){
+        const volatile reel_shm_t *m = reel_header();
+        char n[12];
+        if(m){
+            if(m->has_video){ ui_cat(info, "   "); ui_cat(info, codec_name(m->sb[0].kind == 1 ? m->sb[0].codec : 0)); }
+            if(m->has_video){ ui_cat(info, " "); ui_num(m->video_h, n); ui_cat(info, n); ui_cat(info, "p "); ui_num(fps_shown, n); ui_cat(info, n); ui_cat(info, " fps"); }
+            if(m->dropped){ ui_cat(info, " "); ui_num((u32)m->dropped, n); ui_cat(info, n); ui_cat(info, " late"); }
+            if(!m->has_audio) ui_cat(info, " (no audio)");
+            else if(!hda_present()) ui_cat(info, " (no sound card)");
+            if(reel_stalled()) ui_cat(info, " buffering");
+        }
+    } else if(!has_audio) ui_cat(info, " (no audio)");
     else if(!audio_on && playing) ui_cat(info, " (no sound card)");
-    {   /* what the decoder is doing */
+    if(!rm){   /* what the decoder is doing */
         char n[12];
         ui_cat(info, "   ");
         ui_num(vh << shown_scale, n); ui_cat(info, n); ui_cat(info, "p");

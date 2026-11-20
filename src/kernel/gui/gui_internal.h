@@ -7,6 +7,11 @@
 void gui_damage(int x, int y, int w, int h);
 void gui_damage_all(void);
 
+/* ---- prefs.c ---- */
+void prefs_load(void);
+void prefs_tick(u64 now);
+void prefs_touch(void);                       /* saved soon, without repainting everything */
+
 /* ---- wallpaper.c ---- */
 void wall_init(u32 w, u32 h);
 void wall_draw(void);
@@ -37,6 +42,7 @@ int    win_unsnap_for_drag(int a, int mx);
 int    win_is_max(int a);
 void   win_set_pointer(int x, int y);   /* the pointer when it is over a window or the desktop, else -1 */
 void   win_mark_dirty(int a);          /* the app's window shows something new */
+void   win_mark_dirty_rect(int a, rect_t r);   /* ...in this part of it only (screen coordinates) */
 void   win_damage(u64 now);            /* reports the windows that moved or changed */
 extern int win_snap_zone;
 #define WIN_MIN_W 360
@@ -50,12 +56,16 @@ extern int win_drag_app, win_drag_dx, win_drag_dy;
 #define IT_SEARCH 1
 #define IT_APP    2
 #define IT_TERM   3
+#define IT_CC     4                           /* the Control Center button */
 #define TB_MAX_ITEMS (UI_MAX_APPS + 4)
 typedef struct { int kind; int app; } item_t;
 int    tb_items(item_t *it);
 rect_t tb_bar(int n, u32 sw, u32 sh);
 int    tb_hit(rect_t bar, int n, int x, int y);
+int    tb_clock_hit(rect_t bar, int x, int y);      /* the clock: opens the Notification Center */
 void   tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open);
+u32    tb_cpu_tenths(void);               /* CPU use now, in tenths of a percent */
+u32    tb_ram_pct(void);
 void   tb_damage(int n, rect_t bar, int hover, int hover_amt, int top, int start_open, u64 now);
 /* The Start menu: a search box and the entries that match it. An entry is an app index,
  * UI_MAX_APPS for Terminal or UI_MAX_APPS + 1 for Sign out. */
@@ -76,8 +86,55 @@ void   tb_menu_damage(rect_t bar, u32 sw, int open, int dy, int mx, int my);
 void isl_update(u32 sw, u64 now, int animate);
 void isl_draw(u64 now);
 void isl_damage(u64 now);
-int  isl_hit(int x, int y);                   /* click on the island */
+int  isl_hit(int x, int y);                   /* is the pointer on the island */
+void isl_press(int x, int y);                 /* a press on it: a click, or the start of a drag */
+int  isl_drag(int mx, int my, int held);      /* every turn: follows the drag; returns the app a click opens, or -1 */
+int  isl_dragging(void);
 int  isl_click(void);                         /* returns the app a clicked notification opens, or -1 */
+void isl_reset_position(void);
+void isl_close(void);
+void isl_toggle_open(void);
+int  ui_mouse_x(void);
+int  ui_mouse_y(void);
+
+/* ---- panels.c: Control Center and Notification Center ---- */
+enum { PN_NONE, PN_CC, PN_NC };
+int  pn_which(void);                          /* the open panel, or PN_NONE */
+void pn_toggle(int which, u64 now);
+void pn_close(void);
+void pn_close_outside(u64 now);               /* a click outside closed it */
+int  pn_hit(rect_t bar, u32 sw, int x, int y);
+int  pn_press(rect_t bar, u32 sw, int x, int y, u64 now);   /* an app to open (UI_MAX_APPS = Terminal), or -1 */
+void pn_update(rect_t bar, u32 sw, int mx, int my, int held);
+void pn_scroll(int dz);
+int  pn_key(int c);
+void pn_damage(rect_t bar, u32 sw, u64 now);
+void pn_draw(rect_t bar, u32 sw, u64 now);
+void ui_date_text(char *out, u32 cap);        /* "Fri 20 Nov 2026" */
+
+/* ---- widgets.c: draggable cards on the desktop ---- */
+void wid_init(u32 sw, u32 sh);
+void wid_draw(void);
+void wid_damage(u64 now);
+int  wid_at(int x, int y);                    /* the widget under (x, y), or -1 */
+void wid_press(int w, int x, int y);          /* a press on a widget: starts a drag */
+void wid_update(int mx, int my, int held);    /* every turn: moves a dragged widget */
+int  wid_dragging(void);
+void wid_remove(int w);
+void wid_reset_positions(void);
+const char *wid_name(int w);
+
+/* ---- dock.c: the magnifying dock ---- */
+void dk_init(u32 sw, u32 sh);
+void dk_update(int mx, int my, int blocked, u64 now);   /* every turn; blocked: the pointer is over something above it */
+int  dk_hit(int x, int y);                              /* the app whose icon is under (x, y), or -1 */
+int  dk_reserve_right(void);                            /* pixels of the right edge the dock covers */
+int  dk_over(int x, int y);                             /* the dock itself is under (x, y) */
+void dk_damage(u64 now);
+void dk_draw(void);
+
+/* ---- repainting ---- */
+void gui_present_all(void);                   /* show the whole back buffer again (brightness changed) */
 
 /* ---- desktop.c: icons on the desktop ---- */
 void desk_init(u32 sw, u32 sh);

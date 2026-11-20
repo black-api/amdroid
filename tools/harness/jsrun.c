@@ -3,12 +3,15 @@
  * line:column and the source around it. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "amdroid/types.h"
 #include "amdroid/js.h"
 
 char stack_top[1];
 void js_set_stack_top(unsigned long t);
 extern int js_parse_only;
+extern void (*js_log_sink)(const char *);
+static void log_sink(const char *s){ printf("%s\n", s); fflush(stdout); }
 extern int js_gc_stress;
 u32 js_heap_used(void);
 void js_collect(void);
@@ -26,11 +29,15 @@ int main(int argc, char **argv){
     FILE *f = fopen(argv[1], "rb"); if(!f){ perror(argv[1]); return 2; }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     char *src = malloc(n + 1); n = fread(src, 1, n, f); src[n] = 0; fclose(f);
+    js_log_sink = log_sink;
     js_init();
     int r = js_run(src, (u32)n);
     if(r == 0 && !js_parse_only) for(int t = 0; t < 20; t++) if(!js_timers_tick(1000000000ull + t)) break;
     js_collect();
     fprintf(stderr, "heap in use: %.1f MB\n", js_heap_used() / 1048576.0);
+    { FILE *st = fopen("/proc/self/status", "r"); char ln[256];
+      while(st && fgets(ln, sizeof ln, st)) if(!strncmp(ln, "VmHWM:", 6)){ fprintf(stderr, "peak rss: %s", ln + 6); break; }
+      if(st) fclose(st); }
     if(r == 0){ const char *l = js_last_log(); if(l && *l) printf("log: %s\n", l); printf("OK\n"); return 0; }
     u32 at = js_error_at();
     printf("ERROR: %s\n", js_error());

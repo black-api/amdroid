@@ -29,6 +29,11 @@ void husser_move(i32 x, i32 y);
 void husser_resize(u32 vw, u32 vh);
 /* Delivers a fetched subresource (kind 1 css, 2 image; bytes NULL = failed). */
 void husser_res(u32 kind, u32 idx, const void *bytes, u32 len);
+/* The answer to a script fetch (fetch() in the page): bytes NULL = it failed. */
+void husser_fetch_res(u32 id, u32 status, const void *bytes, u32 len);
+/* Reads the shared region (the fetch queue, appended media) at shm offset off. */
+void husser_read(u64 off, void *dst, u64 len);
+volatile husser_shm_t *husser_header_rw(void);
 /* Asks for the href at idx; the answer arrives via the link_url/link_url_seq pair. */
 void husser_link_url(u32 idx);
 /* 1 when the renderer process is still up. */

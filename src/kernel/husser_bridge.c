@@ -62,6 +62,25 @@ static void shm_write(u64 off, const void *src, u64 len){
     }
 }
 
+/* Reads bytes from the shared region at shm offset off (page by page). */
+void husser_read(u64 off, void *dst, u64 len){
+    if(!shm_ready || off + len > HUSSER_SHM_BYTES) return;
+    u8 *d = dst;
+    while(len){
+        u64 page = off / 4096;
+        u32 inner = (u32)(off % 4096);
+        u32 take = 4096 - inner;
+        if(take > len) take = (u32)len;
+        memcpy(d, (const void *)(unsigned long)(shm_pages[page] + inner), take);
+        d += take; off += take; len -= take;
+    }
+}
+
+/* the header, writable: the browser posts media state there */
+volatile husser_shm_t *husser_header_rw(void){
+    return shm_ready ? (volatile husser_shm_t *)(unsigned long)shm_pages[0] : NULL;
+}
+
 /* ---- commands ----
  * The browser never waits for the renderer: a command goes into a short queue and is handed
  * over when the one before it is done (husser_pump, every tick). A page that takes seconds
@@ -219,6 +238,15 @@ void husser_res(u32 kind, u32 idx, const void *bytes, u32 len){
     m->res_idx = idx;
     m->res_len = bytes ? len : 0xFFFFFFFFu;
     post(H_CMD_RES_DONE, 0, 0);
+}
+
+/* The answer to script fetch `id` (bytes NULL: it failed). */
+void husser_fetch_res(u32 id, u32 status, const void *bytes, u32 len){
+    if(husser_pid < 0 || !shm_ready) return;
+    wait_idle(200);
+    volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
+    m->res_status = status;
+    husser_res(4, id, bytes, len);
 }
 
 void husser_link_url(u32 idx){ post(H_CMD_LINK_URL, (i32)idx, 0); }

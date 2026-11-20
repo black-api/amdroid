@@ -8,7 +8,8 @@
 #include "web_internal.h"
 #include "string.h"
 
-#define IMAGES_MAX   32
+#define IMAGES_MAX   240
+#define IMG_BUDGET   (64u * 1024 * 1024)    /* decoded pixels of one page, at most */
 #define IMG_MAX_SIDE 2048
 #define IMG_MAX_OUT  (16u * 1024 * 1024)
 
@@ -17,9 +18,11 @@ typedef struct {
     u32 *pixels;            /* 0xRRGGBB, w*h, or NULL while not decoded */
     u32 w, h;
     int state;              /* 0 pending, 1 ready, 2 failed */
+    int wanted;             /* the layout reached it (images in hidden menus are never fetched) */
 } image_t;
 static image_t images[IMAGES_MAX];
 static int nimages = 0;
+static u32 img_bytes = 0;
 
 void web_images_reset(void){
     for(int i = 0; i < nimages; i++){
@@ -27,6 +30,7 @@ void web_images_reset(void){
         if(images[i].pixels) kfree(images[i].pixels);
     }
     nimages = 0;
+    img_bytes = 0;
     memset(images, 0, sizeof images);
 }
 
@@ -49,6 +53,8 @@ int img_register(const char *url){
 }
 
 int web_image_count(void){ return nimages; }
+void img_mark_wanted(int idx){ if(idx >= 0 && idx < nimages) images[idx].wanted = 1; }
+int web_image_wanted(int i){ return i >= 0 && i < nimages && images[i].wanted; }
 const char *web_image(int i){ return (i >= 0 && i < nimages) ? images[i].url : NULL; }
 int web_image_state(int i){ return (i >= 0 && i < nimages) ? images[i].state : 2; }
 const u32 *web_image_pixels(int i, u32 *w, u32 *h){
@@ -201,7 +207,9 @@ static int png_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
     u32 width = 0, height = 0;
     int bitdepth = 0, colour = 0, interlace = 0;
     u8 palette[256 * 3];
+    u8 pal_alpha[256];
     int have_palette = 0;
+    for(int k = 0; k < 256; k++) pal_alpha[k] = 255;
     const u8 *idat = NULL;         /* runs of IDAT (may be split) are gathered below */
     u32 idat_total = 0;
     u8 *idat_buf = NULL;
@@ -222,12 +230,24 @@ static int png_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
             if(n > 256) n = 256;
             memcpy(palette, chunk, n * 3);
             have_palette = 1;
+        } else if(!memcmp(type, "tRNS", 4)){
+            /* palette transparency: one alpha per entry */
+            for(u32 k = 0; k < clen && k < 256; k++) pal_alpha[k] = chunk[k];
         } else if(!memcmp(type, "IDAT", 4)){
-            u8 *grown = kmalloc(idat_total + clen);
-            if(!grown){ if(idat_buf) kfree(idat_buf); return -1; }
-            if(idat_buf){ memcpy(grown, idat_buf, idat_total); kfree(idat_buf); }
-            memcpy(grown + idat_total, chunk, clen);
-            idat_buf = grown;
+            if(!idat_buf){
+                /* all the IDAT chunks, sized up front: one buffer, no copying as they come */
+                u32 total = 0;
+                for(u32 q = pos; q + 12 <= len; ){
+                    u32 ql = rd32be(data + q);
+                    if(q + 12 + ql > len) break;
+                    if(!memcmp(data + q + 4, "IDAT", 4)) total += ql;
+                    if(!memcmp(data + q + 4, "IEND", 4)) break;
+                    q += 12 + ql;
+                }
+                idat_buf = kmalloc(total ? total : 1);
+                if(!idat_buf) return -1;
+            }
+            memcpy(idat_buf + idat_total, chunk, clen);
             idat_total += clen;
         } else if(!memcmp(type, "IEND", 4)) break;
         pos += 12 + clen;
@@ -292,17 +312,18 @@ static int png_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
         for(u32 y = 0; y < height; y++){
             u8 *l = src2 + 1;
             for(u32 x = 0; x < width; x++){
-                u32 r = 0, g = 0, b2 = 0;
+                u32 r = 0, g = 0, b2 = 0, a = 255;
                 if(bitdepth == 16){
                     /* big-endian; keep the high byte */
                     if(colour == 0){ r = g = b2 = l[0]; }
-                    else if(colour == 4){ r = g = b2 = l[0]; }
-                    else { r = l[0]; g = l[2]; b2 = l[4]; }   /* 2 channels per sample for RGB(A) 16-bit */
+                    else if(colour == 4){ r = g = b2 = l[0]; a = l[2]; }
+                    else { r = l[0]; g = l[2]; b2 = l[4]; if(colour == 6) a = l[6]; }   /* 2 bytes per sample */
                     l += bpp;
                 } else if(bitdepth == 8){
-                    if(colour == 0 || colour == 4){ r = g = b2 = l[0]; }
-                    else if(colour == 3){ u32 i = l[0]; r = palette[i * 3]; g = palette[i * 3 + 1]; b2 = palette[i * 3 + 2]; }
-                    else { r = l[0]; g = l[1]; b2 = l[2]; }
+                    if(colour == 0){ r = g = b2 = l[0]; }
+                    else if(colour == 4){ r = g = b2 = l[0]; a = l[1]; }
+                    else if(colour == 3){ u32 i = l[0]; r = palette[i * 3]; g = palette[i * 3 + 1]; b2 = palette[i * 3 + 2]; a = pal_alpha[i]; }
+                    else { r = l[0]; g = l[1]; b2 = l[2]; if(colour == 6) a = l[3]; }
                     l += bpp;
                 } else {   /* 1, 2 or 4 bits per channel, single channel (grey or palette) */
                     const u8 *bitrow = src2 + 1;
@@ -313,12 +334,14 @@ static int png_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
                     if(colour == 3){
                         if(sample > 255) sample = 0;
                         r = palette[sample * 3]; g = palette[sample * 3 + 1]; b2 = palette[sample * 3 + 2];
+                        a = pal_alpha[sample];
                     } else {   /* grey: scale to 8 bits */
                         u32 v = sample * 255 / mask;
                         r = g = b2 = v;
                     }
                 }
-                px[y * width + x] = (r << 16) | (g << 8) | b2;
+                /* the top byte is transparency (0 opaque): JPEG pixels, which leave it 0, stay opaque */
+                px[y * width + x] = ((255 - a) << 24) | (r << 16) | (g << 8) | b2;
             }
             src2 += stride + 1;
         }
@@ -553,6 +576,7 @@ static int gif_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
             u32 bgidx = data[11];
             bg = ((u32)gct_table[bgidx * 3] << 16) | ((u32)gct_table[bgidx * 3 + 1] << 8) | gct_table[bgidx * 3 + 2];
         }
+        if(transparent != 0xFFFFFFFFu) bg = 0xFF000000u;   /* see-through where the frame has no pixels */
         for(u32 i2 = 0; i2 < width * height; i2++) px[i2] = bg;
         for(u32 y = 0; y < ih && y < height; y++){
             u32 dy = dst_of[y];
@@ -1065,8 +1089,10 @@ int web_add_image(int idx, const char *data, u32 len){
     else if(len >= 2 && d[0] == 'B' && d[1] == 'M') ok = bmp_decode(d, len, &px, &w, &h);
     else if(len >= 6 && !memcmp(d, "GIF8", 4)) ok = gif_decode(d, len, &px, &w, &h);
     if(ok != 0){ im->state = 2; return -1; }
+    if(img_bytes + w * h * 4 > IMG_BUDGET){ kfree(px); im->state = 2; return -1; }   /* the page has enough pictures */
     if(im->pixels) kfree(im->pixels);
     im->pixels = px; im->w = w; im->h = h; im->state = 1;
+    img_bytes += w * h * 4;
     return 0;
 }
 

@@ -12,6 +12,8 @@
 #include "amdroid/kmath.h"
 #include "amdroid/sched.h"
 #include "amdroid/auth.h"
+#include "amdroid/markdown.h"
+#include "amdroid/ui.h"
 #include <string.h>
 
 typedef Val (*bfn_t)(Val *a, int n);
@@ -349,6 +351,52 @@ BI(poll_click){
     return fz_num(0);
 }
 
+/* ----- Markdown (the same engine as Notes and Browser) ----- */
+/* md_html(text): the HTML for a Markdown text. */
+BI(md_html){
+    UNUSED_ARGS;
+    need_str(a[0], "md_html()");
+    u32 hlen = 0;
+    char *h = md_to_html(a[0].s, (u32)strlen(a[0].s), &hlen);
+    if(!h) fz_die("md_html: out of memory");
+    char *r = fz_strdup(h);
+    kfree(h);
+    return fz_strv(r);
+}
+static void fz_md_text(void *ctx, int x, int y, const char *s, u32 color, int scale, int bold){
+    (void)ctx;
+    if(x < 0 || y < 0) return;
+    ui_text((u32)x, (u32)y, s, color, (u32)scale);
+    if(bold) ui_text((u32)x + 1, (u32)y, s, color, (u32)scale);
+}
+static void fz_md_rect(void *ctx, int x, int y, int w, int h, u32 color){
+    (void)ctx;
+    if(x < 0 || y < 0 || w <= 0 || h <= 0) return;
+    fb_fill_rect((u32)x, (u32)y, (u32)w, (u32)h, color);
+}
+static u32 fz_mix(u32 a, u32 b, u32 t){       /* t/256 of a over b */
+    u32 r = ((((a >> 16) & 255) * t) + (((b >> 16) & 255) * (256 - t))) >> 8;
+    u32 g = ((((a >> 8) & 255) * t) + (((b >> 8) & 255) * (256 - t))) >> 8;
+    u32 c = (((a & 255) * t) + ((b & 255) * (256 - t))) >> 8;
+    return (r << 16) | (g << 8) | c;
+}
+/* md_draw(x, y, width, text, fg, bg): draws Markdown into the screen's back buffer (call
+   fb_present() to show it). bg is the colour behind it (for code boxes and rules); y may be
+   negative to scroll. Returns the height the text takes. */
+BI(md_draw){
+    UNUSED_ARGS; need_fb();
+    need_str(a[3], "md_draw()");
+    u32 fg = (u32)(long long)fz_numof(a[4]), bg = (u32)(long long)fz_numof(a[5]);
+    md_draw_t d = {
+        .ctx = 0, .text = fz_md_text, .rect = fz_md_rect, .scale = fb_width() >= 1280 ? 2 : 1,
+        .fg = fg, .dim = fz_mix(fg, bg, 150), .accent = 0x4CC2FF, .code_fg = fz_mix(0xE6C07B, fg, 128),
+        .code_bg = fz_mix(fg, bg, 24), .rule = fz_mix(fg, bg, 60), .quote = 0x4CC2FF,
+        .clip_top = 0, .clip_bottom = (int)fb_height(),
+    };
+    int h = md_draw(a[3].s, (u32)strlen(a[3].s), (int)fz_numof(a[0]), (int)fz_numof(a[1]), (int)fz_numof(a[2]), &d);
+    return fz_num(h);
+}
+
 static const BDef BUILTINS[] = {
     { "len", 1, bi_len }, { "push", 2, bi_push }, { "pop", 1, bi_pop }, { "type", 1, bi_type },
     { "abs", 1, bi_abs }, { "min", 2, bi_min }, { "max", 2, bi_max },
@@ -369,6 +417,7 @@ static const BDef BUILTINS[] = {
     { "fb_clear", 1, bi_fb_clear }, { "fb_rect", 5, bi_fb_rect },
     { "fb_text", 5, bi_fb_text }, { "fb_present", 0, bi_fb_present },
     { "poll_key", 0, bi_poll_key }, { "poll_click", 0, bi_poll_click },
+    { "md_html", 1, bi_md_html }, { "md_draw", 6, bi_md_draw },
 };
 
 int fz_builtin_find(const char *name){

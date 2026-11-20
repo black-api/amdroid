@@ -20,10 +20,19 @@
 #define HUSSER_PAGE_BYTES   (4u * 1024 * 1024)          /* the page being shown */
 #define HUSSER_RES_OFF      (HUSSER_PAGE_OFF + HUSSER_PAGE_BYTES)
 #define HUSSER_RES_BYTES    (16u * 1024 * 1024)         /* one fetched subresource at a time (YouTube's app is ~11 MB) */
-#define HUSSER_SHM_BYTES    (HUSSER_RES_OFF + HUSSER_RES_BYTES)
+/* script fetches (fetch()): the addresses can be long (a media URL is ~1 KB), so they live
+ * here rather than in need[] */
+#define HUSSER_FETCHQ_OFF   (HUSSER_RES_OFF + HUSSER_RES_BYTES)
+#define HUSSER_FETCH_MAX    8
+#define HUSSER_FETCH_URL    4092
+#define HUSSER_FETCHQ_BYTES (HUSSER_FETCH_MAX * 4096u)  /* each: u32 id, then the URL (0-terminated) */
+/* media bytes a page appends to a SourceBuffer, on their way to Reel */
+#define HUSSER_MEDIA_OFF    (HUSSER_FETCHQ_OFF + HUSSER_FETCHQ_BYTES)
+#define HUSSER_MEDIA_BYTES  (4u * 1024 * 1024)
+#define HUSSER_SHM_BYTES    (HUSSER_MEDIA_OFF + HUSSER_MEDIA_BYTES)
 
 #define HUSSER_MAGIC        0x52555348u                 /* 'HUSR' */
-#define HUSSER_VER          2u
+#define HUSSER_VER          3u
 
 /* cmd (browser -> husser) */
 #define H_CMD_NONE          0
@@ -38,6 +47,21 @@
                                     cmd_i = kind (1 css, 2 image, 3 script), cmd_j = idx,
                                     res_len = bytes */
 #define H_CMD_LINK_URL      9    /* cmd_i = link index: husser resolves web_link(idx) into link_url */
+/* H_CMD_RES_DONE with res_kind 4: the answer to script fetch res_idx (res_len bytes at
+ * HUSSER_RES_OFF, or 0xFFFFFFFF when it failed); res_status is the HTTP status */
+
+/* media commands (husser -> browser), one at a time: media_seq bumped, the browser sets
+ * media_ack to it when done */
+#define M_CMD_OPEN      1    /* a MediaSource was attached to a <video>: a new presentation */
+#define M_CMD_APPEND    2    /* media_a = source buffer, media_len bytes at HUSSER_MEDIA_OFF */
+#define M_CMD_REMOVE    3    /* media_a, media_t0..media_t1 (us) */
+#define M_CMD_ABORT     4    /* media_a */
+#define M_CMD_EOS       5
+#define M_CMD_PLAY      6
+#define M_CMD_PAUSE     7
+#define M_CMD_SEEK      8    /* media_t0 */
+#define M_CMD_CLOSE     9    /* the element went away */
+#define M_CMD_VOLUME    10   /* media_a = percent */
 
 /* keys above 255 use these */
 #define H_KEY_UP            0x100
@@ -66,6 +90,7 @@ typedef struct husser_shm {
     u32 heap_bytes;             /* the heap mapped at HUSSER_HEAP_VA */
     u32 ultra;                  /* 1: ultra-fast mode (lots of RAM): big script heap, resource cache */
     u32 ram_mb;                 /* the machine's memory */
+    u32 adblock;                /* 1: hide ad boxes (the browser blocks the ad servers themselves) */
 
     /* husser -> browser */
     u32 state;                  /* H_STATE_* */
@@ -103,6 +128,31 @@ typedef struct husser_shm {
     u32 cmd_seq;                /* bumped by the kernel to submit */
     u32 ack_seq;                /* husser sets it to the last seq it finished */
     i32 cmd_i, cmd_j;
+
+    /* script fetches (husser -> browser): fetch_count requests at HUSSER_FETCHQ_OFF */
+    u32 fetch_seq;
+    u32 fetch_count;
+    u32 res_status;             /* kind 4 answers: the HTTP status */
+
+    /* media (husser -> browser) */
+    u32 media_seq, media_ack;
+    u32 media_cmd;
+    i32 media_a;
+    u32 media_len;
+    i64 media_t0, media_t1;
+    /* the <video> box in the viewport (from the last frame); video_w 0 when there is none */
+    i32 video_x, video_y, video_w, video_h;
+    u32 video_seq;
+    /* media state (browser -> husser), refreshed every tick while a presentation is open */
+    u32 ms_seq;
+    i64 ms_time_us, ms_duration_us;
+    u32 ms_playing, ms_ended, ms_stalled, ms_ready;
+    u32 ms_video_w, ms_video_h;
+    u32 ms_pending[2];          /* appends to each source buffer not finished yet */
+    u32 ms_nranges[2];
+    i64 ms_ranges[2][16];       /* buffered [start, end) pairs, us */
+    u32 ms_error_seq;
+    char ms_error[120];
 
 } husser_shm_t;
 

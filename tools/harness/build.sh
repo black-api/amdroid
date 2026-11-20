@@ -4,7 +4,7 @@ set -e
 H="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$H/../.." && pwd)"
 CC=${CC:-gcc}
-CFLAGS="-O2 -g -w -fno-strict-aliasing -I$H/shim -I$ROOT/include"
+CFLAGS="-O2 -g -w -DWEB_HOST_DEBUG -fno-strict-aliasing -I$H/shim -I$ROOT/include"
 
 SRCS=(
   "$ROOT/src/kernel/web/html.c"
@@ -19,6 +19,7 @@ SRCS=(
   "$ROOT/src/lib/string.c"
   "$ROOT/src/lib/klib.c"
   "$ROOT/src/lib/kmath.c"
+  "$ROOT/src/lib/markdown.c"
   "$H/host_main.c"
 )
 mkdir -p "$H/obj"

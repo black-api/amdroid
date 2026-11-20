@@ -79,6 +79,12 @@ static void draw_icon(int which, u32 x, u32 y, u32 c){
             ui_line(ix + 21, iy + 11, ix + 21, iy + 6,  2, c);   /* right handle */
             ui_line(ix + 11, iy + 6,  ix + 21, iy + 6,  2, c);   /* handle top   */
             break;
+        case UI_ICO_CC:                                  /* two toggles: Control Center */
+            ui_rrect(x + 2, y + 5,  28, 10, 5, c);
+            ui_disc(ix + 24, iy + 10, 3, 0x000000);
+            ui_rrect(x + 2, y + 17, 28, 10, 5, c);
+            ui_disc(ix + 8,  iy + 22, 3, 0x000000);
+            break;
         default:                                         /* terminal */
             ui_rrect(x + 2, y + 4, 28, 24, 4, c);
             ui_text(ix + 7, iy + 9, ">_", 0x000000, 1);
@@ -113,8 +119,8 @@ static void make_pic(icon_pic_t *p, int which, u32 c){
     }
 }
 
-void ui_icon(int which, u32 x, u32 y, u32 c){
-    if(!fb_clip_hits((i32)x, (i32)y, ICO, ICO)) return;
+/* The kept picture of an icon in a colour, made on first use; NULL when it could not be kept. */
+static icon_pic_t *get_pic(int which, u32 c){
     icon_pic_t *p = 0;
     for(int i = 0; i < npics && !p; i++) if(pics[i]->which == which && pics[i]->color == c) p = pics[i];
     if(!p){
@@ -125,10 +131,26 @@ void ui_icon(int which, u32 x, u32 y, u32 c){
             if(p) pics[npics++] = p;
         }
         if(!p && npics){ p = pics[next_out]; next_out = (next_out + 1) % npics; }   /* full: an old one goes */
-        if(!p){ draw_icon(which, x, y, c); return; }
+        if(!p) return 0;
         make_pic(p, which, c);
     }
+    return p;
+}
+
+void ui_icon(int which, u32 x, u32 y, u32 c){
+    if(!fb_clip_hits((i32)x, (i32)y, ICO, ICO)) return;
+    icon_pic_t *p = get_pic(which, c);
+    if(!p){ draw_icon(which, x, y, c); return; }
     fb_blit_over((i32)x, (i32)y, ICO, ICO, p->px);
+}
+
+/* The same icon stretched to size x size pixels (the dock magnifies with it). */
+void ui_icon_scaled(int which, u32 x, u32 y, u32 size, u32 c){
+    if(size == ICO){ ui_icon(which, x, y, c); return; }
+    if(!fb_clip_hits((i32)x, (i32)y, (i32)size, (i32)size)) return;
+    icon_pic_t *p = get_pic(which, c);
+    if(!p) return;
+    fb_blit_over_scaled((i32)x, (i32)y, size, size, ICO, ICO, p->px);
 }
 
 /* The mouse pointer. */

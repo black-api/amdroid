@@ -44,6 +44,7 @@ js_val_t     js_null(void);
 js_val_t     js_bool(int b);
 js_val_t     js_num(double n);
 js_val_t     js_str(const char *s);
+js_val_t     js_str_copy(const char *s, u32 n);    /* a copy in the script heap */
 js_val_t     js_objv(js_obj_t *o);
 js_obj_t    *js_global(void);
 js_obj_t    *js_new_object(void);
@@ -58,6 +59,11 @@ void        *js_host(js_obj_t *o);
 js_val_t     js_call(js_val_t fn, js_val_t self, int argc, js_val_t *argv);
 int          js_callable(js_val_t v);
 const char  *js_to_str(js_val_t v);
+/* An ArrayBuffer holding a copy of data, kept as raw bytes until a script looks inside. */
+js_obj_t    *js_new_buffer_bytes(const u8 *data, u32 len);
+/* The bytes of an ArrayBuffer/typed array/DataView: *raw points at them when they are raw
+   (nothing copied), else up to max are copied to out. The length, or -1 for other values. */
+int          js_bytes_of(js_val_t v, const u8 **raw, u8 *out, u32 max);
 double       js_to_num(js_val_t v);
 int          js_truthy(js_val_t v);
 

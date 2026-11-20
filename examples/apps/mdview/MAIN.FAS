@@ -1,0 +1,67 @@
+# Markdown Viewer - shows a .md file from the disk, formatted by the OS's Markdown engine
+# (the same one Notes and Browser use), through the md_draw builtin.
+# Up/Down and Page Up/Down scroll, Esc (or a click) returns to the desktop.
+
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+bg = rgb(16, 20, 24)
+fg = rgb(230, 236, 240)
+bar = rgb(28, 35, 40)
+muted = rgb(154, 167, 176)
+
+guide = "# Markdown Viewer\n\nThis app is a **.adp package** written in *Fuss*. It asks the OS to draw Markdown with `md_draw`, and can turn it into HTML with `md_html`.\n\n## What it reads\n\n- `README.MD` on the disk, if there is one\n- otherwise `NOTES.MD` (write it in **Notes**)\n- otherwise this guide\n\n## Keys\n\n| Key | Does |\n|-----|------|\n| Up / Down | scroll a line |\n| Page Up / Down | scroll a page |\n| Esc | back to the desktop |\n\n> Tip: in Notes, press Tab to preview your note the same way.\n\n```\nmd_draw(x, y, width, text, fg, bg)   # returns the height\nmd_html(text)                        # returns HTML\n```\n"
+
+name = "built-in guide"
+text = guide
+if file_exists("README.MD") {
+    text = read_file("README.MD")
+    name = "README.MD"
+} else if file_exists("NOTES.MD") {
+    text = read_file("NOTES.MD")
+    name = "NOTES.MD"
+}
+
+w = fb_width()
+h = fb_height()
+margin = 64
+top = 72
+scroll = 0
+height = 0
+none = 0 - 1
+dirty = true
+running = true
+while running {
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 { running = false }
+        if k == 129 {
+            scroll = scroll - 48
+            dirty = true
+        }
+        if k == 130 {
+            scroll = scroll + 48
+            dirty = true
+        }
+        if k == 136 {
+            scroll = scroll - (h - 160)
+            dirty = true
+        }
+        if k == 137 {
+            scroll = scroll + (h - 160)
+            dirty = true
+        }
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }
+    if dirty {
+        maxs = height - (h - top - 40)
+        if scroll > maxs { scroll = maxs }
+        if scroll < 0 { scroll = 0 }
+        fb_clear(bg)
+        height = md_draw(margin, top - scroll, w - 2 * margin, text, fg, bg)
+        fb_rect(0, 0, w, 48, bar)
+        fb_text(margin, 16, "Markdown Viewer - " + name + "   (arrows / Page Up / Page Down to scroll, Esc to leave)", muted, bar)
+        fb_present()
+        dirty = false
+    }
+    sleep_ms(16)
+}

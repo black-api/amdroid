@@ -20,7 +20,7 @@ typedef struct { u32 x, y, w, h; } rect_t;
 #define C_SHADOW    0x030405
 #define C_TEXT      0xF2F5F7
 #define C_MUTED     0x9AA7B0
-#define C_DIM       0x63717B
+#define C_DIM       0x7F8D97
 #define C_GOOD      0x3DDC97
 #define C_WARN      0xFFB547
 
@@ -50,12 +50,53 @@ void        ui_wall_set(int i);
 const char *ui_wall_name(int i);
 u32         ui_wall_swatch(int i);          /* a colour to preview it with */
 
+/* ---- desktop preferences (prefs.c): the Dynamic Island, the dock, widgets, sound, display ----
+ * Settings and the Control Center change these, then call ui_prefs_changed(): the screen is
+ * repainted and the values are saved to AMDROID.CFG a moment later. */
+#define UI_NWIDGETS 5
+enum { WID_CLOCK, WID_SYSTEM, WID_CALENDAR, WID_NETWORK, WID_NOTES };
+enum { ISL_IDLE_NAME, ISL_IDLE_CLOCK, ISL_IDLE_STATS, ISL_IDLE_HIDDEN, ISL_IDLE_N };
+enum { ISL_STYLE_BLACK, ISL_STYLE_ACCENT, ISL_STYLE_OUTLINE, ISL_STYLE_N };
+enum { DOCK_RIGHT, DOCK_LEFT, DOCK_BOTTOM, DOCK_EDGE_N };
+typedef struct {
+    int magic;
+    /* Dynamic Island */
+    int isl_idle;            /* ISL_IDLE_*: what the resting pill shows */
+    int isl_size;            /* 0 small, 1 medium, 2 large */
+    int isl_style;           /* ISL_STYLE_* */
+    int isl_secs;            /* how long a notification stays: 2, 4, 8 or 12 */
+    int isl_snap;            /* dragging snaps to the screen edges and the centre */
+    int isl_x, isl_y;        /* centre x and top y of the pill; -1 = the default place */
+    int dnd;                 /* do not disturb: notifications go to the list, not the island */
+    /* Dock */
+    int dock_on, dock_edge, dock_size /* 0..2 */, dock_zoom /* 0 off, 1 low, 2 high */;
+    /* Widgets */
+    int wid_on;              /* master switch */
+    int wid_mask;            /* which widgets are shown (1 << WID_*) */
+    int wid_x[UI_NWIDGETS], wid_y[UI_NWIDGETS];   /* -1 = the automatic place */
+    /* Sound and display */
+    int volume;              /* 0..100 */
+    int brightness;          /* 20..100 */
+} ui_prefs_t;
+extern ui_prefs_t ui_prefs;
+void ui_prefs_changed(void);
+int  ui_mouse_held(void);                    /* the mouse buttons now down (bit 0 = left) */
+void ui_icon_scaled(int which, u32 x, u32 y, u32 size, u32 c);   /* an icon at 'size' px */
+void ui_settings_page(int page);             /* the page Settings shows next time it draws */
+void ui_prefs_live(void);                    /* a slider moved: apply and save, repaint nothing (brightness re-shows the screen) */
+
 struct app;
 /* ---- notifications: they appear in the Dynamic Island, one after another ----
  * app is the app a click on the notification opens (an index into ui_apps), or -1.
  * ui_msg_set(s) is a short form: a notification with just a title. */
 void        ui_notify(int app, const char *title, const char *body);
 void        ui_msg_set(const char *s);
+/* Everything that was announced, newest first (the Notification Center lists it). */
+#define UI_HIST_MAX 24
+int         ui_hist_count(void);
+int         ui_hist_get(int i, int *app, char *title, u32 tcap, char *body, u32 bcap, u64 *at);
+void        ui_hist_remove(int i);
+void        ui_hist_clear(void);
 int         ui_app_index(const struct app *app);   /* the index of an app in ui_apps, or -1 */
 /* Accounting (the GUI wraps every call into an app with these): CPU cycles used by an app's
  * code, and its heap blocks are tagged with owner app+1. */
@@ -70,6 +111,9 @@ void        ui_app_close(int a);            /* closes its window */
  * A window is drawn again when its app gets a key, a click or the wheel. An app whose
  * picture changes at any other time (a clock, a download: in its tick or its move) says so: */
 void ui_redraw(void);
+/* only this part of the window changed (screen coordinates, as the app drew it): a video
+ * picture redraws its box, not the whole window */
+void ui_redraw_rect(rect_t r);
 void ui_fill(rect_t r, u32 c);
 /* Animation helpers: t runs 0..255. ui_ease gives an ease-out curve, ui_lerp blends colours. */
 int  ui_ease(int t);
@@ -108,7 +152,7 @@ rect_t ui_button(rect_t b, u32 w);         /* a button at the top right of the b
 enum { UI_ICO_START, UI_ICO_SEARCH, UI_ICO_FILES, UI_ICO_TASKS,
        UI_ICO_SETTINGS, UI_ICO_ABOUT, UI_ICO_TERM,
        UI_ICO_CALC, UI_ICO_CLOCK, UI_ICO_NOTES, UI_ICO_NET, UI_ICO_BROWSER,
-       UI_ICO_STORE, UI_ICO_VIDEO };
+       UI_ICO_STORE, UI_ICO_VIDEO, UI_ICO_CC };
 
 /* ---- apps ----
  * open/close are optional (NULL). draw is called every frame with the

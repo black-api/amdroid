@@ -1,0 +1,9 @@
+id=MDVIEW
+name=Markdown Viewer
+version=1.0.0
+author=Am-Droid
+icon=4
+desc=Reads a Markdown file from the disk, formatted by the system's Markdown engine
+perms=framebuffer,input
+requires=amdroid1+
+entry=MAIN.FAS

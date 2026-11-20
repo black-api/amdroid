@@ -282,6 +282,8 @@ static int take_word(const char **p, char *out, int max){
 
 /* Fetches http://a.b.c.d:port/path into a new buffer (headers removed).
    Returns 0 and the body, or -1. */
+#define HTTP_FETCH_MAX (96u << 20)     /* the most `install`/`wget` will pull down */
+
 static int http_fetch(u32 ip, u16 port, const char *path, u8 **body, u32 *blen){
     int sock = tcp_connect(ip, port);
     if(sock < 0) return -1;
@@ -293,14 +295,25 @@ static int http_fetch(u32 ip, u16 port, const char *path, u8 **body, u32 *blen){
     const char *tail = " HTTP/1.0\r\n\r\n";
     for(const char *s2 = tail; *s2; s2++) req[n++] = *s2;
     if(tcp_send(sock, req, (u32)n) != 0){ tcp_close(sock); return -1; }
-    u32 cap = 256 * 1024, len = 0;
+    /* The buffer grows: `install` pulls whole files (a transcoded video is megabytes),
+     * so a fixed size would cut them off. */
+    u32 cap = 256 * 1024, len = 0, shown = 0;
     u8 *buf = kmalloc(cap);
     if(!buf){ tcp_close(sock); return -1; }
     for(;;){
-        if(len + 1024 > cap){ tcp_close(sock); kfree(buf); return -1; }
+        if(len + 1024 > cap){
+            if(cap >= HTTP_FETCH_MAX){ tcp_close(sock); kfree(buf); return -1; }
+            u32 nc = cap * 2;
+            u8 *nb = kmalloc(nc);
+            if(!nb){ tcp_close(sock); kfree(buf); return -1; }
+            memcpy(nb, buf, len);
+            kfree(buf);
+            buf = nb; cap = nc;
+        }
         int got = tcp_recv(sock, buf + len, 1024, 3000);
         if(got <= 0) break;
         len += (u32)got;
+        if(len >> 20 != shown){ shown = len >> 20; console_printf("  %u MB\n", shown); }
     }
     tcp_close(sock);
     /* skip the header: body starts after CRLFCRLF */

@@ -6,11 +6,15 @@
 #include "string.h"
 int web_youtube_reader(void);
 
-#define W_MAX_NODES 10000
-#define W_MAX_DEPTH 96
-
-static wnode_t pool[W_MAX_NODES];
+#define W_MAX_DEPTH 160
+/* Nodes come from chunks made as a page needs them (a long Wikipedia article has 30,000+). */
+#define POOL_CHUNK  8192
+#define POOL_CHUNKS 10
+static wnode_t *pool_chunks[POOL_CHUNKS];
 static int pool_n = 0;
+static int pool_rooted = 0;               /* the script collector scans the chunks */
+u32 web_css_gen = 1;
+int web_quirks = 0;
 
 wnode_t *web_root = NULL;
 char *web_css = NULL;
@@ -63,24 +67,43 @@ char web_title_buf[128];
 char *web_link_list[WEB_LINKS_MAX];
 char *web_css_ext = NULL;
 u32 web_css_ext_len = 0;
-#define SHEETS_MAX 12
+#define SHEETS_MAX 48
 static char *sheet_href[SHEETS_MAX];
 static int nsheets = 0;
 
 int web_stylesheet_count(void){ return nsheets; }
 const char *web_stylesheet(int i){ return i >= 0 && i < nsheets ? sheet_href[i] : NULL; }
 
-/* Adds a fetched stylesheet; it counts before the page's own <style> text. */
+/* Fetched stylesheets, kept by their place in the page: they may arrive in any order, but
+ * they cascade in document order. They count before the page's own <style> text. */
+static char *sheet_text[SHEETS_MAX];
+static u32 sheet_len[SHEETS_MAX];
+static int sheet_next = 0;
+
+/* Sheet i's text (NULL while it has not come). css.c parses each on its own. */
+const char *web_sheet_text(int i, u32 *len){
+    if(i < 0 || i >= SHEETS_MAX || !sheet_text[i]) return NULL;
+    *len = sheet_len[i];
+    return sheet_text[i];
+}
+int web_sheet_slots(void){ return SHEETS_MAX; }
+u32 web_sheets_gen = 1;              /* bumped when a sheet arrives (the rest are parsed already) */
+
+static void rebuild_ext_css(void){ web_sheets_gen++; }
+
+void web_add_css_at(int idx, const char *css, u32 len){
+    if(idx < 0 || idx >= SHEETS_MAX || sheet_text[idx]) return;
+    char *c = kmalloc(len + 1);
+    if(!c) return;
+    memcpy(c, css, len);
+    c[len] = 0;
+    sheet_text[idx] = c; sheet_len[idx] = len;
+    rebuild_ext_css();
+}
+/* Adds the next stylesheet in order. */
 void web_add_css(const char *css, u32 len){
-    char *grown = kmalloc(web_css_ext_len + len + 2);
-    if(!grown) return;
-    if(web_css_ext) memcpy(grown, web_css_ext, web_css_ext_len);
-    memcpy(grown + web_css_ext_len, css, len);
-    grown[web_css_ext_len + len] = '\n';
-    grown[web_css_ext_len + len + 1] = 0;
-    if(web_css_ext) kfree(web_css_ext);
-    web_css_ext = grown;
-    web_css_ext_len += len + 1;
+    while(sheet_next < SHEETS_MAX && sheet_text[sheet_next]) sheet_next++;
+    web_add_css_at(sheet_next, css, len);
 }
 int web_nlinks = 0;
 
@@ -93,18 +116,34 @@ static char *dup_n(const char *s, u32 n){
 }
 
 wnode_t *web_new_node(void){
-    if(pool_n >= W_MAX_NODES) return NULL;
-    wnode_t *n = &pool[pool_n++];
+    int c = pool_n / POOL_CHUNK, i = pool_n % POOL_CHUNK;
+    if(c >= POOL_CHUNKS) return NULL;
+    if(!pool_chunks[c]){
+        pool_chunks[c] = kmalloc(sizeof(wnode_t) * POOL_CHUNK);
+        if(!pool_chunks[c]) return NULL;
+        memset(pool_chunks[c], 0, sizeof(wnode_t) * POOL_CHUNK);
+        if(pool_rooted) js_gc_root(pool_chunks[c], sizeof(wnode_t) * POOL_CHUNK);
+    }
+    pool_n++;
+    wnode_t *n = &pool_chunks[c][i];
     memset(n, 0, sizeof *n);
     return n;
 }
 
-/* The node pool, for the garbage collector: it holds pointers to script objects. */
-void web_pool_range(void **p, u32 *n){ *p = pool; *n = sizeof pool; }
+/* The node pool, for the garbage collector: nodes hold pointers to script objects. */
+void web_pool_roots(void){
+    for(int c = 0; c < POOL_CHUNKS; c++) if(pool_chunks[c]) js_gc_root(pool_chunks[c], sizeof(wnode_t) * POOL_CHUNK);
+    pool_rooted = 1;
+}
 
 void web_nodes_reset(void){
+    /* clear what was used (the collector scans the chunks, old pointers must go) */
+    for(int c = 0; c * POOL_CHUNK < pool_n && c < POOL_CHUNKS; c++){
+        int used = pool_n - c * POOL_CHUNK;
+        if(used > POOL_CHUNK) used = POOL_CHUNK;
+        if(pool_chunks[c]) memset(pool_chunks[c], 0, sizeof(wnode_t) * (u32)used);
+    }
     pool_n = 0;
-    memset(pool, 0, sizeof pool);
 }
 
 static void append_child(wnode_t *parent, wnode_t *n){
@@ -234,9 +273,11 @@ static u32 read_tag(const char *html, u32 len, u32 i, wnode_t *n, int *self_clos
     while(i < len && html[i] != '>'){
         if(html[i] == '/'){ *self_close = 1; i++; continue; }
         if(is_ws(html[i])){ i++; continue; }
-        char an[24]; u32 an_n = 0;
-        while(i < len && !is_ws(html[i]) && html[i] != '=' && html[i] != '>' && html[i] != '/' && an_n + 1 < sizeof an)
-            an[an_n++] = (char)lower(html[i++]);
+        char an[64]; u32 an_n = 0;
+        while(i < len && !is_ws(html[i]) && html[i] != '=' && html[i] != '>' && html[i] != '/'){
+            if(an_n + 1 < sizeof an) an[an_n++] = (char)lower(html[i]);
+            i++;                                     /* a longer name is cut, not split in two */
+        }
         an[an_n] = 0;
         while(i < len && is_ws(html[i])) i++;
         if(i < len && html[i] == '='){
@@ -287,6 +328,31 @@ static void add_title(const char *s, u32 len){
 /* The HTML tokenizer and tree builder. Appends the parsed nodes under root.
  * When fragment is set (innerHTML), <title>/<style>/<script>/<link> are not
  * collected or executed — only element and text nodes are built. */
+static int saw_doctype = 0;
+
+static int in_list(const char *t, const char *const *l){
+    for(int i = 0; l[i]; i++) if(name_eq(t, l[i])) return 1;
+    return 0;
+}
+/* Start tags that close an open <p> (HTML's "closes a p element"). */
+static const char *const closes_p[] = { "address", "article", "aside", "blockquote", "center", "details", "dialog",
+    "dir", "div", "dl", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hgroup", "hr", "main", "menu", "nav", "ol", "p", "pre", "section", "summary", "table", "ul",
+    "listing", "xmp", "plaintext", "search", 0 };
+/* Where looking for an open element to close stops. */
+static const char *const scope_stop[] = { "table", "td", "th", "caption", "html", "#root", "template", "object",
+    "marquee", "applet", "button", 0 };
+
+/* Index of the nearest open `tag` above the scope boundary, or -1. */
+static int open_in_scope(wnode_t **stack, int sp, const char *tag, const char *const *extra_stop){
+    for(int k = sp - 1; k > 0; k--){
+        if(name_eq(stack[k]->tag, tag)) return k;
+        if(in_list(stack[k]->tag, scope_stop)) return -1;
+        if(extra_stop && in_list(stack[k]->tag, extra_stop)) return -1;
+    }
+    return -1;
+}
+
 static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
     wnode_t *stack[W_MAX_DEPTH];
     int sp = 0;
@@ -315,6 +381,19 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
             continue;
         }
         if(i + 1 < len && (html[i+1] == '!' || html[i+1] == '?')){
+            /* <!DOCTYPE html> is a standards-mode page; anything else (or none) is quirks */
+            if(!fragment && i + 9 < len && lower(html[i+2]) == 'd' && lower(html[i+3]) == 'o' && lower(html[i+4]) == 'c'){
+                u32 k = i + 9;
+                while(k < len && is_ws(html[k])) k++;
+                int html5 = k + 4 <= len && lower(html[k]) == 'h' && lower(html[k+1]) == 't' && lower(html[k+2]) == 'm' && lower(html[k+3]) == 'l';
+                int strictish = 0;
+                for(u32 q = k; q + 6 < len && html[q] != '>'; q++)
+                    if((html[q] == 'S' || html[q] == 's') && (html[q+1] == 't' || html[q+1] == 'T') && (html[q+2] == 'r' || html[q+2] == 'R')) strictish = 1;
+                for(u32 q = k; q + 4 < len && html[q] != '>'; q++)
+                    if(html[q] == 'h' && html[q+1] == 't' && html[q+2] == 't' && html[q+3] == 'p') strictish = 1;   /* has a system id */
+                web_quirks = !(html5 || strictish);
+                saw_doctype = 1;
+            }
             while(i < len && html[i] != '>') i++;
             i++;
             continue;
@@ -332,25 +411,102 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
         i = read_tag(html, len, i + 1, n, &self_close, &closing);
 
         if(!fragment && !closing && name_eq(n->tag, "link") && n->css_link == 1 && n->href && nsheets < SHEETS_MAX && !web_youtube_reader()){
+            int dup = 0;                                     /* the same sheet linked twice counts once */
+            for(int k = 0; k < nsheets; k++) if(strcmp(sheet_href[k], n->href) == 0) dup = 1;
             u32 hl = (u32)strlen(n->href);
-            char *h = kmalloc(hl + 1);
+            char *h = dup ? NULL : kmalloc(hl + 1);
             if(h){ memcpy(h, n->href, hl + 1); sheet_href[nsheets++] = h; }
         }
         if(!closing && name_eq(n->tag, "img")){                 /* also innerHTML: scripts add images */
             const char *src = wnode_attr_get(n, "src");
+            /* lazy loading: the real address waits in data-src while src is a placeholder */
+            const char *lazy = wnode_attr_get(n, "data-src");
+            if(!lazy) lazy = wnode_attr_get(n, "data-lazy-src");
+            if(!lazy) lazy = wnode_attr_get(n, "data-original");
+            if(lazy && lazy[0] && (!src || !src[0] || (src[0] == 'd' && src[1] == 'a' && src[2] == 't' && src[3] == 'a' && src[4] == ':'))) src = lazy;
+            if((!src || !src[0])){
+                /* only a srcset: its first candidate */
+                const char *ss = wnode_attr_get(n, "srcset");
+                if(!ss) ss = wnode_attr_get(n, "data-srcset");
+                if(ss && ss[0]){
+                    char first[512]; u32 k = 0;
+                    while(*ss == ' ') ss++;
+                    while(ss[k] && ss[k] != ' ' && ss[k] != ',' && k + 1 < sizeof first){ first[k] = ss[k]; k++; }
+                    first[k] = 0;
+                    if(k) n->img = img_register(first) + 1;
+                    src = NULL;
+                }
+            }
             if(src && src[0]) n->img = img_register(src) + 1;   /* 0 when the table is full */
         }
         if(closing){
-            for(int k = sp - 1; k > 0; k--)
+            /* </p> and </li> only close inside their scope; others close the nearest match,
+               but never past the table or cell they are in */
+            static const char *const cell_stop[] = { "td", "th", "table", 0 };
+            int is_cellish = name_eq(n->tag, "td") || name_eq(n->tag, "th") || name_eq(n->tag, "tr") ||
+                             name_eq(n->tag, "table") || name_eq(n->tag, "tbody") || name_eq(n->tag, "thead") || name_eq(n->tag, "tfoot");
+            for(int k = sp - 1; k > 0; k--){
                 if(name_eq(stack[k]->tag, n->tag)){ sp = k; break; }
+                if(!is_cellish && in_list(stack[k]->tag, cell_stop)) break;
+                if(name_eq(n->tag, "td") || name_eq(n->tag, "th")){ if(name_eq(stack[k]->tag, "table")) break; }
+            }
             continue;
         }
-        /* implied end tags: a new <p> or <li> closes the open one */
-        if(sp > 1 && ((name_eq(n->tag, "p") && name_eq(stack[sp-1]->tag, "p")) ||
-                      (name_eq(n->tag, "li") && name_eq(stack[sp-1]->tag, "li")) ||
-                      (name_eq(n->tag, "tr") && name_eq(stack[sp-1]->tag, "tr")) ||
-                      (name_eq(n->tag, "td") && (name_eq(stack[sp-1]->tag, "td") || name_eq(stack[sp-1]->tag, "th")))))
-            sp--;
+        /* implied end tags */
+        if(sp > 1){
+            const char *t = n->tag;
+            if(in_list(t, closes_p)){
+                int k = open_in_scope(stack, sp, "p", NULL);
+                if(k > 0) sp = k;
+            }
+            if(name_eq(t, "li")){
+                static const char *const li_stop[] = { "ul", "ol", "menu", 0 };
+                int k = open_in_scope(stack, sp, "li", li_stop);
+                if(k > 0) sp = k;
+            } else if(name_eq(t, "dt") || name_eq(t, "dd")){
+                static const char *const d_stop[] = { "dl", 0 };
+                int k = open_in_scope(stack, sp, "dd", d_stop), k2 = open_in_scope(stack, sp, "dt", d_stop);
+                if(k2 > k) k = k2;
+                if(k > 0) sp = k;
+            } else if(name_eq(t, "option") || name_eq(t, "optgroup")){
+                if(name_eq(stack[sp-1]->tag, "option")) sp--;
+                if(name_eq(t, "optgroup") && sp > 1 && name_eq(stack[sp-1]->tag, "optgroup")) sp--;
+            } else if(name_eq(t, "td") || name_eq(t, "th")){
+                /* close the open cell of this row (and anything left open inside it) */
+                for(int k = sp - 1; k > 0; k--){
+                    if(name_eq(stack[k]->tag, "td") || name_eq(stack[k]->tag, "th")){ sp = k; break; }
+                    if(name_eq(stack[k]->tag, "tr") || name_eq(stack[k]->tag, "table")) break;
+                }
+            } else if(name_eq(t, "tr")){
+                for(int k = sp - 1; k > 0; k--){
+                    if(name_eq(stack[k]->tag, "tr")){ sp = k; break; }
+                    if(name_eq(stack[k]->tag, "table")) break;
+                }
+            } else if(name_eq(t, "tbody") || name_eq(t, "thead") || name_eq(t, "tfoot")){
+                for(int k = sp - 1; k > 0; k--){
+                    if(name_eq(stack[k]->tag, "tbody") || name_eq(stack[k]->tag, "thead") || name_eq(stack[k]->tag, "tfoot")){ sp = k; break; }
+                    if(name_eq(stack[k]->tag, "table")) break;
+                }
+            } else if(name_eq(t, "a")){
+                /* <a> inside an open <a> closes it */
+                for(int k = sp - 1; k > 0; k--){
+                    if(name_eq(stack[k]->tag, "a")){ sp = k; break; }
+                    if(in_list(stack[k]->tag, scope_stop)) break;
+                }
+            }
+            /* a body or html tag that comes late: its attributes go to the one we have */
+        }
+        if(name_eq(n->tag, "textarea") && !self_close){
+            /* raw text: the content is the box's text, not markup */
+            u32 end = find_end_tag(html, len, i, "textarea");
+            if(sp < W_MAX_DEPTH) append_child(stack[sp - 1], n);
+            wnode_t *t = web_new_node();
+            if(t && end > i){ t->text = 1; t->txt = dup_n(html + i, end - i); t->tlen = end - i; append_child(n, t); }
+            i = end;
+            while(i < len && html[i] != '>') i++;
+            i++;
+            continue;
+        }
 
         if(name_eq(n->tag, "title") || name_eq(n->tag, "style") || name_eq(n->tag, "script")){
             u32 end = find_end_tag(html, len, i, n->tag);
@@ -368,6 +524,7 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
                     if(web_css) kfree(web_css);
                     web_css = grown;
                     web_css_len += add + 1;
+                    web_css_gen++;
                 }
             }
             if(name_eq(n->tag, "script") && !n->skip && web_nscripts < WEB_SCRIPTS_MAX &&
@@ -400,6 +557,9 @@ static void parse_into(const char *html, u32 len, wnode_t *root, int fragment){
 int web_load(const char *html, u32 len){
     web_free();
     web_nodes_reset();
+    web_quirks = 1;
+    saw_doctype = 0;
+    web_css_gen++;
     web_root = web_new_node();
     if(!web_root) return -1;
     web_root->text = 0;
@@ -425,6 +585,9 @@ void web_free(void){
     web_css_len = 0;
     if(web_css_ext){ kfree(web_css_ext); web_css_ext = NULL; }
     web_css_ext_len = 0;
+    web_css_gen++;
+    for(int i = 0; i < SHEETS_MAX; i++){ if(sheet_text[i]) kfree(sheet_text[i]); sheet_text[i] = NULL; sheet_len[i] = 0; }
+    sheet_next = 0;
     for(int i = 0; i < nsheets; i++){ kfree(sheet_href[i]); sheet_href[i] = NULL; }
     nsheets = 0;
     web_images_reset();

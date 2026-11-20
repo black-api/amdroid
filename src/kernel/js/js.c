@@ -39,6 +39,14 @@ static int mover = 0;
 static hdr_t **starts = NULL;
 static u32 nstarts = 0, starts_cap = 0;   /* kept between collections (some hosts never free) */
 extern char stack_top[];          /* the top of the kernel stack (boot.asm) */
+enum { CS_NEW, CS_SUSPENDED, CS_RUNNING, CS_DONE };
+enum { CI_NEXT, CI_THROW, CI_RETURN };             /* what a resume carries in */
+enum { CO_YIELD, CO_RETURN, CO_THROW, CO_AWAIT };  /* why it switched back out */
+/* the coroutine stacks the collector has to scan (see "coroutines" further down) */
+static uintptr_t coro_scan_top(void);
+static void coro_scan_chain(void);
+static void coro_scan_suspended(void);
+static void coro_sweep(void);
 /* Optional runtime override of the stack top the GC scans up to. Left 0 in the
  * kernel and Husser (they use the stack_top symbol); a host/test build that has
  * no such symbol at a fixed address sets it with js_set_stack_top(). */
@@ -135,6 +143,21 @@ static void mark_addr(uintptr_t w){
     else mover = 1;
 }
 
+/* 1 when p's block survived the mark phase (or is not in the script heap at all). */
+static int blk_marked(void *p){
+    uintptr_t w = (uintptr_t)p;
+    if(w < (uintptr_t)arena || w >= (uintptr_t)arena_end) return 1;
+    int lo = 0, hi = (int)nstarts - 1, best = -1;
+    while(lo <= hi){
+        int mid = (lo + hi) / 2;
+        if((uintptr_t)starts[mid] <= w){ best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    if(best < 0) return 0;
+    hdr_t *h = starts[best];
+    return (h->flags & F_USED) && (h->flags & F_MARK);
+}
+
 static void scan_words(const void *p, u32 bytes){
     const uintptr_t *w = (const uintptr_t *)p;
     for(u32 i = 0; i < bytes / sizeof(uintptr_t); i++) mark_addr(w[i]);
@@ -181,12 +204,14 @@ static void gc(void){
     for(int i = 0; i < 6; i++) mark_addr(regs[i]);
     uintptr_t sp;
     __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
-    uintptr_t top = js_stack_top ? js_stack_top : (uintptr_t)stack_top;
+    uintptr_t top = coro_scan_top();
     for(uintptr_t a = sp & ~(uintptr_t)7; a < top; a += 8)
         mark_addr(*(uintptr_t *)a);
+    coro_scan_chain();                /* the stacks this one was resumed from */
     for(int i = 0; i < nroots; i++) scan_words(roots[i].p, roots[i].n);
     gc_scan_tokens();
     drain();
+    coro_scan_suspended();            /* a suspended stack is a root while its generator is */
     /* if the mark stack overflowed, re-scan the marked blocks until nothing new turns up */
     while(mover){
         mover = 0;
@@ -195,6 +220,7 @@ static void gc(void){
             if(h->flags & F_MARK){ scan_words((char *)h + HDR_SZ, h->size); drain(); }
         }
     }
+    coro_sweep();
     /* sweep: free the unmarked blocks, merging neighbours, and rebuild the free list */
     free_list = NULL;
     hdr_t **tail = &free_list;
@@ -298,6 +324,9 @@ js_val_t js_bool(int b){ js_val_t v = js_undef(); v.t = JS_BOOL; v.b = b ? 1 : 0
 js_val_t js_num(double n){ js_val_t v = js_undef(); v.t = JS_NUM; v.n = n; return v; }
 js_val_t js_str(const char *s){ js_val_t v = js_undef(); v.t = JS_STR; v.s = s; return v; }
 js_val_t js_objv(js_obj_t *o){ js_val_t v = js_undef(); v.t = JS_OBJ; v.o = o; return v; }
+static const char *jstrdup(const char *s, u32 n);
+/* a string the script heap owns (js_str only points at s) */
+js_val_t js_str_copy(const char *s, u32 n){ return js_str(jstrdup(s, n)); }
 
 static double nan_value(void){ volatile double z = 0; return z / z; }
 
@@ -329,6 +358,7 @@ struct js_obj {
     jsnode_t *fdecl;          /* script functions */
     env_t *closure;
     js_obj_t *parent;         /* a class's superclass (constructor) */
+    jsnode_t *cnode;          /* a class's N_CLASS node (its instance fields) */
     js_obj_t *home;           /* a method's class prototype (for super) */
     js_native_fn native;
     void *ctx;
@@ -339,7 +369,7 @@ struct js_obj {
 };
 
 /* kinds of built-in objects (js_obj.kind) */
-enum { K_PLAIN, K_DATE, K_MAP, K_SET, K_WEAKMAP, K_PROMISE, K_TYPED, K_BUFFER, K_ERROR, K_BOOL, K_NUMBER, K_STRING, K_ITER };
+enum { K_PLAIN, K_DATE, K_MAP, K_SET, K_WEAKMAP, K_PROMISE, K_TYPED, K_BUFFER, K_ERROR, K_BOOL, K_NUMBER, K_STRING, K_ITER, K_CORO, K_PROXY };
 static void typed_set(js_obj_t *o, const char *name, js_val_t v);
 static js_obj_t *for_in_keys(js_val_t v);
 static const char *uncaught_text(void);
@@ -442,6 +472,8 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
 /* Looks a name up on the object and its prototypes. */
 static int is_str(const char *a, const char *b);
 static int fn_is_arrow(js_obj_t *o);
+static int fn_arity(js_obj_t *o);
+static const char *fn_name_of(js_obj_t *o);
 js_val_t js_get(js_obj_t *o, const char *name){
     js_val_t out = js_undef();
     if(o->is_func && name[0] == 'p' && strcmp(name, "prototype") == 0 && !find_own(o, "prototype") &&
@@ -453,6 +485,13 @@ js_val_t js_get(js_obj_t *o, const char *name){
         js_set(o, "prototype", js_objv(pr));
         find_own(o, "prototype")->flags = PF_HIDDEN;
         return js_objv(pr);
+    }
+    /* a script function's own length and name (libraries read both to detect shapes);
+     * the name is checked first so an ordinary property get costs nothing extra */
+    if((name[0] == 'l' || name[0] == 'n') && o->is_func && o->fdecl && !o->hget){
+        int want_len = strcmp(name, "length") == 0;
+        if((want_len || strcmp(name, "name") == 0) && !find_own(o, name))
+            return want_len ? js_num(fn_arity(o)) : js_str(fn_name_of(o));
     }
     for(js_obj_t *x = o; x; x = x->proto){
         if(x->hget && x->hget(x, name, &out)) return out;
@@ -471,7 +510,12 @@ js_val_t js_get(js_obj_t *o, const char *name){
     return js_undef();
 }
 
+static int proxy_has(js_obj_t *o, const char *name);
+static js_obj_t *proxy_own_keys(js_obj_t *o);
+static int proxy_delete(js_obj_t *o, const char *name);
+
 static int has_prop(js_obj_t *o, const char *name){
+    if(o->kind == K_PROXY) return proxy_has(o, name);
     for(js_obj_t *x = o; x; x = x->proto){
         if(find_own(x, name)) return 1;
         if(x->is_array){
@@ -680,12 +724,14 @@ static u32 lex_number(const char *src, u32 len, u32 i, double *out){
         return i - s;
     }
     char tmp[64]; u32 k = 0;
+    int seen_dot = 0, seen_e = 0;         /* 1..toString is the number 1. then .toString */
     while(i < len && k < sizeof tmp - 1){
         char c = src[i];
         if(c >= '0' && c <= '9'){ tmp[k++] = c; i++; continue; }
         if(c == '_'){ i++; continue; }
-        if(c == '.'){ tmp[k++] = c; i++; continue; }
-        if((c == 'e' || c == 'E')){
+        if(c == '.'){ if(seen_dot || seen_e) break; seen_dot = 1; tmp[k++] = c; i++; continue; }
+        if((c == 'e' || c == 'E') && !seen_e){
+            seen_e = 1;
             tmp[k++] = c; i++;
             if(i < len && (src[i] == '+' || src[i] == '-')) tmp[k++] = src[i++];
             continue;
@@ -708,7 +754,83 @@ static int value_before(const tok_t *t){
         for(int i = 0; kw[i]; i++) if(strcmp(t->s, kw[i]) == 0) return 0;
         return 1;
     }
-    if(t->t == T_PUNCT) return strcmp(t->s, ")") == 0 || strcmp(t->s, "]") == 0 || strcmp(t->s, "}") == 0;
+    /* after "}" a '/' starts a regex (try{}catch(e){}/x/.test(s)): the end of a block is far more
+     * common than an object or function literal that is divided */
+    if(t->t == T_PUNCT) return strcmp(t->s, ")") == 0 || strcmp(t->s, "]") == 0;
+    return 0;
+}
+
+/* Where a template literal's text ends: i is just after the opening backtick, the result just
+ * after the closing one. Braces only count inside ${...}, where strings and nested templates
+ * are skipped whole (`}` is a template, `${a ? "}" : `x`}` is one too). */
+static u32 skip_template(const char *src, u32 len, u32 i);
+/* i is just after "${": returns the index of the "}" that closes it (or len). Strings, nested
+ * templates, comments and regex literals are skipped whole (/"/g has a quote in it). */
+static u32 tpl_expr_end(const char *src, u32 len, u32 i){
+    int depth = 1;
+    char prev = '(';                       /* the last significant character: decides regex or divide */
+    while(i < len){
+        char d = src[i];
+        if(d == ' ' || d == '\t' || d == '\n' || d == '\r'){ i++; continue; }
+        if(d == '\\'){ i += 2; continue; }
+        if(d == '/' && i + 1 < len && src[i + 1] == '/'){ while(i < len && src[i] != '\n') i++; continue; }
+        if(d == '/' && i + 1 < len && src[i + 1] == '*'){
+            i += 2; while(i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i += 2; continue;
+        }
+        if(d == '/' && (prev == '(' || prev == ',' || prev == '=' || prev == ':' || prev == '[' || prev == '!' ||
+                        prev == '&' || prev == '|' || prev == '?' || prev == '{' || prev == '}' || prev == ';' ||
+                        prev == '+' || prev == '-' || prev == '*' || prev == '%' || prev == '<' || prev == '>' ||
+                        prev == '~' || prev == '^')){
+            i++;                           /* a regex literal */
+            int cls = 0;
+            while(i < len && src[i] != '\n' && (src[i] != '/' || cls)){
+                if(src[i] == '\\') i++;
+                else if(src[i] == '[') cls = 1;
+                else if(src[i] == ']') cls = 0;
+                i++;
+            }
+            i++; prev = 'a'; continue;
+        }
+        if(d == '{') depth++;
+        else if(d == '}'){ if(--depth == 0) return i; }
+        else if(d == '"' || d == '\''){
+            i++;
+            while(i < len && src[i] != d && src[i] != '\n'){ if(src[i] == '\\') i++; i++; }
+            i++; prev = 'a'; continue;
+        } else if(d == '`'){ i = skip_template(src, len, i + 1); prev = 'a'; continue; }
+        prev = d;
+        i++;
+    }
+    return len;
+}
+static u32 skip_template(const char *src, u32 len, u32 i){
+    while(i < len){
+        char c = src[i];
+        if(c == '\\'){ i += 2; continue; }
+        if(c == '`') return i + 1;
+        if(c == '$' && i + 1 < len && src[i + 1] == '{'){ i = tpl_expr_end(src, len, i + 2) + 1; continue; }
+        i++;
+    }
+    return len;
+}
+
+/* A ')' that closes the head of if/for/while/with is followed by a statement, so a '/' after it
+ * starts a regex literal (for(let e in n)/^on/.test(e)), not a division. */
+static int stmt_head_close(u32 k){
+    const tok_t *t = &toks[k];
+    if(t->t != T_PUNCT || strcmp(t->s, ")") != 0) return 0;
+    int depth = 0;
+    for(u32 j = k + 1; j-- > 0; ){
+        const tok_t *u = &toks[j];
+        if(u->t != T_PUNCT) continue;
+        if(strcmp(u->s, ")") == 0) depth++;
+        else if(strcmp(u->s, "(") == 0 && --depth == 0){
+            if(j == 0 || toks[j - 1].t != T_ID) return 0;
+            const char *w = toks[j - 1].s;
+            return !strcmp(w, "if") || !strcmp(w, "for") || !strcmp(w, "while") || !strcmp(w, "with");
+        }
+    }
     return 0;
 }
 
@@ -837,8 +959,11 @@ static void lex(const char *src, u32 len){
             ntok++;
             continue;
         }
-        if(is_idc(c)){
+        if(is_idc(c) || (c == '#' && i + 1 < len && is_idc(src[i+1]) && !(src[i+1] >= '0' && src[i+1] <= '9'))){
+            /* a private class name (#x) is lexed as the identifier "#x": '#' cannot occur
+             * in an ordinary property name, so it needs no separate namespace */
             u32 s = i;
+            if(c == '#') i++;
             while(i < len && is_idc(src[i])) i++;
             t->t = T_ID;
             t->s = intern(src + s, i - s);
@@ -872,20 +997,14 @@ static void lex(const char *src, u32 len){
         if(c == '`'){
             /* a template literal: its raw text (with ${...} parts) is parsed later */
             u32 s0 = ++i;
-            int tdepth = 0;
-            while(i < len && !(src[i] == '`' && tdepth == 0)){
-                if(src[i] == '\\' && i + 1 < len){ i += 2; continue; }
-                if(src[i] == '{') tdepth++;
-                if(src[i] == '}') tdepth--;
-                i++;
-            }
+            i = skip_template(src, len, i);
+            if(i > len) i = len;
             t->t = T_TEMPLATE;
-            t->s = jstrdup(src + s0, i - s0);
-            i++;
+            t->s = jstrdup(src + s0, (i - s0) - ((i > s0 && src[i - 1] == '`') ? 1 : 0));
             ntok++;
             continue;
         }
-        if(c == '/' && !(ntok > 0 && value_before(&toks[ntok - 1]))){
+        if(c == '/' && !(ntok > 0 && value_before(&toks[ntok - 1]) && !stmt_head_close(ntok - 1))){
             /* a regex literal: /pattern/flags */
             u32 s = ++i;
             int in_class = 0;
@@ -922,6 +1041,7 @@ static void lex(const char *src, u32 len){
             t->t = T_PUNCT; t->s = "?."; i += 2; matched = 1;
         }
         for(int k = 0; !matched && ops[k]; k++){
+            if(ops[k][0] != src[i]) continue;        /* most operators fail on the first byte */
             u32 n = (u32)strlen(ops[k]);
             if(i + n <= len && memcmp(src + i, ops[k], n) == 0){
                 t->t = T_PUNCT;
@@ -953,20 +1073,27 @@ enum {
     N_NUM = 1, N_STR, N_IDENT, N_TRUE, N_FALSE, N_NULL, N_UNDEF, N_THIS, N_SUPER, N_ARRAY, N_OBJECT,
     N_FUNC, N_MEMBER, N_CALL, N_NEW, N_UNARY, N_BINARY, N_LOGIC, N_ASSIGN, N_COND, N_REGEX, N_CLASS,
     N_DECL, N_VAR, N_EXPR, N_IF, N_WHILE, N_DO, N_FOR, N_FORIN, N_RETURN, N_BLOCK, N_FUNCDECL,
-    N_BREAK, N_CONTINUE, N_EMPTY, N_THROW, N_TRY, N_SWITCH, N_CASE, N_SPREAD, N_SEQ, N_LABEL
+    N_BREAK, N_CONTINUE, N_EMPTY, N_THROW, N_TRY, N_SWITCH, N_CASE, N_SPREAD, N_SEQ, N_LABEL,
+    N_TAGGED
 };
 enum {
     OP_NONE, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_SEQ, OP_SNE,
     OP_LT, OP_GT, OP_LE, OP_GE, OP_AND, OP_OR, OP_NOT, OP_NEG, OP_TYPEOF, OP_POS,
     OP_SET, OP_ADDSET, OP_SUBSET, OP_INSTANCEOF, OP_IN, OP_DELETE, OP_VOID, OP_POW, OP_NULLISH,
     OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR, OP_USHR, OP_BNOT,
+    OP_AWAIT, OP_YIELD, OP_YIELD_STAR,
     OP_COMPOUND = 100     /* N_ASSIGN op = OP_COMPOUND + binary op: x op= y */
 };
+
+/* N_FUNC/N_CLASS member flags, in jsnode.fflags */
+#define FN_GEN    1u      /* function* */
+#define FN_ASYNC  2u      /* async function */
+#define FN_STATIC 4u      /* a static class member */
 
 struct jsnode {
     u8 k, computed, arrow, hoisted;   /* hoisted: functions' hoist list is computed */
     u16 op;
-    u16 spare;
+    u16 fflags;
     u32 lazy_len;                     /* functions: body source not parsed yet (bytes) */
     u32 at;                           /* source offset (for error positions; uses padding) */
     union {
@@ -1012,6 +1139,7 @@ static void expect(const char *p){
 
 static jsnode_t *expression(void);
 static jsnode_t *assignment(void);
+static jsnode_t *class_decl(void);
 static jsnode_t *statement(void);
 static jsnode_t *block_body(void);
 
@@ -1079,6 +1207,9 @@ static void parse_params(jsnode_t *f){
  * call few of them. cur_src is the text the current tokens came from (it must outlive
  * the functions); lazy_on is off where that text is temporary. */
 static int lazy_on = 0;
+/* The function whose body is being parsed: `yield` is only an operator inside a
+ * generator and `await` only inside an async function (elsewhere both are names). */
+static u16 cur_fn_flags = 0;
 static int skip_body(jsnode_t *f){
     if(!lazy_on || !cur_src || !tis("{")) return 0;
     int depth = 0, k = ti;
@@ -1096,22 +1227,32 @@ static int skip_body(jsnode_t *f){
     return 1;
 }
 
-static jsnode_t *function_rest(const char *name){
+static int no_in;         /* (defined below) */
+static jsnode_t *function_rest_f(const char *name, u16 ff){
     jsnode_t *f = node(N_FUNC);
     f->str = name;
+    f->fflags = ff;
     expect("(");
     parse_params(f);
+    u16 saved = cur_fn_flags;
+    cur_fn_flags = ff;
     if(!skip_body(f)) f->a = block_body();
+    cur_fn_flags = saved;
     return f;
 }
+static jsnode_t *function_rest(const char *name){ return function_rest_f(name, 0); }
 
 static jsnode_t *arrow_body(jsnode_t *f){
     f->arrow = 1;
+    u16 saved = cur_fn_flags;
+    if(f->fflags & FN_ASYNC) cur_fn_flags = FN_ASYNC;
     if(tis("{")){
         if(!skip_body(f)) f->a = block_body();
+        cur_fn_flags = saved;
     } else {
         jsnode_t *ret = node(N_RETURN);
         ret->a = assignment();
+        cur_fn_flags = saved;
         jsnode_t *b = node(N_BLOCK);
         b->list = ret;
         f->a = b;
@@ -1148,12 +1289,7 @@ static jsnode_t *template_node(const char *raw){
             res = res ? ({ jsnode_t *b = node(N_BINARY); b->op = OP_ADD; b->a = res; b->b = lit; b; }) : lit;
             cn = 0;
             /* the expression up to its matching brace */
-            u32 j = i + 2, depth = 1, es = j;
-            while(j < n && depth > 0){
-                if(raw[j] == '{') depth++;
-                else if(raw[j] == '}') depth--;
-                if(depth > 0) j++;
-            }
+            u32 es = i + 2, j = tpl_expr_end(raw, n, es);
             jsnode_t *e = parse_sub(raw + es, j - es);
             jsnode_t *b = node(N_BINARY);
             b->op = OP_ADD;
@@ -1187,7 +1323,58 @@ static jsnode_t *template_node(const char *raw){
     return b;
 }
 
+/* tag`a${x}b`: the tag is called with the array of literal pieces (plus a .raw copy of
+ * them, unescaped) and then one argument per substitution. */
+static jsnode_t *tagged_node(jsnode_t *tag, const char *raw){
+    u32 n = (u32)strlen(raw);
+    jsnode_t *t = node(N_TAGGED);
+    t->a = tag;
+    t->b = node(N_ARRAY);           /* cooked pieces */
+    t->c = node(N_ARRAY);           /* raw pieces */
+    jsnode_t *lastc = NULL, *lastr = NULL, *laste = NULL;
+    char *cooked = jalloc(n + 1);
+    u32 i = 0;
+    for(;;){
+        u32 cn = 0, s0 = i;
+        while(i < n && !(raw[i] == '$' && i + 1 < n && raw[i+1] == '{')){
+            if(raw[i] == '\\' && i + 1 < n){
+                char e = raw[i+1];
+                cooked[cn++] = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e;
+                i += 2;
+                continue;
+            }
+            cooked[cn++] = raw[i++];
+        }
+        jsnode_t *cl = node(N_STR); cl->str = jstrdup(cooked, cn);
+        jsnode_t *rl = node(N_STR); rl->str = jstrdup(raw + s0, i - s0);
+        if(lastc) lastc->next = cl; else t->b->list = cl;
+        if(lastr) lastr->next = rl; else t->c->list = rl;
+        lastc = cl; lastr = rl;
+        if(i >= n) break;
+        u32 j = i + 2, depth = 1, es = j;
+        while(j < n && depth > 0){
+            if(raw[j] == '{') depth++;
+            else if(raw[j] == '}') depth--;
+            if(depth > 0) j++;
+        }
+        jsnode_t *e = parse_sub(raw + es, j - es);
+        if(laste) laste->next = e; else t->list = e;
+        laste = e;
+        i = j + 1;
+    }
+    return t;
+}
+
+static jsnode_t *primary_in(void);
+/* 'in' is an operator again inside brackets, function bodies and templates, even in a for(...) head */
 static jsnode_t *primary(void){
+    int saved = no_in;
+    if(tis("(") || tis("[") || tis("{") || tkw("function") || tkw("class") || tkw("async") || toks[ti].t == T_TEMPLATE) no_in = 0;
+    jsnode_t *r = primary_in();
+    no_in = saved;
+    return r;
+}
+static jsnode_t *primary_in(void){
     tok_t *t = &toks[ti];
     if(t->t == T_TEMPLATE){ jsnode_t *n = template_node(t->s); adv(); return n; }
     if(t->t == T_NUMBER){ jsnode_t *n = node(N_NUM); n->num = t->n; adv(); return n; }
@@ -1200,11 +1387,53 @@ static jsnode_t *primary(void){
         if(strcmp(t->s, "undefined") == 0){ adv(); return node(N_UNDEF); }
         if(strcmp(t->s, "this") == 0){ adv(); return node(N_THIS); }
         if(strcmp(t->s, "super") == 0){ adv(); return node(N_SUPER); }
+        if(strcmp(t->s, "class") == 0) return class_decl();   /* x = class { ... } */
         if(strcmp(t->s, "function") == 0){
             adv();
+            u16 ff = 0;
+            if(tis("*")){ adv(); ff = FN_GEN; }
             const char *name = NULL;
             if(toks[ti].t == T_ID){ name = toks[ti].s; adv(); }
-            return function_rest(name);
+            return function_rest_f(name, ff);
+        }
+        if(strcmp(t->s, "async") == 0 && ti + 1 < ntok && !toks[ti+1].nl){
+            tok_t *nx = &toks[ti+1];
+            if(nx->t == T_ID && strcmp(nx->s, "function") == 0){
+                adv(); adv();
+                u16 ff = FN_ASYNC;
+                if(tis("*")){ adv(); ff |= FN_GEN; }
+                const char *name = NULL;
+                if(toks[ti].t == T_ID){ name = toks[ti].s; adv(); }
+                return function_rest_f(name, ff);
+            }
+            /* async x => ... */
+            if(nx->t == T_ID && ti + 2 < ntok && toks[ti+2].t == T_PUNCT && strcmp(toks[ti+2].s, "=>") == 0){
+                jsnode_t *f = node(N_FUNC);
+                f->fflags = FN_ASYNC;
+                jsnode_t *p = node(N_IDENT);
+                p->str = nx->s;
+                f->list = p;
+                adv(); adv(); adv();
+                return arrow_body(f);
+            }
+            /* async (a, b) => ... */
+            if(nx->t == T_PUNCT && strcmp(nx->s, "(") == 0){
+                int d = 0, k = ti + 1;
+                for(; k < ntok; k++){
+                    if(toks[k].t != T_PUNCT) continue;
+                    if(strcmp(toks[k].s, "(") == 0) d++;
+                    else if(strcmp(toks[k].s, ")") == 0){ d--; if(!d) break; }
+                }
+                if(k + 1 < ntok && toks[k+1].t == T_PUNCT && strcmp(toks[k+1].s, "=>") == 0){
+                    adv();
+                    jsnode_t *f = node(N_FUNC);
+                    f->fflags = FN_ASYNC;
+                    adv();
+                    parse_params(f);
+                    expect("=>");
+                    return arrow_body(f);
+                }
+            }
         }
         if(ti + 1 < ntok && toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "=>") == 0){
             jsnode_t *f = node(N_FUNC);
@@ -1275,9 +1504,11 @@ static jsnode_t *primary(void){
                 p->op = tkw("get") ? 1 : 2;       /* an accessor */
                 adv();
             }
+            u16 mff = 0;
             if(tkw("async") && ti + 1 < ntok && !(toks[ti+1].t == T_PUNCT && (strcmp(toks[ti+1].s, "(") == 0 ||
-               strcmp(toks[ti+1].s, ":") == 0 || strcmp(toks[ti+1].s, ",") == 0 || strcmp(toks[ti+1].s, "}") == 0))) adv();
-            if(tis("*")) adv();               /* generator method: parsed as a plain method */
+               strcmp(toks[ti+1].s, ":") == 0 || strcmp(toks[ti+1].s, ",") == 0 || strcmp(toks[ti+1].s, "}") == 0 ||
+               strcmp(toks[ti+1].s, "=") == 0))){ adv(); mff |= FN_ASYNC; }
+            if(tis("*")){ adv(); mff |= FN_GEN; }
             if(tis("[")){                     /* a computed key: [expr] */
                 adv();
                 p->b = assignment();
@@ -1294,7 +1525,7 @@ static jsnode_t *primary(void){
                 adv();
             }
             if(tis("(")){                    /* a method shorthand: name(args) { ... } */
-                p->a = function_rest(p->str);
+                p->a = function_rest_f(p->str, mff);
             } else if(tis(":")){
                 adv();
                 p->a = assignment();
@@ -1316,6 +1547,7 @@ static jsnode_t *primary(void){
 }
 
 static jsnode_t *call_args(jsnode_t *callee){
+    int saved_in = no_in; no_in = 0;
     jsnode_t *c = node(N_CALL);
     c->a = callee;
     jsnode_t *last = NULL;
@@ -1328,6 +1560,7 @@ static jsnode_t *call_args(jsnode_t *callee){
         if(tis(",")) adv(); else break;
     }
     expect(")");
+    no_in = saved_in;
     return c;
 }
 
@@ -1335,6 +1568,14 @@ static jsnode_t *postfix(void){
     jsnode_t *e;
     if(tkw("new")){
         adv();
+        if(tis(".")){                   /* new.target: the constructor the call named */
+            adv();
+            if(tkw("target")) adv(); else fail("expected new.target");
+            jsnode_t *nt = node(N_IDENT);
+            nt->str = "%nt";
+            e = nt;                     /* new.target.name and new.target() carry on below */
+            goto suffixes;
+        }
         jsnode_t *callee = primary();
         for(;;){
             if(tis(".")){
@@ -1348,7 +1589,7 @@ static jsnode_t *postfix(void){
                 adv();
                 jsnode_t *m = node(N_MEMBER);
                 m->a = callee;
-                m->b = expression();
+                { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
                 m->computed = 1;
                 expect("]");
                 callee = m;
@@ -1359,6 +1600,7 @@ static jsnode_t *postfix(void){
         if(tis("(")){ adv(); jsnode_t *c = call_args(NULL); n->list = c->list; }
         e = n;
     } else e = primary();
+suffixes:
     for(;;){
         if(tis(".")){
             adv();
@@ -1372,13 +1614,16 @@ static jsnode_t *postfix(void){
             adv();
             jsnode_t *m = node(N_MEMBER);
             m->a = e;
-            m->b = expression();
+            { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
             m->computed = 1;
             expect("]");
             e = m;
         } else if(tis("(")){
             adv();
             e = call_args(e);
+        } else if(toks[ti].t == T_TEMPLATE){
+            e = tagged_node(e, toks[ti].s);
+            adv();
         } else if(tis("?.")){               /* optional chaining */
             adv();
             if(tis("(")){                    /* fn?.() */
@@ -1390,7 +1635,7 @@ static jsnode_t *postfix(void){
                 adv();
                 jsnode_t *m = node(N_MEMBER);
                 m->a = e;
-                m->b = expression();
+                { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
                 m->computed = 1;
                 m->op = 1;
                 expect("]");
@@ -1430,6 +1675,13 @@ static jsnode_t *unary(void){
         one->num = 1;
         a->b = one;
         return a;
+    }
+    if(tkw("await") && (cur_fn_flags & FN_ASYNC)){
+        adv();
+        jsnode_t *n = node(N_UNARY);
+        n->op = OP_AWAIT;
+        n->a = unary();
+        return n;
     }
     if(tis("!") || tis("-") || tis("+") || tis("~") || tkw("typeof") || tkw("delete") || tkw("void")){
         int op = tkw("typeof") ? OP_TYPEOF : tkw("delete") ? OP_DELETE : tkw("void") ? OP_VOID :
@@ -1480,6 +1732,17 @@ static jsnode_t *conditional(void){
 }
 
 static jsnode_t *assignment(void){
+    if(tkw("yield") && (cur_fn_flags & FN_GEN)){
+        adv();
+        jsnode_t *n = node(N_UNARY);
+        n->op = OP_YIELD;
+        if(tis("*")){ adv(); n->op = OP_YIELD_STAR; }
+        /* `yield` on its own: nothing follows it on this line */
+        if(!(toks[ti].t == T_EOF || toks[ti].nl || tis(";") || tis("}") || tis(")") ||
+             tis("]") || tis(",") || tis(":")))
+            n->a = assignment();
+        return n;
+    }
     jsnode_t *left = conditional();
     int op = OP_NONE;
     if(toks[ti].t == T_PUNCT){
@@ -1614,25 +1877,78 @@ static jsnode_t *block_body(void){
     return b;
 }
 
+/* True when the token after the current one ends a class member, so the current
+ * identifier is the member's own name rather than a modifier (static, get, async). */
+static int member_name_ends_here(void){
+    if(ti + 1 >= ntok) return 1;
+    tok_t *n = &toks[ti + 1];
+    if(n->t != T_PUNCT) return 0;
+    return strcmp(n->s, "(") == 0 || strcmp(n->s, "=") == 0 || strcmp(n->s, ";") == 0 ||
+           strcmp(n->s, "}") == 0;
+}
+
+/* The key of a class member or object property: [expr], a name, a string or a number. */
+static void parse_member_key(jsnode_t *m){
+    if(tis("[")){
+        adv();
+        m->b = assignment();
+        m->computed = 1;
+        m->str = "";
+        expect("]");
+        return;
+    }
+    if(toks[ti].t == T_ID || toks[ti].t == T_STRING) m->str = toks[ti].s;
+    else if(toks[ti].t == T_NUMBER){
+        char b[40];
+        kfmt_double(b, sizeof b, toks[ti].n);
+        m->str = jstrdup(b, (u32)strlen(b));
+    } else { fail("bad class member"); m->str = ""; return; }
+    adv();
+}
+
+/* class [Name] [extends E] { members }
+ * A member node is an N_FUNCDECL: op 0 method, 1 getter, 2 setter, 3 field,
+ * 4 static initialiser block; FN_STATIC in fflags; a->the function; c->a field's
+ * initialiser; b->a computed key. */
 static jsnode_t *class_decl(void){
     jsnode_t *c = node(N_CLASS);
     adv();                                       /* class */
-    if(toks[ti].t == T_ID){ c->str = toks[ti].s; adv(); }
+    if(toks[ti].t == T_ID && !tkw("extends")){ c->str = toks[ti].s; adv(); }
     if(tkw("extends")){ adv(); c->a = postfix(); }
     expect("{");
     jsnode_t *last = NULL;
     while(!tis("}") && toks[ti].t != T_EOF && !STOP()){
         if(tis(";")){ adv(); continue; }
-        if(toks[ti].t != T_ID){ fail("bad class member"); break; }
         jsnode_t *m = node(N_FUNCDECL);
-        if((tkw("get") || tkw("set")) && ti + 2 < ntok && toks[ti+1].t == T_ID &&
-           toks[ti+2].t == T_PUNCT && strcmp(toks[ti+2].s, "(") == 0){
+        if(tkw("static") && !member_name_ends_here()){
+            adv();
+            m->fflags |= FN_STATIC;
+            if(tis("{")){                        /* static { ... }: runs once, this = the class */
+                m->op = 4;
+                m->a = node(N_FUNC);
+                m->a->str = "";
+                m->a->a = block_body();
+                if(last) last->next = m; else c->list = m;
+                last = m;
+                continue;
+            }
+        }
+        if((tkw("get") || tkw("set")) && !member_name_ends_here()){
             m->op = tkw("get") ? 1 : 2;
             adv();
         }
-        m->str = toks[ti].s;
-        adv();
-        m->a = function_rest(m->str);
+        u16 ff = 0;
+        if(tkw("async") && !member_name_ends_here() && !toks[ti+1].nl){ adv(); ff |= FN_ASYNC; }
+        if(tis("*")){ adv(); ff |= FN_GEN; }
+        parse_member_key(m);
+        if(STOP()) break;
+        if(tis("(")){
+            m->a = function_rest_f(m->str, ff);
+        } else {                                 /* a field: name [= value] */
+            m->op = 3;
+            if(tis("=")){ adv(); m->c = assignment(); }
+            if(tis(";")) adv();
+        }
         if(last) last->next = m; else c->list = m;
         last = m;
     }
@@ -1660,16 +1976,20 @@ static jsnode_t *statement(void){
         return v;
     }
     if(tkw("class")) return class_decl();
-    if(tkw("async") && ti + 1 < ntok && toks[ti+1].t == T_ID && strcmp(toks[ti+1].s, "function") == 0 && !toks[ti+1].nl) adv();
+    u16 dff = 0;
+    if(tkw("async") && ti + 1 < ntok && toks[ti+1].t == T_ID && strcmp(toks[ti+1].s, "function") == 0 && !toks[ti+1].nl){
+        adv();
+        dff = FN_ASYNC;
+    }
     if(tkw("function") && ti + 1 < ntok && (toks[ti+1].t == T_ID ||
        (toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "*") == 0 && ti + 2 < ntok && toks[ti+2].t == T_ID))){
         adv();
-        if(tis("*")) adv();
+        if(tis("*")){ adv(); dff |= FN_GEN; }
         const char *name = toks[ti].s;
         adv();
         jsnode_t *d = node(N_FUNCDECL);
         d->str = name;
-        d->a = function_rest(name);
+        d->a = function_rest_f(name, dff);
         return d;
     }
     if(tkw("if")){
@@ -1704,7 +2024,8 @@ static jsnode_t *statement(void){
     }
     if(tkw("for")){
         adv();
-        if(tkw("await")) adv();
+        int for_await = 0;
+        if(tkw("await")){ adv(); for_await = 1; }
         expect("(");
         jsnode_t *init = NULL;
         no_in = 1;
@@ -1715,6 +2036,7 @@ static jsnode_t *statement(void){
             /* for (x in obj) / for (const [k, v] of list) / for (a.b in obj) */
             jsnode_t *n = node(N_FORIN);
             n->op = tkw("of") ? 1 : 0;
+            if(for_await) n->fflags |= FN_ASYNC;      /* for await (x of src) */
             adv();
             if(init->k == N_VAR){
                 jsnode_t *d = init->list;
@@ -1731,6 +2053,7 @@ static jsnode_t *statement(void){
             n->d = statement();
             return n;
         }
+        (void)for_await;
         jsnode_t *n = node(N_FOR);
         n->a = init;
         expect(";");
@@ -1844,7 +2167,13 @@ static js_val_t ret_val;
 /* depth: declared with the debug call stack */
 static long steps = 0;
 
+#define NOINLINE __attribute__((noinline))
 static js_val_t eval(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_call(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_new(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_tagged(jsnode_t *n, env_t *env);
+static js_val_t coro_suspend(js_val_t v, int out_kind);
+static js_val_t coro_yield_star(js_val_t src);
 
 /* Evaluates a call/array argument list into out[], expanding ...spread elements.
  * Returns the number of values produced (capped at max). */
@@ -1870,6 +2199,7 @@ static int step(void){
 static js_val_t read_ident(env_t *env, const char *name){
     binding_t *b = env_find(env, name);
     if(b) return b->v;
+    if(name[0] == '%') return js_undef();    /* the engine's own bindings (%nt, %fn, ...) */
     if(global_obj){
         js_val_t out = js_undef();
         if(has_prop(global_obj, name)) return js_get(global_obj, name);
@@ -1964,7 +2294,13 @@ static js_val_t binop_eval(int op, js_val_t a, js_val_t b){
             return js_bool(r);
         }
         case OP_INSTANCEOF: {
-            if(a.t != JS_OBJ || b.t != JS_OBJ) return js_bool(0);
+            if(b.t != JS_OBJ){ fail("right-hand side of 'instanceof' is not callable"); return js_bool(0); }
+            js_val_t hi = js_get(b.o, "\x01Symbol(Symbol.hasInstance)");
+            if(js_callable(hi)){
+                js_val_t ar[1] = { a };
+                return js_bool(js_truthy(call_value(hi, b, 1, ar)));
+            }
+            if(a.t != JS_OBJ) return js_bool(0);
             js_obj_t *p = prototype_of(b.o);
             for(js_obj_t *x = a.o->proto; x && p; x = x->proto) if(x == p) return js_bool(1);
             return js_bool(0);
@@ -2011,6 +2347,17 @@ static const char *key_of(jsnode_t *m, env_t *env){
     return js_to_str(k);
 }
 
+/* a script function's declared arity: parameters before the first default or ...rest */
+static int fn_arity(js_obj_t *o){
+    int n = 0;
+    for(jsnode_t *q = o->fdecl->list; q; q = q->next){
+        if(q->op == 1 || q->b) break;
+        n++;
+    }
+    return n;
+}
+static const char *fn_name_of(js_obj_t *o){ return o->fdecl->str ? o->fdecl->str : ""; }
+
 static js_val_t make_fn(jsnode_t *f, env_t *env){
     js_obj_t *o = new_obj();
     o->is_func = 1;
@@ -2020,13 +2367,19 @@ static js_val_t make_fn(jsnode_t *f, env_t *env){
     return js_objv(o);
 }
 
+static js_val_t destructure_src(js_val_t v);
+static void init_class_fields(js_obj_t *ctor, js_val_t self);
+static js_obj_t *pending_new_target;
+
 static js_val_t construct(js_val_t ctor, int argc, js_val_t *argv){
     if(!js_callable(ctor)){ fail("not a constructor"); return js_undef(); }
     js_obj_t *obj = new_obj();
     obj->proto = prototype_of(ctor.o);
     if(!obj->proto) obj->proto = object_proto;
     js_val_t self = js_objv(obj);
+    pending_new_target = ctor.o;
     js_val_t r = call_value(ctor, self, argc, argv);
+    pending_new_target = NULL;
     if(r.t == JS_OBJ) return r;
     return self;
 }
@@ -2055,6 +2408,7 @@ static void bind_target(jsnode_t *t, js_val_t v, env_t *env){
 static void bind_pattern(jsnode_t *pat, js_val_t v, env_t *env){
     if(pat->k == N_ARRAY){
         int i = 0;
+        v = destructure_src(v);
         for(jsnode_t *it = pat->list; it; it = it->next, i++){
             if(it->k == N_EMPTY) continue;
             if(it->k == N_SPREAD){
@@ -2085,6 +2439,15 @@ static void bind_pattern(jsnode_t *pat, js_val_t v, env_t *env){
 }
 
 /* Stores v into an assignment target: a name, a member, or a destructuring literal. */
+/* The source of an array destructuring pattern, as an array: anything with a
+ * Symbol.iterator (a Set, a Map, a generator, a string) is drained into one first. */
+static js_val_t destructure_src(js_val_t v){
+    if(v.t == JS_STR) return js_objv(iterate_to_array(v));
+    if(v.t == JS_OBJ && !v.o->is_array && js_callable(js_get(v.o, "\x01Symbol(Symbol.iterator)")))
+        return js_objv(iterate_to_array(v));
+    return v;
+}
+
 static void assign_to(jsnode_t *t, js_val_t v, env_t *env){
     if(t->k == N_IDENT){
         binding_t *b = env_find(env, t->str);
@@ -2099,6 +2462,7 @@ static void assign_to(jsnode_t *t, js_val_t v, env_t *env){
         assign_to(t->a, v, env);
     } else if(t->k == N_ARRAY){
         int i = 0;
+        v = destructure_src(v);
         for(jsnode_t *e = t->list; e; e = e->next, i++){
             if(e->k == N_UNDEF && !e->str) continue;          /* a hole */
             if(e->k == N_SPREAD){
@@ -2144,6 +2508,89 @@ static void fail_desc(jsnode_t *n, const char *what){
     for(const char *q = what; *q && k + 1 < sizeof m; q++) m[k++] = *q;
     m[k] = 0;
     fail(m);
+}
+
+/* Calls, new and tagged templates each need room for 32 arguments. They live in their
+ * own functions so that eval's frame -- which every level of recursion pays for -- does
+ * not carry that room around. */
+static NOINLINE js_val_t eval_call(jsnode_t *n, env_t *env){
+    if(n->a && n->a->k == N_SUPER){
+        /* super(args): the superclass constructor runs on this */
+        binding_t *f = env_find(env, "%fn");
+        binding_t *th = env_find(env, "this");
+        js_val_t args[32];
+        int argc = eval_args(n->list, env, args, 32);
+        if(!f || !th || f->v.t != JS_OBJ || !f->v.o->parent){ fail("no superclass"); return js_undef(); }
+        js_val_t sr = call_value(js_objv(f->v.o->parent), th->v, argc, args);
+        binding_t *fb = env_find(env, "%fields");
+        if(fb && fb->v.t == JS_OBJ){ js_obj_t *cc = fb->v.o; fb->v = js_undef(); init_class_fields(cc, th->v); }
+        return sr;
+    }
+    js_val_t self = js_undef();
+    js_val_t fn;
+    if(n->a->k == N_MEMBER && n->a->a->k == N_SUPER){
+        binding_t *h = env_find(env, "%home");
+        binding_t *th = env_find(env, "this");
+        if(!h || h->v.t != JS_OBJ || !h->v.o->proto || !th){ fail("super is not available here"); return js_undef(); }
+        self = th->v;
+        fn = js_get(h->v.o->proto, key_of(n->a, env));
+    } else if(n->a->k == N_MEMBER){
+        self = eval(n->a->a, env);
+        fn = get_member(self, key_of(n->a, env));
+    } else fn = eval(n->a, env);
+    if(n->op == 1 && (fn.t == JS_NULL || fn.t == JS_UNDEF)) return js_undef();  /* fn?.() */
+    js_val_t args[32];
+    int argc = eval_args(n->list, env, args, 32);
+    if(STOP()) return js_undef();
+    if(!js_callable(fn)){ fail_desc(n->a, " is not a function"); return js_undef(); }
+    return call_value(fn, self, argc, args);
+}
+
+static NOINLINE js_val_t eval_new(jsnode_t *n, env_t *env){
+    js_val_t ctor = eval(n->a, env);
+    js_val_t args[32];
+    int argc = eval_args(n->list, env, args, 32);
+    if(STOP()) return js_undef();
+    if(!js_callable(ctor)){ fail_desc(n->a, " is not a constructor"); return js_undef(); }
+    return construct(ctor, argc, args);
+}
+
+static NOINLINE js_val_t eval_tagged(jsnode_t *n, env_t *env){
+    js_val_t self = js_undef(), fn;
+    if(n->a->k == N_MEMBER){
+        self = eval(n->a->a, env);
+        fn = get_member(self, key_of(n->a, env));
+    } else fn = eval(n->a, env);
+    if(STOP()) return js_undef();
+    if(!js_callable(fn)){ fail_desc(n->a, " is not a function"); return js_undef(); }
+    js_obj_t *strs = new_array(), *raws = new_array();
+    for(jsnode_t *e = n->b->list; e; e = e->next) arr_push(strs, js_str(e->str));
+    for(jsnode_t *e = n->c->list; e; e = e->next) arr_push(raws, js_str(e->str));
+    js_set(strs, "raw", js_objv(raws));
+    find_own(strs, "raw")->flags = PF_HIDDEN;
+    js_val_t args[32];
+    args[0] = js_objv(strs);
+    int argc = 1;
+    for(jsnode_t *e = n->list; e && argc < 32; e = e->next) args[argc++] = eval(e, env);
+    if(STOP()) return js_undef();
+    return call_value(fn, self, argc, args);
+}
+
+/* Reading a property of null or undefined: name the expression, as browsers do. */
+static NOINLINE void fail_empty_member(jsnode_t *n, env_t *env, int is_null){
+    char m[160]; u32 k = 0;
+    const char *pre = "Cannot read properties of ";
+    for(const char *q = pre; *q; q++) m[k++] = *q;
+    const char *w = is_null ? "null" : "undefined";
+    for(const char *q = w; *q; q++) m[k++] = *q;
+    const char *mid = " (reading '";
+    for(const char *q = mid; *q; q++) m[k++] = *q;
+    const char *key = key_of(n, env);
+    for(const char *q = key; *q && k < 100; q++) m[k++] = *q;
+    m[k++] = '\''; m[k++] = ')'; m[k++] = ' '; m[k++] = '-'; m[k++] = ' ';
+    desc_into(n->a, m, &k, 150);
+    m[k] = 0;
+    fail(jstrdup(m, k));
 }
 
 static js_val_t eval(jsnode_t *n, env_t *env){
@@ -2209,6 +2656,7 @@ static js_val_t eval(jsnode_t *n, env_t *env){
             return js_objv(o);
         }
         case N_FUNC: return make_fn(n, env);
+        case N_TAGGED: return eval_tagged(n, env);
         case N_MEMBER: {
             if(n->a->k == N_SUPER){
                 binding_t *h = env_find(env, "%home");
@@ -2218,68 +2666,24 @@ static js_val_t eval(jsnode_t *n, env_t *env){
             js_val_t obj = eval(n->a, env);
             if(n->op == 1 && (obj.t == JS_NULL || obj.t == JS_UNDEF)) return js_undef();
             if((obj.t == JS_NULL || obj.t == JS_UNDEF) && !STOP()){
-                /* like browsers: say which expression was empty */
-                char m[160]; u32 k = 0;
-                const char *pre = "Cannot read properties of ";
-                for(const char *q = pre; *q; q++) m[k++] = *q;
-                const char *w = obj.t == JS_NULL ? "null" : "undefined";
-                for(const char *q = w; *q; q++) m[k++] = *q;
-                const char *mid = " (reading '";
-                for(const char *q = mid; *q; q++) m[k++] = *q;
-                const char *key = key_of(n, env);
-                for(const char *q = key; *q && k < 100; q++) m[k++] = *q;
-                m[k++] = '\''; m[k++] = ')'; m[k++] = ' '; m[k++] = '-'; m[k++] = ' ';
-                desc_into(n->a, m, &k, 150);
-                m[k] = 0;
-                fail(jstrdup(m, k));
+                fail_empty_member(n, env, obj.t == JS_NULL);
                 return js_undef();
             }
             return get_member(obj, key_of(n, env));
         }
-        case N_CALL: {
-            if(n->a && n->a->k == N_SUPER){
-                /* super(args): the superclass constructor runs on this */
-                binding_t *f = env_find(env, "%fn");
-                binding_t *th = env_find(env, "this");
-                js_val_t args[32];
-                int argc = eval_args(n->list, env, args, 32);
-                if(!f || !th || f->v.t != JS_OBJ || !f->v.o->parent){ fail("no superclass"); return js_undef(); }
-                return call_value(js_objv(f->v.o->parent), th->v, argc, args);
-            }
-            js_val_t self = js_undef();
-            js_val_t fn;
-            if(n->a->k == N_MEMBER && n->a->a->k == N_SUPER){
-                binding_t *h = env_find(env, "%home");
-                binding_t *th = env_find(env, "this");
-                if(!h || h->v.t != JS_OBJ || !h->v.o->proto || !th){ fail("super is not available here"); return js_undef(); }
-                self = th->v;
-                fn = js_get(h->v.o->proto, key_of(n->a, env));
-            } else if(n->a->k == N_MEMBER){
-                self = eval(n->a->a, env);
-                fn = get_member(self, key_of(n->a, env));
-            } else fn = eval(n->a, env);
-            if(n->op == 1 && (fn.t == JS_NULL || fn.t == JS_UNDEF)) return js_undef();  /* fn?.() */
-            js_val_t args[32];
-            int argc = eval_args(n->list, env, args, 32);
-            if(STOP()) return js_undef();
-            if(!js_callable(fn)){ fail_desc(n->a, " is not a function"); return js_undef(); }
-            return call_value(fn, self, argc, args);
-        }
-        case N_NEW: {
-            js_val_t ctor = eval(n->a, env);
-            js_val_t args[32];
-            int argc = eval_args(n->list, env, args, 32);
-            if(STOP()) return js_undef();
-            if(!js_callable(ctor)){ fail_desc(n->a, " is not a constructor"); return js_undef(); }
-            return construct(ctor, argc, args);
-        }
+        case N_CALL: return eval_call(n, env);
+        case N_NEW: return eval_new(n, env);
         case N_UNARY: {
+            if(n->op == OP_AWAIT) return coro_suspend(eval(n->a, env), CO_AWAIT);
+            if(n->op == OP_YIELD) return coro_suspend(n->a ? eval(n->a, env) : js_undef(), CO_YIELD);
+            if(n->op == OP_YIELD_STAR) return coro_yield_star(eval(n->a, env));
             if(n->op == OP_DELETE){
                 jsnode_t *t = n->a;
                 if(t->k == N_MEMBER){
                     js_val_t obj = eval(t->a, env);
                     if(obj.t == JS_OBJ){
                         const char *k = key_of(t, env);
+                        if(obj.o->kind == K_PROXY) return js_bool(proxy_delete(obj.o, k));
                         if(obj.o->is_array){
                             int idx = as_index(k);
                             if(idx >= 0 && idx < obj.o->nitems){ obj.o->items[idx] = js_undef(); return js_bool(1); }
@@ -2355,29 +2759,59 @@ static js_val_t eval(jsnode_t *n, env_t *env){
             js_obj_t *ctor = new_obj();
             ctor->is_func = 1;
             ctor->is_class = 1;
-            ctor->closure = env;
             ctor->proto = function_proto ? function_proto : object_proto;
             js_obj_t *proto = js_new_object();
             js_set(ctor, "prototype", js_objv(proto));
+            find_own(ctor, "prototype")->flags = PF_HIDDEN;
             js_set(proto, "constructor", js_objv(ctor));
+            find_own(proto, "constructor")->flags = PF_HIDDEN;
+            js_set(ctor, "name", js_str(n->str ? n->str : ""));
+            find_own(ctor, "name")->flags = PF_HIDDEN | PF_RO;
+            /* the class body (and its methods) see the class by its own name */
+            env_t *cenv = new_env(env);
+            if(n->str) env_define(cenv, n->str, js_objv(ctor));
+            ctor->closure = cenv;
+            ctor->cnode = n;
             if(n->a){
                 js_val_t sup = eval(n->a, env);
-                if(sup.t != JS_OBJ || !sup.o->is_func){ fail("extends needs a class"); return js_undef(); }
-                ctor->parent = sup.o;
-                js_obj_t *sp = prototype_of(sup.o);
-                if(sp) proto->proto = sp;
+                if(sup.t == JS_NULL){ proto->proto = NULL; }
+                else if(sup.t != JS_OBJ || !sup.o->is_func){ fail("extends needs a class"); return js_undef(); }
+                else {
+                    ctor->parent = sup.o;
+                    ctor->proto = sup.o;                   /* static members are inherited too */
+                    js_obj_t *sp = prototype_of(sup.o);
+                    if(sp) proto->proto = sp;
+                }
             } else proto->proto = object_proto;
-            for(jsnode_t *m = n->list; m; m = m->next){
-                js_val_t fv = make_fn(m->a, env);
-                fv.o->home = proto;
-                if(m->op == 1 || m->op == 2){
-                    js_set(proto, m->str, js_undef());
-                    prop_t *pr = find_own(proto, m->str);
+            for(jsnode_t *m = n->list; m && !STOP(); m = m->next){
+                if(m->op == 3 && !(m->fflags & FN_STATIC)) continue;   /* a field: set per instance */
+                js_obj_t *target = (m->fflags & FN_STATIC) ? ctor : proto;
+                if(m->op == 4){                            /* static { ... } */
+                    js_val_t fv = make_fn(m->a, cenv);
+                    fv.o->home = ctor;
+                    call_value(fv, js_objv(ctor), 0, NULL);
+                    continue;
+                }
+                const char *key = m->computed ? js_to_str(eval(m->b, cenv)) : m->str;
+                if(m->op == 3){                            /* a static field */
+                    env_t *fe = new_env(cenv);
+                    env_define(fe, "this", js_objv(ctor));
+                    js_set(target, key, m->c ? eval(m->c, fe) : js_undef());
+                    if(key[0] == '#') find_own(target, key)->flags = PF_HIDDEN;
+                    continue;
+                }
+                js_val_t fv = make_fn(m->a, cenv);
+                fv.o->home = target;
+                if(m->op == 1 || m->op == 2){              /* get/set */
+                    if(!find_own(target, key)) js_set(target, key, js_undef());
+                    prop_t *pr = find_own(target, key);
+                    pr->flags |= PF_HIDDEN;
                     if(m->op == 1) pr->getter = fv.o; else pr->setter = fv.o;
-                } else if(strcmp(m->str, "constructor") == 0){
+                } else if(!(m->fflags & FN_STATIC) && strcmp(key, "constructor") == 0){
                     ctor->fdecl = m->a;
                 } else {
-                    js_set(proto, m->str, fv);
+                    js_set(target, key, fv);
+                    find_own(target, key)->flags = PF_HIDDEN;   /* methods are not enumerable */
                 }
             }
             if(!ctor->fdecl) ctor->default_ctor = 1;
@@ -2404,11 +2838,261 @@ static void lazy_parse(jsnode_t *f){
     cur_src = body;
     ti = 0;
     no_in = 0;
+    u16 sflags = cur_fn_flags;
+    cur_fn_flags = f->fflags;
     if(!STOP()) f->a = block_body();
+    cur_fn_flags = sflags;
     f->lazy_len = 0;
     tok_pop();
     toks = st; ntok = sn; ti = sti; tok_cap = scap; no_in = snoin; cur_src = ssrc;
 }
+
+/* ---- coroutines: one C stack per suspended generator or async call ----
+ * This interpreter walks the tree on the C stack, so a generator body cannot simply
+ * return in the middle of it. Each generator and each async call therefore runs on a
+ * stack of its own: `yield` and `await` switch back to whoever resumed it and leave
+ * that stack untouched until the next resume. Stacks come from the kernel heap (not
+ * the script heap) and are given back as soon as the body finishes.
+ * The collector scans a suspended stack only while the generator that owns it is still
+ * reachable, so an abandoned half-finished generator is collected with its stack. */
+#define CORO_STACK   (256u * 1024u)
+#define CORO_SLACK   (24u * 1024u)    /* kept free, so deep recursion fails cleanly */
+
+void js_coro_switch(void **save_sp, void *new_sp);
+__asm__(
+".text\n"
+".globl js_coro_switch\n"
+".hidden js_coro_switch\n"
+"js_coro_switch:\n"
+"\tpushq %rbp\n\tpushq %rbx\n\tpushq %r12\n\tpushq %r13\n\tpushq %r14\n\tpushq %r15\n"
+"\tmovq %rsp, (%rdi)\n"
+"\tmovq %rsi, %rsp\n"
+"\tpopq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n"
+"\tret\n"
+".previous\n");
+
+typedef struct coro {
+    void *sp;                  /* stack pointer while switched out */
+    char *stack;               /* the stack block (NULL before the start and after the end) */
+    uintptr_t top, lo;         /* what the collector scans up to / the guard limit */
+    struct coro *resumer;
+    js_obj_t *owner;           /* the generator object or async call that owns it */
+    jsnode_t *fdecl;
+    env_t *env;
+    js_val_t self;
+    js_val_t inbox, outbox;
+    js_obj_t *result;          /* an async call's promise */
+    int state, in_kind, out_kind, is_async, is_gen;
+    int depth, ctl;            /* the interpreter's state while switched out */
+    js_val_t ret_val;
+    const char *ctl_label;
+    int scanned;               /* collector bookkeeping */
+} coro_t;
+
+static coro_t coro_main;                   /* the ordinary stack */
+static coro_t *coro_cur = &coro_main;
+static coro_t **coro_all = NULL;           /* every coroutine with a live stack (weak) */
+static u32 coro_n = 0, coro_cap = 0;
+static u32 coro_bytes = 0;                 /* stack memory handed out right now */
+#define CORO_BUDGET  (8u * 1024u * 1024u)   /* collect before going past this */
+#define CORO_LIMIT   (48u * 1024u * 1024u)  /* and give up past this */
+
+static uintptr_t main_stack_top(void){ return js_stack_top ? js_stack_top : (uintptr_t)stack_top; }
+static uintptr_t coro_top_of(coro_t *c){ return c->top ? c->top : main_stack_top(); }
+
+static void coro_forget(coro_t *c){
+    for(u32 i = 0; i < coro_n; i++) if(coro_all[i] == c){ coro_all[i] = coro_all[--coro_n]; break; }
+}
+static void coro_drop_stack(coro_t *c){
+    if(c->stack){ kfree(c->stack); c->stack = NULL; coro_bytes -= CORO_STACK; }
+    coro_forget(c);
+}
+/* Frees every coroutine stack (the script heap is about to go away). */
+static void coro_reset(void){
+    for(u32 i = 0; i < coro_n; i++) if(coro_all[i]->stack){ kfree(coro_all[i]->stack); coro_all[i]->stack = NULL; }
+    coro_n = 0;
+    coro_bytes = 0;
+    coro_cur = &coro_main;
+    memset(&coro_main, 0, sizeof coro_main);
+}
+
+static void coro_entry(void);
+
+static int coro_make_stack(coro_t *c){
+    if(coro_n == coro_cap){
+        u32 nc = coro_cap ? coro_cap * 2 : 32;
+        coro_t **na = kmalloc(sizeof(coro_t *) * nc);
+        if(!na){ fail("out of memory"); return 0; }
+        for(u32 i = 0; i < coro_n; i++) na[i] = coro_all[i];
+        if(coro_all) kfree(coro_all);
+        coro_all = na; coro_cap = nc;
+    }
+    /* generator objects are tiny, so a crowd of abandoned ones would never fill the
+     * script heap; their stacks are what costs, so they get a budget of their own */
+    if(coro_bytes + CORO_STACK > CORO_BUDGET && !in_gc){
+        gc();
+        if(coro_bytes + CORO_STACK > CORO_LIMIT){ fail("too much recursion"); return 0; }
+    }
+    char *st = kmalloc(CORO_STACK);
+    if(!st){ fail("out of memory"); return 0; }
+    coro_bytes += CORO_STACK;
+    c->stack = st;
+    c->top = ((uintptr_t)(st + CORO_STACK)) & ~(uintptr_t)15;
+    c->lo = (uintptr_t)st + CORO_SLACK;
+    uintptr_t *sp = (uintptr_t *)c->top;
+    *--sp = 0;                             /* where a return from coro_entry would go */
+    *--sp = (uintptr_t)coro_entry;         /* the first switch "returns" into the body */
+    for(int i = 0; i < 6; i++) *--sp = 0;  /* the callee-saved registers it pops */
+    c->sp = sp;
+    coro_all[coro_n++] = c;
+    return 1;
+}
+
+/* Hands the processor from one coroutine to another, with the interpreter's own
+ * per-call state (depth, pending return) travelling with it. */
+static void coro_xfer(coro_t *from, coro_t *to){
+    from->depth = depth; from->ctl = ctl; from->ret_val = ret_val; from->ctl_label = ctl_label;
+    coro_cur = to;
+    depth = to->depth; ctl = to->ctl; ret_val = to->ret_val; ctl_label = to->ctl_label;
+    js_coro_switch(&from->sp, to->sp);
+    coro_cur = from;
+    depth = from->depth; ctl = from->ctl; ret_val = from->ret_val; ctl_label = from->ctl_label;
+}
+
+/* Runs a coroutine until it yields, awaits or finishes. */
+static void coro_resume(coro_t *c, js_val_t in, int in_kind){
+    if(c->state == CS_DONE || c->state == CS_RUNNING){ c->out_kind = CO_RETURN; c->outbox = js_undef(); return; }
+    if(c->state == CS_NEW && !coro_make_stack(c)){ c->out_kind = CO_THROW; c->state = CS_DONE; return; }
+    c->inbox = in;
+    c->in_kind = in_kind;
+    c->resumer = coro_cur;
+    c->state = CS_RUNNING;
+    coro_xfer(coro_cur, c);
+    if(c->state == CS_DONE) coro_drop_stack(c);
+}
+
+/* Switches back to whoever resumed this coroutine; returns what the next resume brings. */
+static js_val_t coro_suspend(js_val_t v, int out_kind){
+    coro_t *c = coro_cur;
+    if(c == &coro_main){ fail("yield or await outside a generator"); return js_undef(); }
+    c->outbox = v;
+    c->out_kind = out_kind;
+    c->state = CS_SUSPENDED;
+    coro_xfer(c, c->resumer);
+    c->state = CS_RUNNING;
+    if(c->in_kind == CI_THROW){ thrown_val = c->inbox; thrown = 1; return js_undef(); }
+    if(c->in_kind == CI_RETURN){ ctl = 1; ret_val = c->inbox; return js_undef(); }
+    return c->inbox;
+}
+
+/* ---- what the collector needs from the coroutines ---- */
+static uintptr_t coro_scan_top(void){
+    for(u32 i = 0; i < coro_n; i++) coro_all[i]->scanned = 0;
+    coro_cur->scanned = 1;
+    return coro_top_of(coro_cur);
+}
+static void coro_scan_one(coro_t *c){
+    scan_words(c, sizeof *c);
+    for(uintptr_t a = (uintptr_t)c->sp & ~(uintptr_t)7; a < coro_top_of(c); a += 8)
+        mark_addr(*(uintptr_t *)a);
+}
+static void coro_scan_chain(void){
+    for(coro_t *c = coro_cur->resumer; c; c = c->resumer){
+        mark_addr((uintptr_t)c);
+        c->scanned = 1;
+        coro_scan_one(c);
+    }
+}
+/* A suspended generator's stack holds the only reference to much of what it is in the
+ * middle of, but it is a root only if the generator itself is still reachable; a
+ * generator the stack itself refers to therefore has to be taken in rounds. */
+static void coro_scan_suspended(void){
+    for(int round = 0; round < 64; round++){
+        int more = 0;
+        for(u32 i = 0; i < coro_n; i++){
+            coro_t *c = coro_all[i];
+            if(c->scanned || !c->stack) continue;
+            if(!blk_marked(c)) continue;
+            c->scanned = 1;
+            coro_scan_one(c);
+            drain();
+            more = 1;
+        }
+        if(!more) break;
+    }
+}
+static void coro_sweep(void){
+    for(u32 i = 0; i < coro_n; ){
+        coro_t *c = coro_all[i];
+        if(blk_marked(c)){ i++; continue; }
+        if(c->stack){ kfree(c->stack); c->stack = NULL; coro_bytes -= CORO_STACK; }
+        coro_all[i] = coro_all[--coro_n];
+    }
+}
+
+static void coro_entry(void){
+    coro_t *c = coro_cur;
+    js_val_t r = js_undef();
+    depth = 0;
+    ctl = 0;
+    ctl_label = NULL;
+    if(c->in_kind == CI_THROW){ thrown_val = c->inbox; thrown = 1; }
+    else if(c->in_kind == CI_RETURN) r = c->inbox;
+    else {
+        exec(c->fdecl->a, c->env);
+        if(ctl == 1) r = ret_val;
+    }
+    c->outbox = r;
+    c->out_kind = STOP() ? CO_THROW : CO_RETURN;
+    c->state = CS_DONE;
+    for(;;) coro_xfer(c, c->resumer);      /* never comes back */
+}
+
+/* yield* src: hands every value the inner iterable produces to our own resumer, and
+ * evaluates to the value the inner iterator finished with. */
+static js_val_t coro_yield_star(js_val_t src){
+    if(src.t != JS_OBJ) src = js_objv(iterate_to_array(src));   /* a string, say */
+    js_val_t itf = js_undef();
+    if(src.t == JS_OBJ) itf = js_get(src.o, "\x01Symbol(Symbol.iterator)");
+    js_val_t it = js_callable(itf) ? call_value(itf, src, 0, NULL) : src;
+    if(it.t != JS_OBJ){ fail("yield* needs an iterable"); return js_undef(); }
+    js_val_t nextf = js_get(it.o, "next");
+    if(!js_callable(nextf)){ fail("yield* needs an iterable"); return js_undef(); }
+    js_val_t sent = js_undef();
+    for(long guard = 0; guard < 100000000; guard++){
+        if(STOP()) return js_undef();
+        js_val_t r = call_value(nextf, it, 1, &sent);
+        if(STOP()) return js_undef();
+        if(r.t != JS_OBJ){ fail("iterator result is not an object"); return js_undef(); }
+        if(js_truthy(js_get(r.o, "done"))) return js_get(r.o, "value");
+        sent = coro_suspend(js_get(r.o, "value"), CO_YIELD);
+        if(STOP() || ctl) return js_undef();
+    }
+    return js_undef();
+}
+
+/* Makes the generator object, or starts the async call, that a call to a generator or
+ * async function evaluates to (defined with the promises, in jslib.inc). */
+static js_val_t coro_start(js_obj_t *fn, jsnode_t *f, env_t *env, js_val_t self);
+
+/* Runs a class's instance field initialisers on a new object. In a derived class this
+ * happens when super() returns, so a base field is in place before the derived one. */
+static void init_class_fields(js_obj_t *ctor, js_val_t self){
+    if(!ctor->cnode || self.t != JS_OBJ) return;
+    for(jsnode_t *m = ctor->cnode->list; m && !STOP(); m = m->next){
+        if(m->op != 3 || (m->fflags & FN_STATIC)) continue;
+        env_t *fe = new_env(ctor->closure);
+        env_define(fe, "this", self);
+        env_define(fe, "%fn", js_objv(ctor));
+        if(ctor->cnode) env_define(fe, "%home", js_get(ctor, "prototype"));
+        const char *key = m->computed ? js_to_str(eval(m->b, fe)) : m->str;
+        js_set(self.o, key, m->c ? eval(m->c, fe) : js_undef());
+        if(key[0] == '#') find_own(self.o, key)->flags = PF_HIDDEN;
+    }
+}
+
+/* The constructor a `new` expression names, for new.target inside it. */
+static js_obj_t *pending_new_target = NULL;
 
 static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
     js_obj_t *o = (fn.t == JS_OBJ) ? fn.o : NULL;
@@ -2416,21 +3100,32 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
     if(o->native) return o->native(self, argc, argv, o->ctx);
     if(o->default_ctor){
         /* a class without a constructor passes its arguments to the superclass */
-        if(o->parent) return call_value(js_objv(o->parent), self, argc, argv);
-        return js_undef();
+        js_val_t r = js_undef();
+        if(o->parent) r = call_value(js_objv(o->parent), self, argc, argv);
+        init_class_fields(o, self);
+        return r;
     }
     if(!o->fdecl) return js_undef();
     if(depth >= MAX_DEPTH){ fail("too much recursion"); return js_undef(); }
+    if(coro_cur->lo){
+        /* a coroutine stack is much smaller than the main one and has no guard page */
+        uintptr_t csp;
+        __asm__ volatile("mov %%rsp, %0" : "=r"(csp));
+        if(csp < coro_cur->lo){ fail("too much recursion"); return js_undef(); }
+    }
     jsnode_t *f = o->fdecl;
     if(!f->a && f->lazy_len) lazy_parse(f);
     if(STOP()) return js_undef();
     env_t *env = new_env(o->closure);
     if(f->str && f->str[0]) env_define(env, f->str, fn);      /* a named function sees itself */
+    js_obj_t *nt = pending_new_target;
+    pending_new_target = NULL;
     if(!f->arrow){
         /* non-strict: a plain call (no receiver) sees the global object as this */
         if(self.t == JS_UNDEF || self.t == JS_NULL) self = js_objv(global_obj);
         env_define(env, "this", self);
         env_define(env, "%fn", js_objv(o));
+        env_define(env, "%nt", nt ? js_objv(nt) : js_undef());
         if(o->home) env_define(env, "%home", js_objv(o->home));
     }
     int i = 0;
@@ -2456,12 +3151,21 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
     hoist_vars(f, f->a, env);
     for(jsnode_t *s = f->a ? f->a->list : NULL; s; s = s->next)
         if(s->k == N_FUNCDECL) env_define(env, s->str, make_fn(s->a, env));
+    if(f->fflags & (FN_GEN | FN_ASYNC)) return coro_start(o, f, env, self);
+    if(o->is_class && o->cnode){
+        if(o->parent) env_define(env, "%fields", js_objv(o));   /* super() runs them */
+        else init_class_fields(o, self);
+    }
     if(depth < 512) call_at[depth] = eval_at;
     depth++;
     int saved_ctl = ctl;
     ctl = 0;
     exec(f->a, env);
     depth--;
+    if(o->is_class && o->parent && o->cnode){
+        binding_t *fb = env_find(env, "%fields");          /* no super() ran: do it now */
+        if(fb && fb->v.t == JS_OBJ) init_class_fields(o, self);
+    }
     js_val_t r = js_undef();
     if(ctl == 1) r = ret_val;
     ctl = saved_ctl;
@@ -2479,6 +3183,7 @@ js_val_t js_call(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
 static js_obj_t *keys_of(js_val_t v){
     js_obj_t *out = new_array();
     if(v.t != JS_OBJ) return out;
+    if(v.o->kind == K_PROXY) return proxy_own_keys(v.o);
     if(v.o->is_array){
         for(int i = 0; i < v.o->nitems; i++){
             char b[12]; int k = 0; int x = i;
@@ -2498,6 +3203,15 @@ static js_obj_t *keys_of(js_val_t v){
     for(prop_t *p = v.o->props; p; p = p->next) if(!(p->flags & PF_HIDDEN) && p->k[0] != '\x01') tmp[--k] = p->k;
     for(int i = 0; i < n; i++) arr_push(out, js_str(tmp[i]));
     return out;
+}
+
+/* Binds one value of a for-in / for-of loop to the loop's target. */
+static void forin_bind(jsnode_t *n, js_val_t v, env_t *env, env_t *loop){
+    if(n->computed) assign_to(n->b, v, loop);                     /* for (x of o): an existing target */
+    else if(n->c && n->c->op == 0 && n->b->k == N_IDENT && env_find(env, n->b->str))
+        env_find(env, n->b->str)->v = v;                          /* for (var x of o) */
+    else if(n->b->k == N_IDENT && !n->b->c) env_define(loop, n->b->str, v);
+    else bind_pattern(n->b, v, loop);
 }
 
 /* Runs a loop body and decides what the loop does next. label: the loop's own label. */
@@ -2608,30 +3322,103 @@ static void exec(jsnode_t *n, env_t *env){
         case N_FOR: {
             env_t *loop = new_env(env);
             if(n->a) exec(n->a, loop);
+            /* for (let i = …): each turn of the loop gets its own binding, so a closure
+             * made in the body captures that turn's value and not the final one. */
+            int per_iter = n->a && n->a->k == N_VAR && n->a->op == 1;
             int stop = 0;
             while(!STOP() && !stop && (!n->b || js_truthy(eval(n->b, loop)))){
-                exec_loop_body(n->d, loop, &stop, n->label);
+                env_t *body = loop;
+                if(per_iter){
+                    body = new_env(env);
+                    for(binding_t *b = loop->first; b; b = b->next) env_define(body, b->name, b->v);
+                }
+                exec_loop_body(n->d, body, &stop, n->label);
                 if(stop || STOP()) break;
+                if(per_iter){     /* copy the (possibly updated) values back for the step */
+                    for(binding_t *b = loop->first; b; b = b->next){
+                        binding_t *c = env_find(body, b->name);
+                        if(c) b->v = c->v;
+                    }
+                }
                 if(n->c) eval(n->c, loop);
             }
             break;
         }
         case N_FORIN: {
+            if(n->op == 1 && (n->fflags & FN_ASYNC)){
+                /* for await (x of src): src may be an async iterable, or a plain one
+                 * whose values are promises. Each step is awaited. */
+                js_val_t coll = eval(n->a, env);
+                if(STOP()) break;
+                js_val_t itf = js_undef();
+                int async_it = 0;
+                if(coll.t == JS_OBJ){
+                    itf = js_get(coll.o, "\x01Symbol(Symbol.asyncIterator)");
+                    async_it = js_callable(itf);
+                    if(!async_it) itf = js_get(coll.o, "\x01Symbol(Symbol.iterator)");
+                }
+                js_val_t it = js_callable(itf) ? call_value(itf, coll, 0, NULL) : coll;
+                if(it.t != JS_OBJ){ fail_desc(n->a, " is not async iterable"); break; }
+                js_val_t nextf = js_get(it.o, "next");
+                if(!js_callable(nextf)){ fail_desc(n->a, " is not async iterable"); break; }
+                int stop = 0;
+                while(!STOP() && !stop){
+                    js_val_t r = call_value(nextf, it, 0, NULL);
+                    if(STOP()) break;
+                    if(async_it) r = coro_suspend(r, CO_AWAIT);
+                    if(STOP()) break;
+                    if(r.t != JS_OBJ){ fail("iterator result is not an object"); break; }
+                    if(js_truthy(js_get(r.o, "done"))) break;
+                    js_val_t v = coro_suspend(js_get(r.o, "value"), CO_AWAIT);
+                    if(STOP()) break;
+                    env_t *loop = new_env(env);
+                    forin_bind(n, v, env, loop);
+                    exec_loop_body(n->d, loop, &stop, n->label);
+                }
+                break;
+            }
             js_val_t coll = eval(n->a, env);
+            if(STOP()) break;
             js_obj_t *items = NULL;
+            int stop = 0;
             if(n->op == 1){
                 if(coll.t == JS_NULL || coll.t == JS_UNDEF){ fail_desc(n->a, " is not iterable"); break; }
+                /* An object with its own iterator is stepped one value at a time, so a
+                 * loop over an endless generator runs until the body breaks out. Arrays,
+                 * strings, maps and sets take the direct route below. */
+                js_val_t it = js_undef(), nextf = js_undef();
+                if(coll.t == JS_OBJ && !coll.o->is_array &&
+                   coll.o->kind != K_MAP && coll.o->kind != K_SET){
+                    js_val_t itf = js_get(coll.o, "\x01Symbol(Symbol.iterator)");
+                    if(js_callable(itf)){
+                        it = call_value(itf, coll, 0, NULL);
+                        if(STOP()) break;
+                        if(it.t == JS_OBJ) nextf = js_get(it.o, "next");
+                    }
+                }
+                if(js_callable(nextf)){
+                    while(!STOP() && !stop){
+                        js_val_t r = call_value(nextf, it, 0, NULL);
+                        if(STOP()) break;
+                        if(r.t != JS_OBJ){ fail("iterator result is not an object"); break; }
+                        if(js_truthy(js_get(r.o, "done"))) break;
+                        env_t *loop = new_env(env);
+                        forin_bind(n, js_get(r.o, "value"), env, loop);
+                        exec_loop_body(n->d, loop, &stop, n->label);
+                    }
+                    /* leaving early lets the iterator clean up (a generator's finally) */
+                    if(stop && !STOP()){
+                        js_val_t rf = js_get(it.o, "return");
+                        if(js_callable(rf)) call_value(rf, it, 0, NULL);
+                    }
+                    break;
+                }
                 items = iterate_to_array(coll);
                 if(STOP()) break;
             } else items = for_in_keys(coll);
-            int stop = 0;
             for(int i = 0; i < items->nitems && !STOP() && !stop; i++){
                 env_t *loop = new_env(env);
-                if(n->computed) assign_to(n->b, items->items[i], loop);            /* for (x in o): an existing target */
-                else if(n->c && n->c->op == 0 && n->b->k == N_IDENT && env_find(env, n->b->str))
-                    env_find(env, n->b->str)->v = items->items[i];                 /* for (var x in o) */
-                else if(n->b->k == N_IDENT && !n->b->c) env_define(loop, n->b->str, items->items[i]);
-                else bind_pattern(n->b, items->items[i], loop);
+                forin_bind(n, items->items[i], env, loop);
                 exec_loop_body(n->d, loop, &stop, n->label);
             }
             break;
@@ -2703,17 +3490,23 @@ static js_val_t arg(int argc, js_val_t *argv, int i){
     return i < argc ? argv[i] : js_undef();
 }
 
+/* Set by a host that wants every console.log line (the test runner prints them). */
+void (*js_log_sink)(const char *) = NULL;
+
 static js_val_t native_log(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
-    char out[160] = "";
+    char out[1024] = "";
     int k = 0;
     for(int i = 0; i < argc; i++){
         const char *s = js_to_str(argv[i]);
-        for(const char *p = s; *p && k < 150; p++) out[k++] = *p;
-        if(i + 1 < argc && k < 150) out[k++] = ' ';
+        for(const char *p = s; *p && k < (int)sizeof out - 10; p++) out[k++] = *p;
+        if(i + 1 < argc && k < (int)sizeof out - 10) out[k++] = ' ';
     }
     out[k] = 0;
-    memcpy(last_log, out, (u32)k + 1);
+    if(k > (int)sizeof last_log - 1) k = (int)sizeof last_log - 1;
+    memcpy(last_log, out, (u32)k);
+    last_log[k] = 0;
+    if(js_log_sink) js_log_sink(out);
     return js_undef();
 }
 
@@ -2753,7 +3546,17 @@ static js_val_t arr_index_of(js_val_t self, int argc, js_val_t *argv, void *ctx)
     return js_num(-1);
 }
 
+/* Array.prototype.includes: like indexOf but SameValueZero, so NaN is found. */
 static js_val_t arr_includes(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    js_val_t needle = arg(argc, argv, 0);
+    if(needle.t == JS_NUM && needle.n != needle.n){
+        if(self.t != JS_OBJ) return js_bool(0);
+        for(int i = 0; i < self.o->nitems; i++){
+            js_val_t e = self.o->items[i];
+            if(e.t == JS_NUM && e.n != e.n) return js_bool(1);
+        }
+        return js_bool(0);
+    }
     js_val_t r = arr_index_of(self, argc, argv, ctx);
     return js_bool(r.n >= 0);
 }
@@ -3489,11 +4292,24 @@ static js_val_t num_to_fixed(js_val_t self, int argc, js_val_t *argv, void *ctx)
 static js_val_t g_parse_int(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     const char *s = js_to_str(arg(argc, argv, 0));
-    while(*s == ' ') s++;
+    while(*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v') s++;
     int neg = 0;
     if(*s == '-'){ neg = 1; s++; } else if(*s == '+') s++;
+    int radix = argc > 1 ? (int)js_to_num(argv[1]) : 0;
+    if(radix && (radix < 2 || radix > 36)) return js_num(nan_value());
+    if((!radix || radix == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')){ s += 2; radix = 16; }
+    if(!radix) radix = 10;
     double v = 0; int any = 0;
-    while(*s >= '0' && *s <= '9'){ v = v * 10 + (*s - '0'); s++; any = 1; }
+    for(;; s++){
+        int c = (unsigned char)*s, d;
+        if(c >= '0' && c <= '9') d = c - '0';
+        else if(c >= 'a' && c <= 'z') d = c - 'a' + 10;
+        else if(c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+        else break;
+        if(d >= radix) break;
+        v = v * radix + d;
+        any = 1;
+    }
     if(!any) return js_num(nan_value());
     return js_num(neg ? -v : v);
 }
@@ -3761,6 +4577,7 @@ js_val_t js_compile_function(const char *src, u32 len, const char *param){
 
 /* Gives the script heap back to the kernel (the next js_init makes a new one). */
 void js_release(void){
+    coro_reset();
     if(arena) kfree(arena);
     arena = arena_end = NULL;
     free_list = NULL;
@@ -3769,12 +4586,14 @@ void js_release(void){
 }
 
 void js_init(void){
+    coro_reset();
     heap_reset();
     itab = NULL; itab_cap = itab_n = 0;
     object_proto = array_proto = string_proto = regex_proto = number_proto = NULL;
     global_obj = NULL; global_env = NULL;
     /* register the roots first: a collection may run while the built-ins are made */
     js_gc_root(&global_obj, sizeof global_obj);
+    js_gc_root(&coro_cur, sizeof coro_cur);
     js_gc_root(&toks, sizeof toks);
     js_gc_root(&itab, sizeof itab);
     js_gc_root(&global_env, sizeof global_env);

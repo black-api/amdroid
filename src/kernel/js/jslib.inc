@@ -225,6 +225,7 @@ NATIVE(symbol_to_string){
 }
 #define SYM_ITERATOR "\x01Symbol(Symbol.iterator)"
 #define SYM_ASYNC_ITERATOR "\x01Symbol(Symbol.asyncIterator)"
+#define SYM_ASYNC_ITERATOR "\x01Symbol(Symbol.asyncIterator)"
 #define SYM_TO_STRING_TAG "\x01Symbol(Symbol.toStringTag)"
 #define SYM_HAS_INSTANCE "\x01Symbol(Symbol.hasInstance)"
 #define SYM_TO_PRIMITIVE "\x01Symbol(Symbol.toPrimitive)"
@@ -1436,6 +1437,235 @@ NATIVE(map_m){
     return js_undef();
 }
 
+/* ---- generators, async functions and async generators ----
+ * All four shapes share one coroutine (see js.c): a generator object drives it one
+ * yield at a time, an async call drives it from the job queue as each awaited promise
+ * settles, and an async generator does both. */
+static js_obj_t *generator_proto = NULL, *async_gen_proto = NULL;
+
+static js_val_t iter_result(js_val_t v, int done){
+    js_obj_t *o = js_new_object();
+    js_set(o, "value", v);
+    js_set(o, "done", js_bool(done));
+    return js_objv(o);
+}
+/* v as a promise: itself when it is one, otherwise a promise already resolved with it. */
+static js_obj_t *as_promise(js_val_t v){
+    if(v.t == JS_OBJ && v.o->kind == K_PROMISE) return v.o;
+    js_obj_t *p = new_promise();
+    resolve_promise(p, v);
+    return p;
+}
+static coro_t *coro_of(js_val_t v){
+    return v.t == JS_OBJ && v.o->kind == K_CORO ? (coro_t *)v.o->slot : NULL;
+}
+
+static void coro_advance(coro_t *c, js_val_t in, int in_kind);
+
+typedef struct { coro_t *c; int kind; } resume_ctx_t;
+NATIVE(coro_resume_job){
+    (void)self;
+    resume_ctx_t *r = ctx;
+    coro_advance(r->c, argc ? argv[0] : js_undef(), r->kind);
+    return js_undef();
+}
+static js_val_t resume_fn(coro_t *c, int kind){
+    resume_ctx_t *r = jalloc(sizeof(resume_ctx_t));
+    r->c = c; r->kind = kind;
+    return js_objv(js_new_native(coro_resume_job, r));
+}
+
+/* Runs a coroutine one step and deals with why it stopped: an await is re-entered when
+ * the promise settles, a finished body settles the promise the call handed out. */
+static void coro_advance(coro_t *c, js_val_t in, int in_kind){
+    if(c->state == CS_DONE) return;
+    coro_resume(c, in, in_kind);
+    js_obj_t *r = c->result;
+    switch(c->out_kind){
+        case CO_AWAIT: {
+            js_obj_t *p = as_promise(c->outbox);
+            promise_then(p, resume_fn(c, CI_NEXT), resume_fn(c, CI_THROW));
+            return;
+        }
+        case CO_YIELD:
+            if(r){ c->result = NULL; resolve_promise(r, iter_result(c->outbox, 0)); }
+            return;
+        case CO_RETURN:
+            if(r){ c->result = NULL; resolve_promise(r, c->is_gen ? iter_result(c->outbox, 1) : c->outbox); }
+            return;
+        default: {                       /* CO_THROW */
+            js_val_t ex;
+            if(!take_exception(&ex)) ex = js_undef();
+            if(r){ c->result = NULL; settle(r, 2, ex); }
+            else throw_val(ex);          /* nobody is waiting: let it propagate */
+            return;
+        }
+    }
+}
+
+static js_val_t make_coro_obj(jsnode_t *f, env_t *env, js_val_t self, js_obj_t *proto){
+    js_obj_t *g = new_with_proto(proto);
+    coro_t *c = jalloc(sizeof(coro_t));
+    memset(c, 0, sizeof *c);
+    c->fdecl = f;
+    c->env = env;
+    c->self = self;
+    c->owner = g;
+    c->state = CS_NEW;
+    c->inbox = c->outbox = c->ret_val = js_undef();
+    g->kind = K_CORO;
+    g->slot = c;
+    return js_objv(g);
+}
+
+/* Called instead of running the body, from call_value. */
+static js_val_t coro_start(js_obj_t *fn, jsnode_t *f, env_t *env, js_val_t self){
+    (void)fn;
+    int gen = (f->fflags & FN_GEN) != 0, as = (f->fflags & FN_ASYNC) != 0;
+    js_val_t gv = make_coro_obj(f, env, self, gen ? (as ? async_gen_proto : generator_proto) : NULL);
+    coro_t *c = gv.o->slot;
+    c->is_gen = gen;
+    c->is_async = as;
+    if(gen) return gv;
+    /* an async function: run to its first await, then hand back the promise */
+    js_obj_t *p = new_promise();
+    c->result = p;
+    coro_advance(c, js_undef(), CI_NEXT);
+    return js_objv(p);
+}
+
+/* Generator.prototype.next / .return / .throw; ctx picks which. */
+NATIVE(gen_step){
+    int kind = (int)(uintptr_t)ctx;
+    coro_t *c = coro_of(self);
+    if(!c) return throw_type("not a generator");
+    js_val_t in = arg(argc, argv, 0);
+    if(c->state == CS_RUNNING) return throw_type("Generator is already running");
+    if(c->state == CS_DONE || (c->state == CS_NEW && kind == CI_RETURN)){
+        c->state = CS_DONE;
+        if(kind == CI_THROW) return throw_val(in);
+        return iter_result(kind == CI_RETURN ? in : js_undef(), 1);
+    }
+    coro_resume(c, in, kind);
+    if(c->out_kind == CO_THROW) return js_undef();            /* the error is already pending */
+    if(c->out_kind == CO_AWAIT){ fail("await in a plain generator"); return js_undef(); }
+    return iter_result(c->outbox, c->out_kind != CO_YIELD);
+}
+
+/* AsyncGenerator.prototype.next / .return / .throw: the same, through a promise. */
+NATIVE(agen_step){
+    int kind = (int)(uintptr_t)ctx;
+    coro_t *c = coro_of(self);
+    if(!c) return throw_type("not an async generator");
+    js_val_t in = arg(argc, argv, 0);
+    js_obj_t *p = new_promise();
+    if(c->state == CS_DONE || (c->state == CS_NEW && kind == CI_RETURN)){
+        c->state = CS_DONE;
+        if(kind == CI_THROW) settle(p, 2, in);
+        else resolve_promise(p, iter_result(kind == CI_RETURN ? in : js_undef(), 1));
+        return js_objv(p);
+    }
+    if(c->state == CS_RUNNING){ settle(p, 2, make_error(1, "Generator is already running")); return js_objv(p); }
+    c->result = p;
+    coro_advance(c, in, kind);
+    return js_objv(p);
+}
+
+/* ---- Proxy ----
+ * Built on the same get/set hooks the DOM objects use: the traps that the object model
+ * already asks about (get, set, has, deleteProperty, ownKeys) are wired straight in,
+ * and a proxy over a function also forwards apply and construct. */
+typedef struct { js_obj_t *target, *handler; } proxy_t;
+static js_obj_t *proxy_proto_dummy = NULL;   /* kept only so the type is rooted */
+
+static js_val_t proxy_trap(js_obj_t *o, const char *name){
+    proxy_t *px = o->slot;
+    if(!px || !px->handler) return js_undef();
+    js_val_t f = js_get(px->handler, name);
+    return js_callable(f) ? f : js_undef();
+}
+static int proxy_hget(js_obj_t *o, const char *name, js_val_t *out){
+    proxy_t *px = o->slot;
+    if(!px) return 0;
+    js_val_t f = proxy_trap(o, "get");
+    if(f.t == JS_UNDEF){ *out = js_get(px->target, name); return 1; }
+    js_val_t a[3] = { js_objv(px->target), js_str(name), js_objv(o) };
+    *out = call_value(f, js_objv(px->handler), 3, a);
+    return 1;
+}
+static int proxy_hset(js_obj_t *o, const char *name, js_val_t v){
+    proxy_t *px = o->slot;
+    if(!px) return 0;
+    js_val_t f = proxy_trap(o, "set");
+    if(f.t == JS_UNDEF){ obj_set(px->target, name, v); return 1; }
+    js_val_t a[4] = { js_objv(px->target), js_str(name), v, js_objv(o) };
+    call_value(f, js_objv(px->handler), 4, a);
+    return 1;
+}
+static int proxy_has(js_obj_t *o, const char *name){
+    proxy_t *px = o->slot;
+    if(!px) return 0;
+    js_val_t f = proxy_trap(o, "has");
+    if(f.t == JS_UNDEF) return has_prop(px->target, name);
+    js_val_t a[2] = { js_objv(px->target), js_str(name) };
+    return js_truthy(call_value(f, js_objv(px->handler), 2, a));
+}
+static int proxy_delete(js_obj_t *o, const char *name){
+    proxy_t *px = o->slot;
+    if(!px) return 0;
+    js_val_t f = proxy_trap(o, "deleteProperty");
+    if(f.t == JS_UNDEF){ prop_remove(px->target, name); return 1; }
+    js_val_t a[2] = { js_objv(px->target), js_str(name) };
+    return js_truthy(call_value(f, js_objv(px->handler), 2, a));
+}
+static js_obj_t *proxy_own_keys(js_obj_t *o){
+    proxy_t *px = o->slot;
+    if(!px) return new_array();
+    js_val_t f = proxy_trap(o, "ownKeys");
+    if(f.t == JS_UNDEF) return keys_of(js_objv(px->target));
+    js_val_t a[1] = { js_objv(px->target) };
+    js_val_t r = call_value(f, js_objv(px->handler), 1, a);
+    js_obj_t *keys = iterate_to_array(r), *out = new_array();
+    for(int i = 0; i < keys->nitems; i++){
+        const char *k = js_to_str(keys->items[i]);
+        if(k[0] != '\x01') arr_push(out, js_str(k));       /* symbols are not own keys */
+    }
+    return out;
+}
+/* a proxy over a function: calling or constructing it goes through apply/construct */
+NATIVE(proxy_call){
+    js_obj_t *o = ctx;
+    proxy_t *px = o->slot;
+    js_val_t f = proxy_trap(o, "apply");
+    js_obj_t *args = new_array();
+    for(int i = 0; i < argc; i++) arr_push(args, argv[i]);
+    if(f.t == JS_UNDEF) return call_value(js_objv(px->target), self, argc, argv);
+    js_val_t a[3] = { js_objv(px->target), self, js_objv(args) };
+    return call_value(f, js_objv(px->handler), 3, a);
+}
+NATIVE(proxy_ctor){
+    (void)ctx;
+    if(argc < 2 || argv[0].t != JS_OBJ || argv[1].t != JS_OBJ)
+        return throw_type("Cannot create proxy with a non-object as target or handler");
+    js_obj_t *o = self.t == JS_OBJ && self.o != global_obj ? self.o : new_obj();
+    proxy_t *px = jalloc(sizeof(proxy_t));
+    px->target = argv[0].o;
+    px->handler = argv[1].o;
+    o->kind = K_PROXY;
+    o->slot = px;
+    o->proto = argv[0].o->proto;
+    o->hget = proxy_hget;
+    o->hset = proxy_hset;
+    if(argv[0].o->is_func){
+        o->is_func = 1;
+        o->native = proxy_call;
+        o->ctx = o;
+        o->is_class = argv[0].o->is_class;
+    }
+    if(argv[0].o->is_array) o->is_array = 1;
+    return js_objv(o);
+}
+
 /* ---- typed arrays: arrays whose writes are converted to the element type ---- */
 enum { TA_I8, TA_U8, TA_U8C, TA_I16, TA_U16, TA_I32, TA_U32, TA_F32, TA_F64 };
 static const char *ta_names[] = { "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array" };
@@ -1468,6 +1698,75 @@ static js_obj_t *make_typed(int type, int n){
     for(int i = 0; i < n; i++) arr_push(a, js_num(0));
     return a;
 }
+/* ---- raw buffers ----
+ * An ArrayBuffer made by the host from bytes (a fetch() body: often a megabyte of video)
+ * keeps them in one block (o->host) instead of one number per byte. Handing it back to the
+ * host (appendBuffer) reads that block directly; the first view or DataView made on it
+ * turns it into the ordinary form. */
+typedef struct { u32 len; u8 data[]; } rawbuf_t;
+static js_obj_t *buf_bytes(js_obj_t *b){
+    if(b->kind != K_BUFFER) return NULL;
+    if(!b->slot && b->host){
+        rawbuf_t *r = b->host;
+        js_obj_t *bytes = new_array();
+        for(u32 i = 0; i < r->len; i++) arr_push(bytes, js_num(r->data[i]));
+        b->slot = bytes;
+        b->host = NULL;
+        js_set(b, "_bytes", js_objv(bytes)); find_own(b, "_bytes")->flags = PF_HIDDEN;
+    }
+    return b->slot;
+}
+js_obj_t *js_new_buffer_bytes(const u8 *data, u32 len){
+    js_obj_t *o = new_obj();
+    o->proto = buffer_proto;
+    o->kind = K_BUFFER;
+    rawbuf_t *r = jalloc((u32)sizeof(rawbuf_t) + len);
+    r->len = len;
+    if(len) memcpy(r->data, data, len);
+    o->host = r;
+    js_set(o, "byteLength", js_num(len));
+    return o;
+}
+/* The bytes of an ArrayBuffer, a typed array or a DataView. *raw is set (and nothing is
+ * copied) for a raw buffer; otherwise up to max bytes go to out. Returns the length, or -1
+ * when v holds no bytes. */
+int js_bytes_of(js_val_t v, const u8 **raw, u8 *out, u32 max){
+    *raw = NULL;
+    if(v.t != JS_OBJ) return -1;
+    js_obj_t *o = v.o;
+    if(o->kind == K_BUFFER && !o->slot && o->host){ rawbuf_t *r = o->host; *raw = r->data; return (int)r->len; }
+    js_obj_t *items = NULL;
+    int off = 0, len = -1, es = 1;
+    if(o->kind == K_BUFFER){ items = buf_bytes(o); }
+    else if(o->kind == K_TYPED){
+        int type = *(int *)o->slot;
+        es = ta_size[type];
+        if(es != 1){                     /* a wider view: through its buffer */
+            js_val_t b = js_get(o, "buffer");
+            if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return -1;
+            items = buf_bytes(b.o);
+        } else {
+            u32 n = (u32)o->nitems;
+            if(!out) return (int)n;
+            if(n > max) n = max;
+            for(u32 i = 0; i < n; i++) out[i] = (u8)((u32)js_to_num(o->items[i]) & 255);
+            return (int)n;
+        }
+    } else {
+        js_val_t b = js_get(o, "buffer");           /* a DataView */
+        if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return -1;
+        items = buf_bytes(b.o);
+        off = (int)js_to_num(js_get(o, "byteOffset"));
+        len = (int)js_to_num(js_get(o, "byteLength"));
+    }
+    if(!items) return -1;
+    if(len < 0) len = items->nitems - off;
+    if(!out) return len;                         /* only the length was asked for */
+    if((u32)len > max) len = (int)max;
+    for(int i = 0; i < len; i++) out[i] = (u8)((u32)js_to_num(items->items[off + i]) & 255);
+    return len;
+}
+
 NATIVE(typed_ctor){
     int type = (int)(uintptr_t)ctx;
     (void)self;
@@ -1478,11 +1777,22 @@ NATIVE(typed_ctor){
         if(n < 0 || n > 64e6) return throw_val(make_error(2, "Invalid typed array length"));
         a = make_typed(type, (int)n);
     } else if(argv[0].o->kind == K_BUFFER){
-        js_obj_t *bytes = argv[0].o->slot;   /* the buffer's bytes, as numbers */
+        js_obj_t *bytes = buf_bytes(argv[0].o);   /* the buffer's bytes, as numbers */
         int off = argi(argc, argv, 1, 0);
         int es = ta_size[type];
         int n = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : (bytes->nitems - off) / es;
-        a = make_typed(type, n < 0 ? 0 : n);
+        if(n < 0) n = 0;
+        if((type == TA_U8 || type == TA_U8C) && off == 0 && n == bytes->nitems){
+            /* a whole-buffer byte view shares the buffer's storage, so writes show
+             * through both it and a DataView on the same buffer */
+            a = new_obj();
+            a->is_array = 1; a->kind = K_TYPED; a->proto = ta_protos[type];
+            int *t = jalloc(sizeof(int)); *t = type; a->slot = t;
+            a->items = bytes->items; a->nitems = bytes->nitems; a->cap = bytes->cap;
+            js_set(a, "buffer", argv[0]); find_own(a, "buffer")->flags = PF_HIDDEN;
+            return js_objv(a);
+        }
+        a = make_typed(type, n);
         for(int i = 0; i < a->nitems; i++){
             u64 raw = 0;
             for(int b = 0; b < es; b++){ int bi = off + i * es + b; if(bi < bytes->nitems) raw |= (u64)((u32)js_to_num(bytes->items[bi]) & 255) << (8 * b); }
@@ -1538,6 +1848,92 @@ NATIVE(buffer_ctor){
     js_set(o, "_bytes", js_objv(bytes)); find_own(o, "_bytes")->flags = PF_HIDDEN;   /* for DataView (browser_api) */
     return js_objv(o);
 }
+/* ---- DataView: reads and writes a buffer's bytes at a byte offset ---- */
+static js_obj_t *dataview_proto = NULL;
+/* self's buffer bytes, plus its byte offset and length */
+static js_obj_t *dv_bytes(js_val_t self, int *off, int *len){
+    if(self.t != JS_OBJ) return NULL;
+    js_val_t b = js_get(self.o, "buffer");
+    if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return NULL;
+    *off = (int)js_to_num(js_get(self.o, "byteOffset"));
+    *len = (int)js_to_num(js_get(self.o, "byteLength"));
+    return buf_bytes(b.o);
+}
+NATIVE(dataview_ctor){
+    (void)ctx;
+    js_obj_t *o = ctor_self(self, dataview_proto);
+    if(!o) return throw_type("Constructor DataView requires 'new'");
+    if(argc < 1 || argv[0].t != JS_OBJ || argv[0].o->kind != K_BUFFER)
+        return throw_type("First argument to DataView constructor must be an ArrayBuffer");
+    js_obj_t *bytes = buf_bytes(argv[0].o);
+    int off = argi(argc, argv, 1, 0);
+    if(off < 0 || off > bytes->nitems) return throw_val(make_error(2, "Start offset is outside the bounds of the buffer"));
+    int len = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : bytes->nitems - off;
+    if(len < 0 || off + len > bytes->nitems) return throw_val(make_error(2, "Invalid DataView length"));
+    js_set(o, "buffer", argv[0]);
+    js_set(o, "byteOffset", js_num(off));
+    js_set(o, "byteLength", js_num(len));
+    return js_objv(o);
+}
+/* ctx packs the element: size | signed << 4 | float << 5 */
+NATIVE(dataview_get){
+    int spec = (int)(uintptr_t)ctx, size = spec & 15, sgn = (spec >> 4) & 1, flt = (spec >> 5) & 1;
+    int off, len;
+    js_obj_t *bytes = dv_bytes(self, &off, &len);
+    if(!bytes) return throw_type("DataView method called on incompatible receiver");
+    int i = argi(argc, argv, 0, 0);
+    int le = size > 1 && argc > 1 && js_truthy(argv[1]);
+    if(i < 0 || i + size > len) return throw_val(make_error(2, "Offset is outside the bounds of the DataView"));
+    u64 raw = 0;
+    for(int b = 0; b < size; b++){
+        u32 byte = (u32)js_to_num(bytes->items[off + i + b]) & 255;
+        raw |= (u64)byte << (8 * (le ? b : size - 1 - b));
+    }
+    if(flt){
+        if(size == 4){ u32 r = (u32)raw; float f; memcpy(&f, &r, 4); return js_num((double)f); }
+        double d; memcpy(&d, &raw, 8); return js_num(d);
+    }
+    if(sgn){
+        if(size == 1) return js_num((double)(signed char)(u8)raw);
+        if(size == 2) return js_num((double)(short)(u16)raw);
+        return js_num((double)(int)(u32)raw);
+    }
+    return js_num((double)raw);
+}
+NATIVE(dataview_set){
+    int spec = (int)(uintptr_t)ctx, size = spec & 15, flt = (spec >> 5) & 1;
+    int off, len;
+    js_obj_t *bytes = dv_bytes(self, &off, &len);
+    if(!bytes) return throw_type("DataView method called on incompatible receiver");
+    int i = argi(argc, argv, 0, 0);
+    double v = argn(argc, argv, 1);
+    int le = size > 1 && argc > 2 && js_truthy(argv[2]);
+    if(i < 0 || i + size > len) return throw_val(make_error(2, "Offset is outside the bounds of the DataView"));
+    u64 raw;
+    if(flt){
+        if(size == 4){ float f = (float)v; u32 r; memcpy(&r, &f, 4); raw = r; }
+        else { memcpy(&raw, &v, 8); }
+    } else if(size == 8) raw = (u64)(long long)v;
+    else raw = (u64)to_u32(v);
+    for(int b = 0; b < size; b++)
+        bytes->items[off + i + b] = js_num((double)((raw >> (8 * (le ? b : size - 1 - b))) & 255));
+    return js_undef();
+}
+
+/* String.raw`...`: the literal pieces, unescaped, with the substitutions between them. */
+NATIVE(str_raw){
+    (void)self; (void)ctx;
+    if(argc < 1 || argv[0].t != JS_OBJ) return js_str("");
+    js_val_t raws = js_get(argv[0].o, "raw");
+    js_obj_t *parts = raws.t == JS_OBJ ? raws.o : argv[0].o;
+    js_val_t out = js_str("");
+    for(int i = 0; i < parts->nitems; i++){
+        out = concat(out, parts->items[i]);
+        if(i + 1 < parts->nitems && i + 1 < argc) out = concat(out, argv[i + 1]);
+    }
+    return out;
+}
+
 NATIVE(text_encode){
     (void)self; (void)ctx;
     const unsigned char *s = (const unsigned char *)(argc ? js_to_str(argv[0]) : "");
@@ -1549,7 +1945,7 @@ NATIVE(text_encode){
 NATIVE(text_decode){
     (void)self; (void)ctx;
     if(argc < 1 || argv[0].t != JS_OBJ) return js_str("");
-    js_obj_t *src = argv[0].o->kind == K_BUFFER ? argv[0].o->slot : iterate_to_array(argv[0]);
+    js_obj_t *src = argv[0].o->kind == K_BUFFER ? buf_bytes(argv[0].o) : iterate_to_array(argv[0]);
     char *b = jalloc((u32)src->nitems + 1);
     for(int i = 0; i < src->nitems; i++){ int c = (int)js_to_num(src->items[i]); b[i] = (char)(c ? c : ' '); }
     b[src->nitems] = 0;
@@ -2178,6 +2574,13 @@ static js_val_t to_primitive(js_val_t v, int want_num){
         return date_to_string(v, 0, NULL, NULL);
     }
     if(depth > MAX_DEPTH - 10) return v;
+    js_val_t tp = js_get(o, SYM_TO_PRIMITIVE);
+    if(js_callable(tp)){
+        js_val_t hint[1] = { js_str(want_num ? "number" : "string") };
+        js_val_t r = call_value(tp, v, 1, hint);
+        if(STOP()) return js_str("");
+        if(r.t != JS_OBJ) return r;
+    }
     const char *order[2] = { want_num ? "valueOf" : "toString", want_num ? "toString" : "valueOf" };
     for(int i = 0; i < 2; i++){
         js_val_t f = js_get(o, order[i]);
@@ -2247,6 +2650,9 @@ static void jslib_init(void){
     js_gc_root(&weakset_proto, sizeof weakset_proto);
     js_gc_root(ta_protos, sizeof ta_protos);
     js_gc_root(&buffer_proto, sizeof buffer_proto);
+    js_gc_root(&dataview_proto, sizeof dataview_proto);
+    js_gc_root(&generator_proto, sizeof generator_proto);
+    js_gc_root(&async_gen_proto, sizeof async_gen_proto);
 
     /* existing natives were made before Function.prototype existed */
     for(prop_t *p = g->props; p; p = p->next){
@@ -2314,6 +2720,7 @@ static void jslib_init(void){
     js_obj_t *sym = ctor_named("Symbol", symbol_fn, NULL);
     put_val(sym, "iterator", js_str(SYM_ITERATOR));
     put_val(sym, "asyncIterator", js_str(SYM_ASYNC_ITERATOR));
+    put_val(sym, "asyncIterator", js_str(SYM_ASYNC_ITERATOR));
     put_val(sym, "toStringTag", js_str(SYM_TO_STRING_TAG));
     put_val(sym, "hasInstance", js_str(SYM_HAS_INSTANCE));
     put_val(sym, "toPrimitive", js_str(SYM_TO_PRIMITIVE));
@@ -2350,6 +2757,7 @@ static void jslib_init(void){
     js_set(string_proto, "constructor", js_objv(string)); find_own(string_proto, "constructor")->flags = PF_HIDDEN;
     put_fn(string, "fromCharCode", str_from_char_code2, NULL);
     put_fn(string, "fromCodePoint", str_from_code_point, NULL);
+    put_fn(string, "raw", str_raw, NULL);
     put_fn(string_proto, "lastIndexOf", str_last_index_of, NULL);
     put_fn(string_proto, "substr", str_substr, NULL);
     put_fn(string_proto, "codePointAt", str_code_point_at, NULL);
@@ -2465,6 +2873,22 @@ static void jslib_init(void){
     put_fn(promise, "any", promise_combo, (void *)3);
     put_fn(g, "queueMicrotask", g_queue_microtask, NULL);
 
+    /* generators and async generators */
+    generator_proto = new_with_proto(iter_proto);
+    put_fn(generator_proto, "next", gen_step, (void *)(uintptr_t)CI_NEXT);
+    put_fn(generator_proto, "return", gen_step, (void *)(uintptr_t)CI_RETURN);
+    put_fn(generator_proto, "throw", gen_step, (void *)(uintptr_t)CI_THROW);
+    put_fn(generator_proto, SYM_ITERATOR, return_self, NULL);
+    js_set(generator_proto, SYM_TO_STRING_TAG, js_str("Generator"));
+    async_gen_proto = js_new_object();
+    put_fn(async_gen_proto, "next", agen_step, (void *)(uintptr_t)CI_NEXT);
+    put_fn(async_gen_proto, "return", agen_step, (void *)(uintptr_t)CI_RETURN);
+    put_fn(async_gen_proto, "throw", agen_step, (void *)(uintptr_t)CI_THROW);
+    put_fn(async_gen_proto, SYM_ASYNC_ITERATOR, return_self, NULL);
+    js_set(async_gen_proto, SYM_TO_STRING_TAG, js_str("AsyncGenerator"));
+    js_set(g, "globalThis", js_objv(g));
+    find_own(g, "globalThis")->flags = PF_HIDDEN;
+
     /* Map, Set, WeakMap, WeakSet */
     map_proto = js_new_object(); set_proto = js_new_object(); weakmap_proto = js_new_object(); weakset_proto = js_new_object();
     js_obj_t *mapc = ctor_named("Map", mapset_ctor, map_proto); mapc->ctx = (void *)0;
@@ -2504,8 +2928,29 @@ static void jslib_init(void){
         put_val(ta_protos[i], "BYTES_PER_ELEMENT", js_num(ta_size[i]));
         put_fn(c, "from", arr_from2, NULL);
     }
+    dataview_proto = js_new_object();
+    ctor_named("DataView", dataview_ctor, dataview_proto);
+    js_set(dataview_proto, SYM_TO_STRING_TAG, js_str("DataView"));
+    {
+        /* name, size | signed << 4 | float << 5 */
+        static const struct { const char *n; int spec; } dvs[] = {
+            { "Int8", 1 | 16 }, { "Uint8", 1 }, { "Int16", 2 | 16 }, { "Uint16", 2 },
+            { "Int32", 4 | 16 }, { "Uint32", 4 }, { "Float32", 4 | 32 }, { "Float64", 8 | 32 }, { 0, 0 }
+        };
+        for(int i = 0; dvs[i].n; i++){
+            char nm[20];
+            nm[0] = 'g'; nm[1] = 'e'; nm[2] = 't'; nm[3] = 0;
+            strcat(nm, dvs[i].n);
+            put_fn(dataview_proto, nm, dataview_get, (void *)(uintptr_t)dvs[i].spec);
+            nm[0] = 's'; nm[1] = 'e'; nm[2] = 't'; nm[3] = 0;
+            strcat(nm, dvs[i].n);
+            put_fn(dataview_proto, nm, dataview_set, (void *)(uintptr_t)dvs[i].spec);
+        }
+    }
     ctor_named("TextEncoder", text_ctor, js_new_object())->ctx = NULL;
     ctor_named("TextDecoder", text_ctor, js_new_object())->ctx = (void *)1;
+
+    ctor_named("Proxy", proxy_ctor, NULL);
 
     /* Reflect */
     js_obj_t *reflect = js_new_object();

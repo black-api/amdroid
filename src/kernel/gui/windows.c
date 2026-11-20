@@ -24,6 +24,17 @@ static int inited = 0;
 
 void win_set_pointer(int x, int y){ ptr_x = x; ptr_y = y; }
 void win_mark_dirty(int a){ if(a >= 0 && a < UI_MAX_APPS) dirty[a] = 1; }
+/* part of the window changed (a video picture): only that box is drawn again */
+static int dirty_part[UI_MAX_APPS];
+static rect_t dirty_r[UI_MAX_APPS];
+void win_mark_dirty_rect(int a, rect_t r){
+    if(a < 0 || a >= UI_MAX_APPS || !r.w || !r.h) return;
+    if(!dirty_part[a]){ dirty_r[a] = r; dirty_part[a] = 1; return; }
+    rect_t o = dirty_r[a];
+    u32 x0 = o.x < r.x ? o.x : r.x, y0 = o.y < r.y ? o.y : r.y;
+    u32 x1 = o.x + o.w > r.x + r.w ? o.x + o.w : r.x + r.w, y1 = o.y + o.h > r.y + r.h ? o.y + o.h : r.y + r.h;
+    dirty_r[a] = (rect_t){ x0, y0, x1 - x0, y1 - y0 };
+}
 int  win_is_max(int a){ return is_max[a]; }
 
 /* The screen above the taskbar: what maximized and snapped windows fill. */
@@ -114,14 +125,18 @@ static void place(int a){
     if(w < 720) w = 720;
     if(w > 980) w = 980;
     u32 avail = (u32)scr_h - 48 - 2 * 12 - 24;      /* screen minus taskbar and margins */
-    u32 h = avail * 85 / 100;
+    u32 h = avail * 90 / 100;
     if(h < 560) h = avail < 560 ? avail : 560;
-    if(h > 620) h = 620;
+    if(h > 720) h = 720;
     int off = cascade * 36;
     cascade = (cascade + 1) % 5;
     int x = (scr_w - (int)w) / 2 + off - 72;
     int y = ((int)avail - (int)h) / 2 + off - 24;
-    rects[a] = (rect_t){ (u32)clampi_(x, 0, scr_w - (int)w), (u32)clampi_(y, 0, (int)avail), w, h };
+    /* below the Dynamic Island (top) and clear of the taskbar (bottom) */
+    int ymin = 72, ymax = scr_h - 84 - (int)h;
+    if(ymax < ymin) ymax = ymin;
+    y = clampi_(y, ymin, ymax);
+    rects[a] = (rect_t){ (u32)clampi_(x, 0, scr_w - (int)w), (u32)y, w, h };
 }
 
 /* Windows stay open while the user is away in the text shell. */
@@ -342,9 +357,15 @@ void win_damage(u64 now){
         } else if(s.vis && dirty[a]){
             rect_t b = win_body(a);                  /* only what the app draws */
             gui_damage((int)b.x, (int)b.y, (int)b.w, (int)b.h);
+        } else if(s.vis && dirty_part[a]){
+            rect_t b = win_body(a), r = dirty_r[a];  /* only the part that changed, inside the body */
+            i64 x0 = r.x > b.x ? r.x : b.x, y0 = r.y > b.y ? r.y : b.y;
+            i64 x1 = r.x + r.w < b.x + b.w ? r.x + r.w : b.x + b.w, y1 = r.y + r.h < b.y + b.h ? r.y + r.h : b.y + b.h;
+            if(x1 > x0 && y1 > y0) gui_damage((int)x0, (int)y0, (int)(x1 - x0), (int)(y1 - y0));
         }
         *o = s;
         dirty[a] = 0;
+        dirty_part[a] = 0;
 
         /* a closing or minimizing window slides away for a moment */
         if(ghost[a].on && now - ghost[a].start >= GHOST_TICKS) ghost[a].on = 0;
