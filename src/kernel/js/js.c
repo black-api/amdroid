@@ -7,8 +7,8 @@
 #include "string.h"
 #include "stdint.h"
 
-#define ARENA_SIZE   (8 * 1024 * 1024)
-#define MAX_DEPTH    200
+#define ARENA_DEFAULT (8u * 1024 * 1024)
+#define MAX_DEPTH    500
 #define MAX_STEPS    20000000
 #define SCRATCH_SIZE 65536
 
@@ -37,8 +37,16 @@ static hdr_t *mstack[MSTACK];
 static u32 msp = 0;
 static int mover = 0;
 static hdr_t **starts = NULL;
-static u32 nstarts = 0;
+static u32 nstarts = 0, starts_cap = 0;   /* kept between collections (some hosts never free) */
 extern char stack_top[];          /* the top of the kernel stack (boot.asm) */
+enum { CS_NEW, CS_SUSPENDED, CS_RUNNING, CS_DONE };
+enum { CI_NEXT, CI_THROW, CI_RETURN };             /* what a resume carries in */
+enum { CO_YIELD, CO_RETURN, CO_THROW, CO_AWAIT };  /* why it switched back out */
+/* the coroutine stacks the collector has to scan (see "coroutines" further down) */
+static uintptr_t coro_scan_top(void);
+static void coro_scan_chain(void);
+static void coro_scan_suspended(void);
+static void coro_sweep(void);
 /* Optional runtime override of the stack top the GC scans up to. Left 0 in the
  * kernel and Husser (they use the stack_top symbol); a host/test build that has
  * no such symbol at a fixed address sets it with js_set_stack_top(). */
@@ -50,11 +58,15 @@ void js_gc_root(void *p, u32 n){
     if(nroots < MAX_ROOTS){ roots[nroots].p = p; roots[nroots].n = n; nroots++; }
 }
 
+static u32 arena_bytes = ARENA_DEFAULT;
+/* Sets the script heap's size; takes effect before the first js_init(). */
+void js_set_heap_size(u32 bytes){ if(!arena && bytes >= (1u << 20)) arena_bytes = bytes; }
+
 static void heap_reset(void){
-    if(!arena) arena = kmalloc(ARENA_SIZE);
-    arena_end = arena + ARENA_SIZE;
+    if(!arena) arena = kmalloc(arena_bytes);
+    arena_end = arena + arena_bytes;
     hdr_t *h = (hdr_t *)arena;
-    h->size = ARENA_SIZE - HDR_SZ;
+    h->size = arena_bytes - HDR_SZ;
     h->flags = 0;
     h->nfree = NULL;
     free_list = h;
@@ -83,11 +95,16 @@ static void *try_alloc(u32 n){
 }
 
 static void gc(void);
+static void gc_scan_tokens(void);
+int js_gc_stress = 0;     /* test builds: collect every js_gc_stress allocations, poison freed blocks */
 
+
+static int stress_count = 0;
 static void *jalloc(u32 n){
     n = (n + 7) & ~7u;
     if(n < 16) n = 16;
     if(!arena) heap_reset();
+    if(js_gc_stress && !in_gc && ++stress_count >= js_gc_stress){ stress_count = 0; gc(); }
     void *p = try_alloc(n);
     if(!p && !in_gc){
         gc();
@@ -126,6 +143,21 @@ static void mark_addr(uintptr_t w){
     else mover = 1;
 }
 
+/* 1 when p's block survived the mark phase (or is not in the script heap at all). */
+static int blk_marked(void *p){
+    uintptr_t w = (uintptr_t)p;
+    if(w < (uintptr_t)arena || w >= (uintptr_t)arena_end) return 1;
+    int lo = 0, hi = (int)nstarts - 1, best = -1;
+    while(lo <= hi){
+        int mid = (lo + hi) / 2;
+        if((uintptr_t)starts[mid] <= w){ best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    if(best < 0) return 0;
+    hdr_t *h = starts[best];
+    return (h->flags & F_USED) && (h->flags & F_MARK);
+}
+
 static void scan_words(const void *p, u32 bytes){
     const uintptr_t *w = (const uintptr_t *)p;
     for(u32 i = 0; i < bytes / sizeof(uintptr_t); i++) mark_addr(w[i]);
@@ -147,7 +179,12 @@ static void gc(void){
         nb++;
         p += HDR_SZ + h->size;
     }
-    starts = kmalloc(sizeof(hdr_t *) * nb);
+    if(nb > starts_cap){
+        if(starts) kfree(starts);
+        starts_cap = nb + nb / 2 + 1024;
+        starts = kmalloc(sizeof(hdr_t *) * starts_cap);
+        if(!starts) starts_cap = 0;
+    }
     nstarts = 0;
     if(starts){
         for(char *p = arena; p < arena_end; ){
@@ -158,14 +195,23 @@ static void gc(void){
     }
     msp = 0;
     mover = 0;
-    /* roots: the stack (spilling registers first), then the registered globals */
-    __builtin_unwind_init();
-    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
-    uintptr_t top = js_stack_top ? js_stack_top : (uintptr_t)stack_top;
-    for(uintptr_t a = here & ~(uintptr_t)7; a < top; a += 8)
+    /* roots: the callee-saved registers (a caller may keep a pointer only there), the
+     * whole stack from the current stack pointer up, then the registered globals */
+    uintptr_t regs[6];
+    __asm__ volatile("mov %%rbx, 0(%0)\n\tmov %%rbp, 8(%0)\n\tmov %%r12, 16(%0)\n\t"
+                     "mov %%r13, 24(%0)\n\tmov %%r14, 32(%0)\n\tmov %%r15, 40(%0)"
+                     : : "r"(regs) : "memory");
+    for(int i = 0; i < 6; i++) mark_addr(regs[i]);
+    uintptr_t sp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+    uintptr_t top = coro_scan_top();
+    for(uintptr_t a = sp & ~(uintptr_t)7; a < top; a += 8)
         mark_addr(*(uintptr_t *)a);
+    coro_scan_chain();                /* the stacks this one was resumed from */
     for(int i = 0; i < nroots; i++) scan_words(roots[i].p, roots[i].n);
+    gc_scan_tokens();
     drain();
+    coro_scan_suspended();            /* a suspended stack is a root while its generator is */
     /* if the mark stack overflowed, re-scan the marked blocks until nothing new turns up */
     while(mover){
         mover = 0;
@@ -174,6 +220,7 @@ static void gc(void){
             if(h->flags & F_MARK){ scan_words((char *)h + HDR_SZ, h->size); drain(); }
         }
     }
+    coro_sweep();
     /* sweep: free the unmarked blocks, merging neighbours, and rebuild the free list */
     free_list = NULL;
     hdr_t **tail = &free_list;
@@ -185,8 +232,10 @@ static void gc(void){
             h->flags &= ~F_MARK;
             prev_free = NULL;
         } else if(prev_free){
+            if(js_gc_stress && (h->flags & F_USED)) memset((char *)h + HDR_SZ, 0xAB, h->size);
             prev_free->size += next;      /* absorbed into the free block before */
         } else {
+            if(js_gc_stress && (h->flags & F_USED)) memset((char *)h + HDR_SZ, 0xAB, h->size);
             h->flags = 0;
             h->nfree = NULL;
             *tail = h;
@@ -195,7 +244,6 @@ static void gc(void){
         }
         p += next;
     }
-    if(starts){ kfree(starts); starts = NULL; }
     nstarts = 0;
     in_gc = 0;
 }
@@ -216,7 +264,43 @@ void js_fail_hook_internal(const char *msg){
         err_msg[i] = 0;
     }
 }
-static void fail(const char *msg){ js_fail_hook_internal(msg); }
+static u32 err_at = 0;           /* source offset of the token being parsed when it failed */
+static int err_have_at = 0;
+static void note_err_at(void);
+static u32 eval_at = 0;               /* the position of the node being evaluated */
+int js_debug_pos = 0;                 /* test builds: runtime errors end with " @offset <- callers" */
+static u32 call_at[512];              /* debug: where each active call was made */
+static int depth;
+static int parsing_now(void);
+static void fail(const char *msg){
+    if(!failed) note_err_at();
+    if(js_debug_pos && !failed && !parsing_now()){
+        char m[200]; u32 k = 0;
+        for(; msg[k] && k < 150; k++) m[k] = msg[k];
+        m[k++] = ' '; m[k++] = '@';
+        char t[12]; int tn = 0; u32 v = eval_at; do { t[tn++] = (char)('0' + v % 10); v /= 10; } while(v);
+        while(tn) m[k++] = t[--tn];
+        for(int d = depth - 1; d >= 0 && d >= depth - 4 && k < 180; d--){
+            m[k++] = '<'; v = call_at[d < 512 ? d : 511]; tn = 0; do { t[tn++] = (char)('0' + v % 10); v /= 10; } while(v);
+            while(tn && k < 190) m[k++] = t[--tn];
+        }
+        m[k] = 0;
+        js_fail_hook_internal(m);
+        return;
+    }
+    js_fail_hook_internal(msg);
+}
+static u32 report_at = 0xFFFFFFFFu;   /* where the reported parse error is, if it is one */
+u32 js_error_at(void){ return report_at; }
+int js_parse_only = 0;               /* test builds: stop after parsing */
+/* Bytes of the script heap in use (after a collection). */
+u32 js_heap_used(void){
+    if(!arena) return 0;
+    u32 used = 0;
+    for(char *p = arena; p < arena_end; ){ hdr_t *h = (hdr_t *)p; if(h->flags & F_USED) used += HDR_SZ + h->size; p += HDR_SZ + h->size; }
+    return used;
+}
+void js_collect(void){ if(arena) gc(); }
 
 static void ui_copy_js(char *dst, const char *src, u32 n){
     u32 i = 0;
@@ -232,24 +316,40 @@ void js_mark_prevented(void){ prevented = 1; }
 
 /* ---- values ---- */
 js_val_t js_undef(void){ js_val_t v; memset(&v, 0, sizeof v); v.t = JS_UNDEF; return v; }
+/* an array hole (Array(3), a[10] = x on a shorter array): reads as undefined, skipped by forEach/map/... */
+static js_val_t js_hole(void){ js_val_t v = js_undef(); v.b = 0x7ffe; return v; }
+static int is_hole(js_val_t v){ return v.t == JS_UNDEF && v.b == 0x7ffe; }
 js_val_t js_null(void){ js_val_t v = js_undef(); v.t = JS_NULL; return v; }
 js_val_t js_bool(int b){ js_val_t v = js_undef(); v.t = JS_BOOL; v.b = b ? 1 : 0; return v; }
 js_val_t js_num(double n){ js_val_t v = js_undef(); v.t = JS_NUM; v.n = n; return v; }
 js_val_t js_str(const char *s){ js_val_t v = js_undef(); v.t = JS_STR; v.s = s; return v; }
 js_val_t js_objv(js_obj_t *o){ js_val_t v = js_undef(); v.t = JS_OBJ; v.o = o; return v; }
+static const char *jstrdup(const char *s, u32 n);
+/* a string the script heap owns (js_str only points at s) */
+js_val_t js_str_copy(const char *s, u32 n){ return js_str(jstrdup(s, n)); }
 
 static double nan_value(void){ volatile double z = 0; return z / z; }
 
 /* ---- objects ---- */
-typedef struct prop { const char *k; js_val_t v; struct prop *next; js_obj_t *getter, *setter; } prop_t;
+/* flags: PF_HIDDEN (not enumerable), PF_RO (read-only) */
+typedef struct prop { const char *k; js_val_t v; struct prop *next; js_obj_t *getter, *setter; int flags; } prop_t;
+#define PF_HIDDEN 1
+#define PF_RO 2
 typedef struct binding { const char *name; js_val_t v; struct binding *next; } binding_t;
 typedef struct env { struct env *parent; binding_t *first; } env_t;
 typedef struct jsnode jsnode_t;
 
-typedef struct regex_data { const char *pat; u32 plen; int icase, global; } regex_data_t;
+typedef struct regex_data { const char *pat; u32 plen; int icase, global; const char *flags; void *prog; int sticky; } regex_data_t;
+struct regex;
+struct regex *re_compile(const char *pat, u32 plen, const char *flags, void *(*alloc)(u32), const char **err);
+int re_exec(const struct regex *re, const char *text, u32 len, u32 start, int sticky, int *caps);
+int re_ngroups(const struct regex *re);
+const char *re_group_name(const struct regex *re, int i);
 
 struct js_obj {
     int is_array, is_func, is_regex, is_class, default_ctor;
+    int kind;                 /* built-in objects with hidden state (K_DATE, K_MAP, ...) */
+    void *slot;               /* that state */
     int frozen;               /* Object.freeze: property writes are ignored */
     prop_t *props;
     js_obj_t *proto;          /* the prototype (for lookups) */
@@ -258,6 +358,7 @@ struct js_obj {
     jsnode_t *fdecl;          /* script functions */
     env_t *closure;
     js_obj_t *parent;         /* a class's superclass (constructor) */
+    jsnode_t *cnode;          /* a class's N_CLASS node (its instance fields) */
     js_obj_t *home;           /* a method's class prototype (for super) */
     js_native_fn native;
     void *ctx;
@@ -267,10 +368,24 @@ struct js_obj {
     regex_data_t *re;
 };
 
+/* kinds of built-in objects (js_obj.kind) */
+enum { K_PLAIN, K_DATE, K_MAP, K_SET, K_WEAKMAP, K_PROMISE, K_TYPED, K_BUFFER, K_ERROR, K_BOOL, K_NUMBER, K_STRING, K_ITER, K_CORO, K_PROXY };
+static void typed_set(js_obj_t *o, const char *name, js_val_t v);
+static js_obj_t *for_in_keys(js_val_t v);
+static const char *uncaught_text(void);
+static js_val_t make_regex(const char *pat, const char *flags, void **cache);
+static js_obj_t *iterate_to_array(js_val_t v);
+int js_drain_jobs(void);
+static js_val_t make_error_for_msg(const char *msg);
+static void jslib_early(void);
+static int hexval(int c);
+static void jslib_init(void);
 static js_obj_t *global_obj = NULL;
 static env_t *global_env = NULL;
 static js_obj_t *array_proto = NULL, *string_proto = NULL, *regex_proto = NULL, *object_proto = NULL;
 static js_obj_t *number_proto = NULL;
+static js_obj_t *function_proto = NULL;   /* Function.prototype: call, apply, bind */
+static js_obj_t *bool_proto = NULL;
 
 js_obj_t *js_global(void){ return global_obj; }
 
@@ -283,10 +398,12 @@ js_obj_t *js_new_object(void){ js_obj_t *o = new_obj(); o->proto = object_proto;
 js_obj_t *js_new_native(js_native_fn fn, void *ctx){
     js_obj_t *o = new_obj();
     o->is_func = 1;
+    o->proto = function_proto;
     o->native = fn;
     o->ctx = ctx;
     return o;
 }
+void js_set_proto(js_obj_t *o, js_obj_t *proto){ if(o) o->proto = proto; }
 void js_set_hooks(js_obj_t *o, js_get_fn get, js_set_fn set, void *host){
     o->hget = get; o->hset = set; o->host = host;
 }
@@ -303,6 +420,7 @@ void js_set(js_obj_t *o, const char *name, js_val_t v){
         p = jalloc(sizeof(prop_t));
         p->k = jstrdup(name, (u32)strlen(name));
         p->getter = p->setter = NULL;
+        p->flags = 0;
         p->next = o->props;
         o->props = p;
     }
@@ -352,14 +470,35 @@ static int is_str(const char *a, const char *b){ return strcmp(a, b) == 0; }
 static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv);
 
 /* Looks a name up on the object and its prototypes. */
+static int is_str(const char *a, const char *b);
+static int fn_is_arrow(js_obj_t *o);
+static int fn_arity(js_obj_t *o);
+static const char *fn_name_of(js_obj_t *o);
 js_val_t js_get(js_obj_t *o, const char *name){
     js_val_t out = js_undef();
+    if(o->is_func && name[0] == 'p' && strcmp(name, "prototype") == 0 && !find_own(o, "prototype") &&
+       !fn_is_arrow(o) && !o->hget){
+        /* every function gets its prototype object the first time it is asked for */
+        js_obj_t *pr = js_new_object();
+        js_set(pr, "constructor", js_objv(o));
+        find_own(pr, "constructor")->flags = PF_HIDDEN;
+        js_set(o, "prototype", js_objv(pr));
+        find_own(o, "prototype")->flags = PF_HIDDEN;
+        return js_objv(pr);
+    }
+    /* a script function's own length and name (libraries read both to detect shapes);
+     * the name is checked first so an ordinary property get costs nothing extra */
+    if((name[0] == 'l' || name[0] == 'n') && o->is_func && o->fdecl && !o->hget){
+        int want_len = strcmp(name, "length") == 0;
+        if((want_len || strcmp(name, "name") == 0) && !find_own(o, name))
+            return want_len ? js_num(fn_arity(o)) : js_str(fn_name_of(o));
+    }
     for(js_obj_t *x = o; x; x = x->proto){
         if(x->hget && x->hget(x, name, &out)) return out;
         if(x->is_array){
             if(is_str(name, "length")) return js_num(x->nitems);
             int i = as_index(name);
-            if(i >= 0) return i < x->nitems ? x->items[i] : js_undef();
+            if(i >= 0) return i < x->nitems && !is_hole(x->items[i]) ? x->items[i] : js_undef();
         }
         prop_t *p = find_own(x, name);
         if(p){
@@ -371,13 +510,18 @@ js_val_t js_get(js_obj_t *o, const char *name){
     return js_undef();
 }
 
+static int proxy_has(js_obj_t *o, const char *name);
+static js_obj_t *proxy_own_keys(js_obj_t *o);
+static int proxy_delete(js_obj_t *o, const char *name);
+
 static int has_prop(js_obj_t *o, const char *name){
+    if(o->kind == K_PROXY) return proxy_has(o, name);
     for(js_obj_t *x = o; x; x = x->proto){
         if(find_own(x, name)) return 1;
         if(x->is_array){
             if(is_str(name, "length")) return 1;
             int i = as_index(name);
-            if(i >= 0 && i < x->nitems) return 1;
+            if(i >= 0 && i < x->nitems && !is_hole(x->items[i])) return 1;
         }
     }
     return 0;
@@ -387,14 +531,23 @@ static void obj_set(js_obj_t *o, const char *name, js_val_t v){
     if(o->frozen) return;
     if(o->hset && o->hset(o, name, v)) return;
     prop_t *ap = find_own(o, name);
+    if(!ap){
+        /* an accessor or read-only property inherited from a prototype */
+        for(js_obj_t *x = o->proto; x; x = x->proto){
+            prop_t *q = find_own(x, name);
+            if(q){ if(q->setter || q->getter || (q->flags & PF_RO)) ap = q; break; }
+        }
+    }
     if(ap && (ap->setter || ap->getter)){
         if(ap->setter){ js_val_t a[1] = { v }; call_value(js_objv(ap->setter), js_objv(o), 1, a); }
         return;
     }
+    if(ap && (ap->flags & PF_RO)) return;
+    if(o->kind == K_TYPED){ typed_set(o, name, v); return; }
     if(o->is_array){
         int i = as_index(name);
         if(i >= 0){
-            while(o->nitems <= i) arr_push(o, js_undef());
+            while(o->nitems <= i) arr_push(o, js_hole());
             o->items[i] = v;
             return;
         }
@@ -413,18 +566,42 @@ int js_truthy(js_val_t v){
     }
 }
 
+static js_val_t to_primitive(js_val_t v, int want_num);
 double js_to_num(js_val_t v){
     switch(v.t){
         case JS_NUM: return v.n;
         case JS_BOOL: return v.b ? 1 : 0;
         case JS_STR: {
-            if(v.s[0] == 0) return 0;
+            const char *p = v.s;
+            while(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') p++;
+            u32 L = (u32)strlen(p);
+            while(L && (p[L-1] == ' ' || p[L-1] == '\t' || p[L-1] == '\n' || p[L-1] == '\r')) L--;
+            if(L == 0) return 0;
+            if(p[0] == '\x01') return nan_value();                       /* a symbol */
+            char tmp[400];
+            if(L >= sizeof tmp) return nan_value();
+            memcpy(tmp, p, L); tmp[L] = 0;
+            int neg = 0; const char *q = tmp;
+            if(*q == '+' || *q == '-'){ neg = *q == '-'; q++; }
+            if(strcmp(q, "Infinity") == 0) return neg ? -1.0/0.0 : 1.0/0.0;
+            if(q == tmp && q[0] == '0' && (q[1] == 'x' || q[1] == 'X' || q[1] == 'o' || q[1] == 'O' || q[1] == 'b' || q[1] == 'B')){
+                int base = (q[1] | 32) == 'x' ? 16 : (q[1] | 32) == 'o' ? 8 : 2;
+                double d = 0; q += 2;
+                if(!*q) return nan_value();
+                for(; *q; q++){ int h = hexval(*q); if(h < 0 || h >= base) return nan_value(); d = d * base + h; }
+                return d;
+            }
             double d = 0; const char *end = NULL;
-            if(kstrtod(v.s, &d, &end) && end && *end == 0) return d;
+            if(kstrtod(tmp, &d, &end) && end && *end == 0) return d;
             return nan_value();
         }
         case JS_NULL: return 0;
         case JS_UNDEF: return nan_value();
+        case JS_OBJ: {
+            js_val_t p = to_primitive(v, 1);
+            if(p.t == JS_OBJ) return nan_value();
+            return js_to_num(p);
+        }
         default: return nan_value();
     }
 }
@@ -443,17 +620,24 @@ const char *js_to_str(js_val_t v){
             if(!v.o) return "[object Object]";
             if(v.o->is_array){
                 /* arrays print their items joined by commas */
-                u32 n = 0;
-                char *out = jalloc(4096);
-                for(int i = 0; i < v.o->nitems && n + 2 < 4096; i++){
+                u32 cap = 64, n = 0;
+                char *out = jalloc(cap);
+                for(int i = 0; i < v.o->nitems && !STOP(); i++){
+                    js_val_t it = v.o->items[i];
+                    const char *s = (it.t == JS_UNDEF || it.t == JS_NULL) ? "" : js_to_str(it);
+                    u32 L = (u32)strlen(s);
+                    if(n + L + 2 > cap){ while(n + L + 2 > cap) cap *= 2; char *nb = jalloc(cap); memcpy(nb, out, n); out = nb; }
                     if(i) out[n++] = ',';
-                    const char *s = js_to_str(v.o->items[i]);
-                    for(; *s && n + 2 < 4096; s++) out[n++] = *s;
+                    memcpy(out + n, s, L); n += L;
                 }
                 out[n] = 0;
                 return out;
             }
             if(v.o->is_func) return "function";
+            {
+                js_val_t p = to_primitive(v, 0);
+                if(p.t != JS_OBJ) return js_to_str(p);
+            }
             return "[object Object]";
         default: return "undefined";
     }
@@ -463,12 +647,104 @@ int js_callable(js_val_t v){ return v.t == JS_OBJ && v.o != NULL && v.o->is_func
 
 /* ---- lexer ---- */
 enum { T_EOF, T_NUMBER, T_STRING, T_ID, T_PUNCT, T_REGEX, T_TEMPLATE };
-typedef struct { int t; double n; const char *s; const char *flags; } tok_t;
+/* 16 bytes: kind, line-break-before flag, source offset, and the number or text.
+ * A regex's flags follow its pattern's NUL in the same string. */
+typedef struct { u8 t; u8 nl; u16 pad; u32 at; union { double n; const char *s; }; } tok_t;
+static const char *re_flags(const char *pat){ return pat + strlen(pat) + 1; }
 
 static tok_t *toks = NULL;
 static int ntok = 0, ti = 0;
 
-static int is_idc(int c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || (c >= '0' && c <= '9'); }
+static int is_idc(int c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || (c >= '0' && c <= '9') || (c & 0x80); }
+static int hexval(int c){ return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+/* Appends code point cp to buf as UTF-8; returns the bytes written. */
+static u32 put_utf8(char *buf, u32 cp){
+    if(cp < 0x80){ buf[0] = (char)cp; return 1; }
+    if(cp < 0x800){ buf[0] = (char)(0xC0 | (cp >> 6)); buf[1] = (char)(0x80 | (cp & 63)); return 2; }
+    if(cp < 0x10000){ buf[0] = (char)(0xE0 | (cp >> 12)); buf[1] = (char)(0x80 | ((cp >> 6) & 63)); buf[2] = (char)(0x80 | (cp & 63)); return 3; }
+    buf[0] = (char)(0xF0 | (cp >> 18)); buf[1] = (char)(0x80 | ((cp >> 12) & 63)); buf[2] = (char)(0x80 | ((cp >> 6) & 63)); buf[3] = (char)(0x80 | (cp & 63)); return 4;
+}
+/* Decodes one escape after a backslash at src[*i] (src[*i] is the char after '\\').
+ * Writes UTF-8 to out, advances *i past the escape, returns the bytes written. */
+static u32 read_escape(const char *src, u32 len, u32 *i, char *out){
+    char e = src[*i];
+    (*i)++;
+    switch(e){
+        case 'n': out[0] = '\n'; return 1;
+        case 't': out[0] = '\t'; return 1;
+        case 'r': out[0] = '\r'; return 1;
+        case 'b': out[0] = '\b'; return 1;
+        case 'f': out[0] = '\f'; return 1;
+        case 'v': out[0] = '\v'; return 1;
+        case '0': if(*i >= len || src[*i] < '0' || src[*i] > '9'){ out[0] = 0; return 0; } break;
+        case '\r': if(*i < len && src[*i] == '\n') (*i)++; return 0;   /* line continuation */
+        case '\n': return 0;
+        case 'x': {
+            if(*i + 1 < len && hexval(src[*i]) >= 0 && hexval(src[*i+1]) >= 0){
+                u32 cp = (u32)(hexval(src[*i]) * 16 + hexval(src[*i+1])); *i += 2;
+                return put_utf8(out, cp);
+            }
+            break;
+        }
+        case 'u': {
+            u32 cp = 0;
+            if(*i < len && src[*i] == '{'){
+                (*i)++;
+                while(*i < len && src[*i] != '}' && hexval(src[*i]) >= 0){ cp = cp * 16 + (u32)hexval(src[*i]); (*i)++; }
+                if(*i < len && src[*i] == '}') (*i)++;
+            } else {
+                for(int k = 0; k < 4 && *i < len && hexval(src[*i]) >= 0; k++){ cp = cp * 16 + (u32)hexval(src[*i]); (*i)++; }
+                /* a UTF-16 surrogate pair: \\uD83D\\uDE00 */
+                if(cp >= 0xD800 && cp < 0xDC00 && *i + 5 < len && src[*i] == '\\' && src[*i+1] == 'u'){
+                    u32 lo = 0, j = *i + 2; int ok = 1;
+                    for(int k = 0; k < 4; k++){ int h = hexval(src[j+k]); if(h < 0){ ok = 0; break; } lo = lo * 16 + (u32)h; }
+                    if(ok && lo >= 0xDC00 && lo < 0xE000){ cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); *i = j + 4; }
+                }
+            }
+            return put_utf8(out, cp);
+        }
+    }
+    out[0] = e;
+    return 1;
+}
+/* Lexes a number literal at src[i]; returns its length and stores the value. */
+static u32 lex_number(const char *src, u32 len, u32 i, double *out){
+    u32 s = i;
+    if(src[i] == '0' && i + 1 < len && (src[i+1] == 'x' || src[i+1] == 'X' || src[i+1] == 'o' || src[i+1] == 'O' || src[i+1] == 'b' || src[i+1] == 'B')){
+        int base = (src[i+1] | 32) == 'x' ? 16 : (src[i+1] | 32) == 'o' ? 8 : 2;
+        double v = 0; i += 2;
+        while(i < len){
+            if(src[i] == '_'){ i++; continue; }
+            int h = hexval(src[i]);
+            if(h < 0 || h >= base) break;
+            v = v * base + h; i++;
+        }
+        if(i < len && src[i] == 'n') i++;          /* BigInt suffix: kept as a number */
+        *out = v;
+        return i - s;
+    }
+    char tmp[64]; u32 k = 0;
+    int seen_dot = 0, seen_e = 0;         /* 1..toString is the number 1. then .toString */
+    while(i < len && k < sizeof tmp - 1){
+        char c = src[i];
+        if(c >= '0' && c <= '9'){ tmp[k++] = c; i++; continue; }
+        if(c == '_'){ i++; continue; }
+        if(c == '.'){ if(seen_dot || seen_e) break; seen_dot = 1; tmp[k++] = c; i++; continue; }
+        if((c == 'e' || c == 'E') && !seen_e){
+            seen_e = 1;
+            tmp[k++] = c; i++;
+            if(i < len && (src[i] == '+' || src[i] == '-')) tmp[k++] = src[i++];
+            continue;
+        }
+        break;
+    }
+    if(i < len && src[i] == 'n') i++;
+    tmp[k] = 0;
+    double v = 0; const char *end = NULL;
+    if(!kstrtod(tmp, &v, &end)) v = 0;
+    *out = v;
+    return i - s;
+}
 
 /* After these, a '/' is division; anywhere else it starts a regex literal. */
 static int value_before(const tok_t *t){
@@ -478,58 +754,220 @@ static int value_before(const tok_t *t){
         for(int i = 0; kw[i]; i++) if(strcmp(t->s, kw[i]) == 0) return 0;
         return 1;
     }
-    if(t->t == T_PUNCT) return strcmp(t->s, ")") == 0 || strcmp(t->s, "]") == 0 || strcmp(t->s, "}") == 0;
+    /* after "}" a '/' starts a regex (try{}catch(e){}/x/.test(s)): the end of a block is far more
+     * common than an object or function literal that is divided */
+    if(t->t == T_PUNCT) return strcmp(t->s, ")") == 0 || strcmp(t->s, "]") == 0;
+    return 0;
+}
+
+/* Where a template literal's text ends: i is just after the opening backtick, the result just
+ * after the closing one. Braces only count inside ${...}, where strings and nested templates
+ * are skipped whole (`}` is a template, `${a ? "}" : `x`}` is one too). */
+static u32 skip_template(const char *src, u32 len, u32 i);
+/* i is just after "${": returns the index of the "}" that closes it (or len). Strings, nested
+ * templates, comments and regex literals are skipped whole (/"/g has a quote in it). */
+static u32 tpl_expr_end(const char *src, u32 len, u32 i){
+    int depth = 1;
+    char prev = '(';                       /* the last significant character: decides regex or divide */
+    while(i < len){
+        char d = src[i];
+        if(d == ' ' || d == '\t' || d == '\n' || d == '\r'){ i++; continue; }
+        if(d == '\\'){ i += 2; continue; }
+        if(d == '/' && i + 1 < len && src[i + 1] == '/'){ while(i < len && src[i] != '\n') i++; continue; }
+        if(d == '/' && i + 1 < len && src[i + 1] == '*'){
+            i += 2; while(i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i += 2; continue;
+        }
+        if(d == '/' && (prev == '(' || prev == ',' || prev == '=' || prev == ':' || prev == '[' || prev == '!' ||
+                        prev == '&' || prev == '|' || prev == '?' || prev == '{' || prev == '}' || prev == ';' ||
+                        prev == '+' || prev == '-' || prev == '*' || prev == '%' || prev == '<' || prev == '>' ||
+                        prev == '~' || prev == '^')){
+            i++;                           /* a regex literal */
+            int cls = 0;
+            while(i < len && src[i] != '\n' && (src[i] != '/' || cls)){
+                if(src[i] == '\\') i++;
+                else if(src[i] == '[') cls = 1;
+                else if(src[i] == ']') cls = 0;
+                i++;
+            }
+            i++; prev = 'a'; continue;
+        }
+        if(d == '{') depth++;
+        else if(d == '}'){ if(--depth == 0) return i; }
+        else if(d == '"' || d == '\''){
+            i++;
+            while(i < len && src[i] != d && src[i] != '\n'){ if(src[i] == '\\') i++; i++; }
+            i++; prev = 'a'; continue;
+        } else if(d == '`'){ i = skip_template(src, len, i + 1); prev = 'a'; continue; }
+        prev = d;
+        i++;
+    }
+    return len;
+}
+static u32 skip_template(const char *src, u32 len, u32 i){
+    while(i < len){
+        char c = src[i];
+        if(c == '\\'){ i += 2; continue; }
+        if(c == '`') return i + 1;
+        if(c == '$' && i + 1 < len && src[i + 1] == '{'){ i = tpl_expr_end(src, len, i + 2) + 1; continue; }
+        i++;
+    }
+    return len;
+}
+
+/* A ')' that closes the head of if/for/while/with is followed by a statement, so a '/' after it
+ * starts a regex literal (for(let e in n)/^on/.test(e)), not a division. */
+static int stmt_head_close(u32 k){
+    const tok_t *t = &toks[k];
+    if(t->t != T_PUNCT || strcmp(t->s, ")") != 0) return 0;
+    int depth = 0;
+    for(u32 j = k + 1; j-- > 0; ){
+        const tok_t *u = &toks[j];
+        if(u->t != T_PUNCT) continue;
+        if(strcmp(u->s, ")") == 0) depth++;
+        else if(strcmp(u->s, "(") == 0 && --depth == 0){
+            if(j == 0 || toks[j - 1].t != T_ID) return 0;
+            const char *w = toks[j - 1].s;
+            return !strcmp(w, "if") || !strcmp(w, "for") || !strcmp(w, "while") || !strcmp(w, "with");
+        }
+    }
     return 0;
 }
 
 static u32 tok_cap = 0;
 
-/* Room for two more tokens (the array grows by doubling). 0 when memory ran out. */
-static int tok_room(void){
-    if((u32)ntok + 2 < tok_cap) return 1;
-    u32 nc = tok_cap * 2;
-    tok_t *nt = jalloc(sizeof(tok_t) * nc);
-    if((char *)nt == scratch) return 0;          /* out of memory */
-    memcpy(nt, toks, sizeof(tok_t) * (u32)ntok);
-    toks = nt;                        /* the old array is garbage now */
-    tok_cap = nc;
+/* Identifier names are stored once (minified code repeats a, b, c ... endlessly). */
+static const char **itab = NULL;
+static u32 itab_cap = 0, itab_n = 0;
+static const char *intern(const char *s, u32 n){
+    u32 h = 2166136261u;
+    for(u32 i = 0; i < n; i++) h = (h ^ (u8)s[i]) * 16777619u;
+    if(itab_n * 2 >= itab_cap){
+        u32 nc = itab_cap ? itab_cap * 2 : 4096;
+        const char **nt = jalloc(sizeof(char *) * nc);
+        if((char *)nt == scratch) return jstrdup(s, n);
+        memset(nt, 0, sizeof(char *) * nc);
+        for(u32 i = 0; i < itab_cap; i++){
+            const char *e = itab[i];
+            if(!e) continue;
+            u32 eh = 2166136261u;
+            for(const char *q = e; *q; q++) eh = (eh ^ (u8)*q) * 16777619u;
+            u32 j = eh & (nc - 1);
+            while(nt[j]) j = (j + 1) & (nc - 1);
+            nt[j] = e;
+        }
+        itab = nt; itab_cap = nc;
+    }
+    u32 j = h & (itab_cap - 1);
+    while(itab[j]){
+        const char *e = itab[j];
+        if(strncmp(e, s, n) == 0 && e[n] == 0) return e;
+        j = (j + 1) & (itab_cap - 1);
+    }
+    const char *d = jstrdup(s, n);
+    itab[j] = d;
+    itab_n++;
+    return d;
+}
+
+/* Token buffers live outside the script heap and are reused: one per nesting level
+ * (a template literal's ${...} or a lazily parsed body is lexed while the outer tokens
+ * are still in use). The collector scans the live part of each (see gc). */
+#define TOK_LEVELS 8
+static tok_t *tokbuf[TOK_LEVELS];
+static u32 tokbuf_cap[TOK_LEVELS];
+static int tok_valid[TOK_LEVELS];       /* tokens in use at each outer level */
+static int tok_level = 0;
+static void tok_push(void){ if(tok_level < TOK_LEVELS) tok_valid[tok_level] = ntok; tok_level++; }
+static void tok_free_level(int L){
+    /* big scripts need tens of MB of tokens: give them back once the parse is done */
+    if(L >= 0 && L < TOK_LEVELS && tokbuf[L] && tokbuf_cap[L] > 65536){ kfree(tokbuf[L]); tokbuf[L] = NULL; tokbuf_cap[L] = 0; }
+}
+static void tok_pop(void){ tok_level--; if(tok_level >= 0 && tok_level + 1 < TOK_LEVELS){ tok_valid[tok_level + 1] = 0; tok_free_level(tok_level + 1); } }
+static int tok_grow(u32 need){
+    int L = tok_level;
+    if(need <= tokbuf_cap[L]) return 1;
+    u32 nc = tokbuf_cap[L] ? tokbuf_cap[L] : 1024;
+    while(nc < need) nc *= 2;
+    tok_t *nt = kmalloc(sizeof(tok_t) * nc);
+    if(!nt) return 0;
+    if(tokbuf[L] && toks == tokbuf[L] && ntok) memcpy(nt, tokbuf[L], sizeof(tok_t) * (u32)ntok);
+    if(tokbuf[L]) kfree(tokbuf[L]);
+    tokbuf[L] = nt; tokbuf_cap[L] = nc;
+    toks = nt; tok_cap = nc;
     return 1;
 }
 
+static void gc_scan_tokens(void){
+    for(int l = 0; l < tok_level && l < TOK_LEVELS; l++)
+        if(tokbuf[l] && tok_valid[l] > 0) scan_words(tokbuf[l], sizeof(tok_t) * (u32)tok_valid[l]);
+    if(tok_level < TOK_LEVELS && toks && toks == tokbuf[tok_level] && ntok > 0) scan_words(toks, sizeof(tok_t) * (u32)ntok);
+}
+
+/* Room for two more tokens. 0 when memory ran out. */
+static int tok_room(void){
+    if((u32)ntok + 2 < tok_cap) return 1;
+    return tok_grow(tok_cap + tok_cap / 2 + 1024);
+}
+
 static void lex(const char *src, u32 len){
-    tok_cap = len / 4 + 64;
-    toks = jalloc(sizeof(tok_t) * tok_cap);
+    if(tok_level >= TOK_LEVELS){ fail("expression nested too deeply"); return; }
     ntok = 0;
+    toks = tokbuf[tok_level]; tok_cap = tokbuf_cap[tok_level];
+    if(!tok_grow(len / 4 + 64)){ fail("out of memory"); return; }
+    toks = tokbuf[tok_level]; tok_cap = tokbuf_cap[tok_level];
     u32 i = 0;
+    int saw_nl = 0;
     while(i < len && !STOP()){
         char c = src[i];
-        if(c == ' ' || c == '\t' || c == '\n' || c == '\r'){ i++; continue; }
+        if(c == '\n'){ saw_nl = 1; i++; continue; }
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v'){ i++; continue; }
+        if((unsigned char)c == 0xC2 && i + 1 < len && (unsigned char)src[i+1] == 0xA0){ i += 2; continue; }   /* nbsp */
+        if((unsigned char)c == 0xE2 && i + 2 < len && (unsigned char)src[i+1] == 0x80 &&
+           ((unsigned char)src[i+2] == 0xA8 || (unsigned char)src[i+2] == 0xA9)){ saw_nl = 1; i += 3; continue; }  /* LS/PS */
+        if((unsigned char)c == 0xEF && i + 2 < len && (unsigned char)src[i+1] == 0xBB && (unsigned char)src[i+2] == 0xBF){ i += 3; continue; }  /* BOM */
         if(c == '/' && i + 1 < len && src[i+1] == '/'){ while(i < len && src[i] != '\n') i++; continue; }
+        if(c == '<' && i + 3 < len && src[i+1] == '!' && src[i+2] == '-' && src[i+3] == '-'){ while(i < len && src[i] != '\n') i++; continue; }  /* <!-- html comment */
         if(c == '/' && i + 1 < len && src[i+1] == '*'){
             i += 2;
-            while(i + 1 < len && !(src[i] == '*' && src[i+1] == '/')) i++;
+            while(i + 1 < len && !(src[i] == '*' && src[i+1] == '/')){ if(src[i] == '\n') saw_nl = 1; i++; }
             i += 2;
             continue;
         }
         if(!tok_room()){ fail("script too large"); return; }
         tok_t *t = &toks[ntok];
         memset(t, 0, sizeof *t);
-        if(c >= '0' && c <= '9'){
-            double v = 0; const char *end = NULL;
-            char tmp[48]; u32 k = 0;
-            while(i + k < len && k < sizeof tmp - 1 && (is_idc(src[i+k]) || src[i+k] == '.')) { tmp[k] = src[i+k]; k++; }
-            tmp[k] = 0;
-            if(!kstrtod(tmp, &v, &end)) v = 0;
+        t->at = i;
+        t->nl = saw_nl;
+        saw_nl = 0;
+        if((c >= '0' && c <= '9') || (c == '.' && i + 1 < len && src[i+1] >= '0' && src[i+1] <= '9')){
+            double v = 0;
+            i += lex_number(src, len, i, &v);
             t->t = T_NUMBER; t->n = v;
-            i += end ? (u32)(end - tmp) : k;
             ntok++;
             continue;
         }
-        if(is_idc(c)){
+        if(c == '\\' && i + 1 < len && src[i+1] == 'u'){
+            /* an identifier that starts with a unicode escape */
+            char tmp[64]; u32 n = 0;
+            while(i < len && n < sizeof tmp - 5){
+                if(src[i] == '\\' && i + 1 < len && src[i+1] == 'u'){ u32 j = i + 1; n += read_escape(src, len, &j, tmp + n); i = j; }
+                else if(is_idc(src[i])) tmp[n++] = src[i++];
+                else break;
+            }
+            t->t = T_ID; t->s = jstrdup(tmp, n);
+            ntok++;
+            continue;
+        }
+        if(is_idc(c) || (c == '#' && i + 1 < len && is_idc(src[i+1]) && !(src[i+1] >= '0' && src[i+1] <= '9'))){
+            /* a private class name (#x) is lexed as the identifier "#x": '#' cannot occur
+             * in an ordinary property name, so it needs no separate namespace */
             u32 s = i;
+            if(c == '#') i++;
             while(i < len && is_idc(src[i])) i++;
             t->t = T_ID;
-            t->s = jstrdup(src + s, i - s);
+            t->s = intern(src + s, i - s);
+            t = &toks[ntok];
             ntok++;
             continue;
         }
@@ -544,9 +982,7 @@ static void lex(const char *src, u32 len){
             while(i < len && src[i] != q){
                 if(src[i] == '\\' && i + 1 < len){
                     i++;
-                    char e = src[i];
-                    buf[n++] = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e;
-                    i++;
+                    n += read_escape(src, len, &i, buf + n);   /* never longer than the source escape */
                     continue;
                 }
                 buf[n++] = src[i++];
@@ -561,44 +997,43 @@ static void lex(const char *src, u32 len){
         if(c == '`'){
             /* a template literal: its raw text (with ${...} parts) is parsed later */
             u32 s0 = ++i;
-            int tdepth = 0;
-            while(i < len && !(src[i] == '`' && tdepth == 0)){
-                if(src[i] == '\\' && i + 1 < len){ i += 2; continue; }
-                if(src[i] == '{') tdepth++;
-                if(src[i] == '}') tdepth--;
-                i++;
-            }
+            i = skip_template(src, len, i);
+            if(i > len) i = len;
             t->t = T_TEMPLATE;
-            t->s = jstrdup(src + s0, i - s0);
-            i++;
+            t->s = jstrdup(src + s0, (i - s0) - ((i > s0 && src[i - 1] == '`') ? 1 : 0));
             ntok++;
             continue;
         }
-        if(c == '/' && !(ntok > 0 && value_before(&toks[ntok - 1]))){
+        if(c == '/' && !(ntok > 0 && value_before(&toks[ntok - 1]) && !stmt_head_close(ntok - 1))){
             /* a regex literal: /pattern/flags */
             u32 s = ++i;
-            while(i < len && src[i] != '/'){
+            int in_class = 0;
+            while(i < len && (src[i] != '/' || in_class) && src[i] != '\n'){
                 if(src[i] == '\\' && i + 1 < len) i++;
+                else if(src[i] == '[') in_class = 1;
+                else if(src[i] == ']') in_class = 0;
                 i++;
             }
             u32 pl = i - s;
-            char *pat = jalloc(pl + 1);
-            memcpy(pat, src + s, pl);
-            pat[pl] = 0;
             i++;
             u32 fs = i;
             while(i < len && is_idc(src[i])) i++;
-            char *fl = jalloc(i - fs + 1);
-            memcpy(fl, src + fs, i - fs);
-            fl[i - fs] = 0;
+            u32 fl = i - fs;
+            char *pat = jalloc(pl + fl + 2);
+            t = &toks[ntok];
+            memcpy(pat, src + s, pl);
+            pat[pl] = 0;
+            memcpy(pat + pl + 1, src + fs, fl);
+            pat[pl + 1 + fl] = 0;
             t->t = T_REGEX;
             t->s = pat;
-            t->flags = fl;
             ntok++;
             continue;
         }
-        static const char *ops[] = { ">>>=", "===", "!==", "...", "**=", "?\?=", "==", "!=", "<=", ">=", "&&", "||",
-                                     "?\?", "++", "--", "+=", "-=", "*=", "/=", "=>", "**", 0 };
+        static const char *ops[] = { ">>>=",
+                                     "===", "!==", "...", "**=", "?\?=", "<<=", ">>=", ">>>", "&&=", "||=",
+                                     "==", "!=", "<=", ">=", "&&", "||", "?\?", "++", "--", "+=", "-=", "*=", "/=",
+                                     "%=", "&=", "|=", "^=", "=>", "**", "<<", ">>", 0 };
         int matched = 0;
         /* '?.' optional chaining, but keep '?' before a decimal (a ? .5 : b) as a ternary */
         if(src[i] == '?' && i + 1 < len && src[i+1] == '.' &&
@@ -606,6 +1041,7 @@ static void lex(const char *src, u32 len){
             t->t = T_PUNCT; t->s = "?."; i += 2; matched = 1;
         }
         for(int k = 0; !matched && ops[k]; k++){
+            if(ops[k][0] != src[i]) continue;        /* most operators fail on the first byte */
             u32 n = (u32)strlen(ops[k]);
             if(i + n <= len && memcmp(src + i, ops[k], n) == 0){
                 t->t = T_PUNCT;
@@ -628,6 +1064,8 @@ static void lex(const char *src, u32 len){
     tok_t *e = &toks[ntok++];
     memset(e, 0, sizeof *e);
     e->t = T_EOF;
+    e->at = len;
+    e->nl = 1;
 }
 
 /* ---- AST ---- */
@@ -635,31 +1073,58 @@ enum {
     N_NUM = 1, N_STR, N_IDENT, N_TRUE, N_FALSE, N_NULL, N_UNDEF, N_THIS, N_SUPER, N_ARRAY, N_OBJECT,
     N_FUNC, N_MEMBER, N_CALL, N_NEW, N_UNARY, N_BINARY, N_LOGIC, N_ASSIGN, N_COND, N_REGEX, N_CLASS,
     N_DECL, N_VAR, N_EXPR, N_IF, N_WHILE, N_DO, N_FOR, N_FORIN, N_RETURN, N_BLOCK, N_FUNCDECL,
-    N_BREAK, N_CONTINUE, N_EMPTY, N_THROW, N_TRY, N_SWITCH, N_CASE, N_SPREAD
+    N_BREAK, N_CONTINUE, N_EMPTY, N_THROW, N_TRY, N_SWITCH, N_CASE, N_SPREAD, N_SEQ, N_LABEL,
+    N_TAGGED
 };
 enum {
     OP_NONE, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_SEQ, OP_SNE,
     OP_LT, OP_GT, OP_LE, OP_GE, OP_AND, OP_OR, OP_NOT, OP_NEG, OP_TYPEOF, OP_POS,
-    OP_SET, OP_ADDSET, OP_SUBSET, OP_INSTANCEOF, OP_IN, OP_DELETE, OP_VOID, OP_POW, OP_NULLISH
+    OP_SET, OP_ADDSET, OP_SUBSET, OP_INSTANCEOF, OP_IN, OP_DELETE, OP_VOID, OP_POW, OP_NULLISH,
+    OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR, OP_USHR, OP_BNOT,
+    OP_AWAIT, OP_YIELD, OP_YIELD_STAR,
+    OP_COMPOUND = 100     /* N_ASSIGN op = OP_COMPOUND + binary op: x op= y */
 };
 
+/* N_FUNC/N_CLASS member flags, in jsnode.fflags */
+#define FN_GEN    1u      /* function* */
+#define FN_ASYNC  2u      /* async function */
+#define FN_STATIC 4u      /* a static class member */
+
 struct jsnode {
-    int k, op;
-    double num;
-    const char *str, *flags;
+    u8 k, computed, arrow, hoisted;   /* hoisted: functions' hoist list is computed */
+    u16 op;
+    u16 fflags;
+    u32 lazy_len;                     /* functions: body source not parsed yet (bytes) */
+    u32 at;                           /* source offset (for error positions; uses padding) */
+    union {
+        double num;                   /* N_NUM */
+        const char *flags;            /* N_REGEX */
+        const char *label;            /* loops: their label (labelled break/continue) */
+        const char *lazy_src;         /* N_FUNC: the unparsed body, '{' ... '}' */
+    };
+    const char *str;
     jsnode_t *a, *b, *c, *d;
     jsnode_t *list;
     jsnode_t *next;
-    int computed, arrow;
+    jsnode_t *hoist;                  /* functions: the var names in the body (N_IDENT list) */
 };
 
+static const char *src_base = NULL;   /* the script being run (positions are offsets into it) */
+static const char *cur_src;
 static jsnode_t *node(int k){
     jsnode_t *n = jalloc(sizeof(jsnode_t));
     memset(n, 0, sizeof *n);
     n->k = k;
+    if(toks && ti < ntok && src_base && cur_src >= src_base) n->at = (u32)(cur_src - src_base) + toks[ti].at;
     return n;
 }
 
+
+static int parsing_now(void){ return toks != NULL; }
+static void note_err_at(void){
+    err_have_at = 0;
+    if(toks && ti >= 0 && ti < ntok){ err_at = toks[ti].at; err_have_at = 1; }
+}
 static int tis(const char *p){ return toks[ti].t == T_PUNCT && strcmp(toks[ti].s, p) == 0; }
 static int tkw(const char *w){ return toks[ti].t == T_ID && strcmp(toks[ti].s, w) == 0; }
 static void adv(void){ if(ti < ntok - 1) ti++; }
@@ -674,18 +1139,31 @@ static void expect(const char *p){
 
 static jsnode_t *expression(void);
 static jsnode_t *assignment(void);
+static jsnode_t *class_decl(void);
 static jsnode_t *statement(void);
 static jsnode_t *block_body(void);
 
+/* Binding power of a binary operator (0: not one). ||, ?? and && (1-2) short-circuit. */
 static int prec(const char *op){
-    if(strcmp(op, "??") == 0) return 1;
-    if(strcmp(op, "||") == 0) return 1;
-    if(strcmp(op, "&&") == 0) return 2;
-    if(strcmp(op, "**") == 0) return 7;
-    if(strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "===") == 0 || strcmp(op, "!==") == 0) return 3;
-    if(strcmp(op, "<") == 0 || strcmp(op, ">") == 0 || strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0) return 4;
-    if(strcmp(op, "+") == 0 || strcmp(op, "-") == 0) return 5;
-    if(strcmp(op, "*") == 0 || strcmp(op, "/") == 0 || strcmp(op, "%") == 0) return 6;
+    switch(op[0]){
+        case '?': return op[1] == '?' && !op[2] ? 1 : 0;
+        case '|': return !op[1] ? 3 : (op[1] == '|' && !op[2]) ? 1 : 0;
+        case '&': return !op[1] ? 5 : (op[1] == '&' && !op[2]) ? 2 : 0;
+        case '^': return !op[1] ? 4 : 0;
+        case '=': return (op[1] == '=' && (!op[2] || (op[2] == '=' && !op[3]))) ? 6 : 0;
+        case '!': return (op[1] == '=' && (!op[2] || (op[2] == '=' && !op[3]))) ? 6 : 0;
+        case '<':
+            if(!op[1] || (op[1] == '=' && !op[2])) return 7;
+            if(op[1] == '<' && !op[2]) return 8;
+            return 0;
+        case '>':
+            if(!op[1] || (op[1] == '=' && !op[2])) return 7;
+            if(op[1] == '>' && (!op[2] || (op[2] == '>' && !op[3]))) return 8;
+            return 0;
+        case '+': case '-': return !op[1] ? 9 : 0;
+        case '*': return !op[1] ? 10 : (op[1] == '*' && !op[2]) ? 11 : 0;
+        case '/': case '%': return !op[1] ? 10 : 0;
+    }
     return 0;
 }
 
@@ -696,41 +1174,85 @@ static int binop(const char *s){
         { ">", OP_GT }, { "<=", OP_LE }, { ">=", OP_GE }, { "&&", OP_AND }, { "||", OP_OR },
         { "instanceof", OP_INSTANCEOF }, { "in", OP_IN },
         { "**", OP_POW }, { "??", OP_NULLISH },
+        { "&", OP_BAND }, { "|", OP_BOR }, { "^", OP_BXOR }, { "<<", OP_SHL }, { ">>", OP_SHR }, { ">>>", OP_USHR },
     };
     for(u32 i = 0; i < sizeof t / sizeof t[0]; i++) if(strcmp(s, t[i].s) == 0) return t[i].op;
     return OP_NONE;
 }
 
-static jsnode_t *function_rest(const char *name){
-    jsnode_t *f = node(N_FUNC);
-    f->str = name;
-    expect("(");
+static jsnode_t *parse_pattern(void);
+
+/* A parameter list after its '(' up to and including ')': names, ...rest, defaults and
+ * destructuring patterns (an N_IDENT with c = the pattern and no name). */
+static void parse_params(jsnode_t *f){
     jsnode_t *last = NULL;
     while(!tis(")") && toks[ti].t != T_EOF && !STOP()){
         int rest = 0;
         if(tis("...")){ adv(); rest = 1; }
-        if(toks[ti].t != T_ID){ fail("bad parameter"); return f; }
         jsnode_t *p = node(N_IDENT);
-        p->str = toks[ti].s;
+        if(tis("[") || tis("{")) p->c = parse_pattern();
+        else if(toks[ti].t == T_ID){ p->str = toks[ti].s; adv(); }
+        else { fail("bad parameter"); return; }
         p->op = rest ? 1 : 0;            /* op==1 marks a rest parameter */
-        adv();
         if(!rest && tis("=")){ adv(); p->b = assignment(); }   /* default value */
         if(last) last->next = p; else f->list = p;
         last = p;
-        if(tis(",")) adv();
+        if(tis(",")) adv(); else break;
     }
     expect(")");
-    f->a = block_body();
+}
+
+/* Lazy function bodies: a body is only skipped over at first (its source is kept) and
+ * parsed the first time the function runs. Big pages define thousands of functions and
+ * call few of them. cur_src is the text the current tokens came from (it must outlive
+ * the functions); lazy_on is off where that text is temporary. */
+static int lazy_on = 0;
+/* The function whose body is being parsed: `yield` is only an operator inside a
+ * generator and `await` only inside an async function (elsewhere both are names). */
+static u16 cur_fn_flags = 0;
+static int skip_body(jsnode_t *f){
+    if(!lazy_on || !cur_src || !tis("{")) return 0;
+    int depth = 0, k = ti;
+    for(; k < ntok; k++){
+        if(toks[k].t != T_PUNCT) continue;
+        const char *p = toks[k].s;
+        if(p[0] == '{' && !p[1]) depth++;
+        else if(p[0] == '}' && !p[1]){ depth--; if(depth == 0) break; }
+    }
+    if(k >= ntok) return 0;
+    f->lazy_src = cur_src + toks[ti].at;
+    f->lazy_len = toks[k].at + 1 - toks[ti].at;
+    ti = k;
+    adv();
+    return 1;
+}
+
+static int no_in;         /* (defined below) */
+static jsnode_t *function_rest_f(const char *name, u16 ff){
+    jsnode_t *f = node(N_FUNC);
+    f->str = name;
+    f->fflags = ff;
+    expect("(");
+    parse_params(f);
+    u16 saved = cur_fn_flags;
+    cur_fn_flags = ff;
+    if(!skip_body(f)) f->a = block_body();
+    cur_fn_flags = saved;
     return f;
 }
+static jsnode_t *function_rest(const char *name){ return function_rest_f(name, 0); }
 
 static jsnode_t *arrow_body(jsnode_t *f){
     f->arrow = 1;
+    u16 saved = cur_fn_flags;
+    if(f->fflags & FN_ASYNC) cur_fn_flags = FN_ASYNC;
     if(tis("{")){
-        f->a = block_body();
+        if(!skip_body(f)) f->a = block_body();
+        cur_fn_flags = saved;
     } else {
         jsnode_t *ret = node(N_RETURN);
         ret->a = assignment();
+        cur_fn_flags = saved;
         jsnode_t *b = node(N_BLOCK);
         b->list = ret;
         f->a = b;
@@ -741,11 +1263,15 @@ static jsnode_t *arrow_body(jsnode_t *f){
 /* Parses an expression from a separate piece of source (used for ${...} in templates). */
 static jsnode_t *parse_sub(const char *src, u32 len){
     tok_t *save_toks = toks;
-    int save_n = ntok, save_ti = ti;
+    int save_n = ntok, save_ti = ti, save_lazy = lazy_on;
+    u32 save_cap = tok_cap;
+    lazy_on = 0;
+    tok_push();
     lex(src, len);
     ti = 0;
     jsnode_t *e = expression();
-    toks = save_toks; ntok = save_n; ti = save_ti;
+    tok_pop();
+    toks = save_toks; ntok = save_n; ti = save_ti; tok_cap = save_cap; lazy_on = save_lazy;
     return e;
 }
 
@@ -763,12 +1289,7 @@ static jsnode_t *template_node(const char *raw){
             res = res ? ({ jsnode_t *b = node(N_BINARY); b->op = OP_ADD; b->a = res; b->b = lit; b; }) : lit;
             cn = 0;
             /* the expression up to its matching brace */
-            u32 j = i + 2, depth = 1, es = j;
-            while(j < n && depth > 0){
-                if(raw[j] == '{') depth++;
-                else if(raw[j] == '}') depth--;
-                if(depth > 0) j++;
-            }
+            u32 es = i + 2, j = tpl_expr_end(raw, n, es);
             jsnode_t *e = parse_sub(raw + es, j - es);
             jsnode_t *b = node(N_BINARY);
             b->op = OP_ADD;
@@ -802,12 +1323,63 @@ static jsnode_t *template_node(const char *raw){
     return b;
 }
 
+/* tag`a${x}b`: the tag is called with the array of literal pieces (plus a .raw copy of
+ * them, unescaped) and then one argument per substitution. */
+static jsnode_t *tagged_node(jsnode_t *tag, const char *raw){
+    u32 n = (u32)strlen(raw);
+    jsnode_t *t = node(N_TAGGED);
+    t->a = tag;
+    t->b = node(N_ARRAY);           /* cooked pieces */
+    t->c = node(N_ARRAY);           /* raw pieces */
+    jsnode_t *lastc = NULL, *lastr = NULL, *laste = NULL;
+    char *cooked = jalloc(n + 1);
+    u32 i = 0;
+    for(;;){
+        u32 cn = 0, s0 = i;
+        while(i < n && !(raw[i] == '$' && i + 1 < n && raw[i+1] == '{')){
+            if(raw[i] == '\\' && i + 1 < n){
+                char e = raw[i+1];
+                cooked[cn++] = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e;
+                i += 2;
+                continue;
+            }
+            cooked[cn++] = raw[i++];
+        }
+        jsnode_t *cl = node(N_STR); cl->str = jstrdup(cooked, cn);
+        jsnode_t *rl = node(N_STR); rl->str = jstrdup(raw + s0, i - s0);
+        if(lastc) lastc->next = cl; else t->b->list = cl;
+        if(lastr) lastr->next = rl; else t->c->list = rl;
+        lastc = cl; lastr = rl;
+        if(i >= n) break;
+        u32 j = i + 2, depth = 1, es = j;
+        while(j < n && depth > 0){
+            if(raw[j] == '{') depth++;
+            else if(raw[j] == '}') depth--;
+            if(depth > 0) j++;
+        }
+        jsnode_t *e = parse_sub(raw + es, j - es);
+        if(laste) laste->next = e; else t->list = e;
+        laste = e;
+        i = j + 1;
+    }
+    return t;
+}
+
+static jsnode_t *primary_in(void);
+/* 'in' is an operator again inside brackets, function bodies and templates, even in a for(...) head */
 static jsnode_t *primary(void){
+    int saved = no_in;
+    if(tis("(") || tis("[") || tis("{") || tkw("function") || tkw("class") || tkw("async") || toks[ti].t == T_TEMPLATE) no_in = 0;
+    jsnode_t *r = primary_in();
+    no_in = saved;
+    return r;
+}
+static jsnode_t *primary_in(void){
     tok_t *t = &toks[ti];
     if(t->t == T_TEMPLATE){ jsnode_t *n = template_node(t->s); adv(); return n; }
     if(t->t == T_NUMBER){ jsnode_t *n = node(N_NUM); n->num = t->n; adv(); return n; }
     if(t->t == T_STRING){ jsnode_t *n = node(N_STR); n->str = t->s; adv(); return n; }
-    if(t->t == T_REGEX){ jsnode_t *n = node(N_REGEX); n->str = t->s; n->flags = t->flags; adv(); return n; }
+    if(t->t == T_REGEX){ jsnode_t *n = node(N_REGEX); n->str = t->s; n->flags = re_flags(t->s); adv(); return n; }
     if(t->t == T_ID){
         if(strcmp(t->s, "true") == 0){ adv(); return node(N_TRUE); }
         if(strcmp(t->s, "false") == 0){ adv(); return node(N_FALSE); }
@@ -815,11 +1387,53 @@ static jsnode_t *primary(void){
         if(strcmp(t->s, "undefined") == 0){ adv(); return node(N_UNDEF); }
         if(strcmp(t->s, "this") == 0){ adv(); return node(N_THIS); }
         if(strcmp(t->s, "super") == 0){ adv(); return node(N_SUPER); }
+        if(strcmp(t->s, "class") == 0) return class_decl();   /* x = class { ... } */
         if(strcmp(t->s, "function") == 0){
             adv();
+            u16 ff = 0;
+            if(tis("*")){ adv(); ff = FN_GEN; }
             const char *name = NULL;
             if(toks[ti].t == T_ID){ name = toks[ti].s; adv(); }
-            return function_rest(name);
+            return function_rest_f(name, ff);
+        }
+        if(strcmp(t->s, "async") == 0 && ti + 1 < ntok && !toks[ti+1].nl){
+            tok_t *nx = &toks[ti+1];
+            if(nx->t == T_ID && strcmp(nx->s, "function") == 0){
+                adv(); adv();
+                u16 ff = FN_ASYNC;
+                if(tis("*")){ adv(); ff |= FN_GEN; }
+                const char *name = NULL;
+                if(toks[ti].t == T_ID){ name = toks[ti].s; adv(); }
+                return function_rest_f(name, ff);
+            }
+            /* async x => ... */
+            if(nx->t == T_ID && ti + 2 < ntok && toks[ti+2].t == T_PUNCT && strcmp(toks[ti+2].s, "=>") == 0){
+                jsnode_t *f = node(N_FUNC);
+                f->fflags = FN_ASYNC;
+                jsnode_t *p = node(N_IDENT);
+                p->str = nx->s;
+                f->list = p;
+                adv(); adv(); adv();
+                return arrow_body(f);
+            }
+            /* async (a, b) => ... */
+            if(nx->t == T_PUNCT && strcmp(nx->s, "(") == 0){
+                int d = 0, k = ti + 1;
+                for(; k < ntok; k++){
+                    if(toks[k].t != T_PUNCT) continue;
+                    if(strcmp(toks[k].s, "(") == 0) d++;
+                    else if(strcmp(toks[k].s, ")") == 0){ d--; if(!d) break; }
+                }
+                if(k + 1 < ntok && toks[k+1].t == T_PUNCT && strcmp(toks[k+1].s, "=>") == 0){
+                    adv();
+                    jsnode_t *f = node(N_FUNC);
+                    f->fflags = FN_ASYNC;
+                    adv();
+                    parse_params(f);
+                    expect("=>");
+                    return arrow_body(f);
+                }
+            }
         }
         if(ti + 1 < ntok && toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "=>") == 0){
             jsnode_t *f = node(N_FUNC);
@@ -843,16 +1457,7 @@ static jsnode_t *primary(void){
         if(k + 1 < ntok && toks[k+1].t == T_PUNCT && strcmp(toks[k+1].s, "=>") == 0){
             jsnode_t *f = node(N_FUNC);
             adv();
-            jsnode_t *last = NULL;
-            while(!tis(")") && toks[ti].t != T_EOF){
-                jsnode_t *p = node(N_IDENT);
-                p->str = toks[ti].s;
-                adv();
-                if(last) last->next = p; else f->list = p;
-                last = p;
-                if(tis(",")) adv();
-            }
-            expect(")");
+            parse_params(f);
             expect("=>");
             return arrow_body(f);
         }
@@ -867,6 +1472,7 @@ static jsnode_t *primary(void){
         jsnode_t *last = NULL;
         while(!tis("]") && toks[ti].t != T_EOF && !STOP()){
             jsnode_t *e;
+            if(tis(",")){ e = node(N_UNDEF); e->computed = 1; adv(); if(last) last->next = e; else n->list = e; last = e; continue; }   /* a hole */
             if(tis("...")){ adv(); e = node(N_SPREAD); e->a = assignment(); }
             else e = assignment();
             if(last) last->next = e; else n->list = e;
@@ -882,20 +1488,44 @@ static jsnode_t *primary(void){
         jsnode_t *last = NULL;
         while(!tis("}") && toks[ti].t != T_EOF && !STOP()){
             jsnode_t *p = node(N_IDENT);
-            if((tkw("get") || tkw("set")) && ti + 2 < ntok && toks[ti+1].t == T_ID &&
-               toks[ti+2].t == T_PUNCT && strcmp(toks[ti+2].s, "(") == 0){
+            if(tis("...")){                  /* {...src}: copies src's own properties */
+                adv();
+                jsnode_t *sp = node(N_SPREAD);
+                sp->a = assignment();
+                if(last) last->next = sp; else n->list = sp;
+                last = sp;
+                if(tis(",")) adv(); else break;
+                continue;
+            }
+            if((tkw("get") || tkw("set")) && ti + 2 < ntok &&
+               (toks[ti+1].t == T_ID || toks[ti+1].t == T_STRING || toks[ti+1].t == T_NUMBER ||
+                (toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "[") == 0)) &&
+               !(toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "(") == 0)){
                 p->op = tkw("get") ? 1 : 2;       /* an accessor */
                 adv();
             }
-            if(toks[ti].t == T_ID || toks[ti].t == T_STRING){ p->str = toks[ti].s; }
-            else if(toks[ti].t == T_NUMBER){
-                char b[40];
-                kfmt_double(b, sizeof b, toks[ti].n);
-                p->str = jstrdup(b, (u32)strlen(b));
-            } else { fail("bad property name"); break; }
-            adv();
+            u16 mff = 0;
+            if(tkw("async") && ti + 1 < ntok && !(toks[ti+1].t == T_PUNCT && (strcmp(toks[ti+1].s, "(") == 0 ||
+               strcmp(toks[ti+1].s, ":") == 0 || strcmp(toks[ti+1].s, ",") == 0 || strcmp(toks[ti+1].s, "}") == 0 ||
+               strcmp(toks[ti+1].s, "=") == 0))){ adv(); mff |= FN_ASYNC; }
+            if(tis("*")){ adv(); mff |= FN_GEN; }
+            if(tis("[")){                     /* a computed key: [expr] */
+                adv();
+                p->b = assignment();
+                p->computed = 1;
+                expect("]");
+                p->str = "";
+            } else {
+                if(toks[ti].t == T_ID || toks[ti].t == T_STRING){ p->str = toks[ti].s; }
+                else if(toks[ti].t == T_NUMBER){
+                    char b[40];
+                    kfmt_double(b, sizeof b, toks[ti].n);
+                    p->str = jstrdup(b, (u32)strlen(b));
+                } else { fail("bad property name"); break; }
+                adv();
+            }
             if(tis("(")){                    /* a method shorthand: name(args) { ... } */
-                p->a = function_rest(p->str);
+                p->a = function_rest_f(p->str, mff);
             } else if(tis(":")){
                 adv();
                 p->a = assignment();
@@ -917,6 +1547,7 @@ static jsnode_t *primary(void){
 }
 
 static jsnode_t *call_args(jsnode_t *callee){
+    int saved_in = no_in; no_in = 0;
     jsnode_t *c = node(N_CALL);
     c->a = callee;
     jsnode_t *last = NULL;
@@ -929,6 +1560,7 @@ static jsnode_t *call_args(jsnode_t *callee){
         if(tis(",")) adv(); else break;
     }
     expect(")");
+    no_in = saved_in;
     return c;
 }
 
@@ -936,6 +1568,14 @@ static jsnode_t *postfix(void){
     jsnode_t *e;
     if(tkw("new")){
         adv();
+        if(tis(".")){                   /* new.target: the constructor the call named */
+            adv();
+            if(tkw("target")) adv(); else fail("expected new.target");
+            jsnode_t *nt = node(N_IDENT);
+            nt->str = "%nt";
+            e = nt;                     /* new.target.name and new.target() carry on below */
+            goto suffixes;
+        }
         jsnode_t *callee = primary();
         for(;;){
             if(tis(".")){
@@ -949,7 +1589,7 @@ static jsnode_t *postfix(void){
                 adv();
                 jsnode_t *m = node(N_MEMBER);
                 m->a = callee;
-                m->b = expression();
+                { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
                 m->computed = 1;
                 expect("]");
                 callee = m;
@@ -960,6 +1600,7 @@ static jsnode_t *postfix(void){
         if(tis("(")){ adv(); jsnode_t *c = call_args(NULL); n->list = c->list; }
         e = n;
     } else e = primary();
+suffixes:
     for(;;){
         if(tis(".")){
             adv();
@@ -973,13 +1614,16 @@ static jsnode_t *postfix(void){
             adv();
             jsnode_t *m = node(N_MEMBER);
             m->a = e;
-            m->b = expression();
+            { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
             m->computed = 1;
             expect("]");
             e = m;
         } else if(tis("(")){
             adv();
             e = call_args(e);
+        } else if(toks[ti].t == T_TEMPLATE){
+            e = tagged_node(e, toks[ti].s);
+            adv();
         } else if(tis("?.")){               /* optional chaining */
             adv();
             if(tis("(")){                    /* fn?.() */
@@ -991,7 +1635,7 @@ static jsnode_t *postfix(void){
                 adv();
                 jsnode_t *m = node(N_MEMBER);
                 m->a = e;
-                m->b = expression();
+                { int sv = no_in; no_in = 0; m->b = expression(); no_in = sv; }
                 m->computed = 1;
                 m->op = 1;
                 expect("]");
@@ -1005,10 +1649,11 @@ static jsnode_t *postfix(void){
                 adv();
                 e = m;
             }
-        } else if(tis("++") || tis("--")){
-            /* x++ and x-- act as x += 1 and x -= 1 (the new value is the result) */
+        } else if((tis("++") || tis("--")) && !toks[ti].nl){
+            /* x++ and x--: assign x +/- 1, the result is the old value (as a number) */
             jsnode_t *a = node(N_ASSIGN);
             a->op = tis("++") ? OP_ADDSET : OP_SUBSET;
+            a->arrow = 1;                     /* marks postfix */
             a->a = e;
             jsnode_t *one = node(N_NUM);
             one->num = 1;
@@ -1031,9 +1676,16 @@ static jsnode_t *unary(void){
         a->b = one;
         return a;
     }
-    if(tis("!") || tis("-") || tis("+") || tkw("typeof") || tkw("delete") || tkw("void")){
+    if(tkw("await") && (cur_fn_flags & FN_ASYNC)){
+        adv();
+        jsnode_t *n = node(N_UNARY);
+        n->op = OP_AWAIT;
+        n->a = unary();
+        return n;
+    }
+    if(tis("!") || tis("-") || tis("+") || tis("~") || tkw("typeof") || tkw("delete") || tkw("void")){
         int op = tkw("typeof") ? OP_TYPEOF : tkw("delete") ? OP_DELETE : tkw("void") ? OP_VOID :
-                 tis("!") ? OP_NOT : tis("-") ? OP_NEG : OP_POS;
+                 tis("!") ? OP_NOT : tis("-") ? OP_NEG : tis("~") ? OP_BNOT : OP_POS;
         adv();
         jsnode_t *n = node(N_UNARY);
         n->op = op;
@@ -1043,13 +1695,14 @@ static jsnode_t *unary(void){
     return postfix();
 }
 
+static int no_in = 0;    /* parsing a for(...) head: 'in' ends the expression */
 static jsnode_t *binary(int minp){
     jsnode_t *left = unary();
     for(;;){
         int p;
         const char *op = NULL;
         if(toks[ti].t == T_PUNCT){ op = toks[ti].s; p = prec(op); }
-        else if(tkw("instanceof") || tkw("in")){ op = toks[ti].s; p = 4; }
+        else if(tkw("instanceof") || (tkw("in") && !no_in)){ op = toks[ti].s; p = 7; }
         else break;
         if(p == 0 || p < minp) break;
         adv();
@@ -1079,11 +1732,34 @@ static jsnode_t *conditional(void){
 }
 
 static jsnode_t *assignment(void){
+    if(tkw("yield") && (cur_fn_flags & FN_GEN)){
+        adv();
+        jsnode_t *n = node(N_UNARY);
+        n->op = OP_YIELD;
+        if(tis("*")){ adv(); n->op = OP_YIELD_STAR; }
+        /* `yield` on its own: nothing follows it on this line */
+        if(!(toks[ti].t == T_EOF || toks[ti].nl || tis(";") || tis("}") || tis(")") ||
+             tis("]") || tis(",") || tis(":")))
+            n->a = assignment();
+        return n;
+    }
     jsnode_t *left = conditional();
     int op = OP_NONE;
-    if(tis("=")) op = OP_SET;
-    else if(tis("+=")) op = OP_ADDSET;
-    else if(tis("-=")) op = OP_SUBSET;
+    if(toks[ti].t == T_PUNCT){
+        const char *o = toks[ti].s;
+        u32 L = (u32)strlen(o);
+        if(strcmp(o, "=") == 0) op = OP_SET;
+        else if(strcmp(o, "+=") == 0) op = OP_ADDSET;
+        else if(strcmp(o, "-=") == 0) op = OP_SUBSET;
+        else if(L >= 2 && o[L-1] == '=' && strcmp(o, "==") != 0 && strcmp(o, "!=") != 0 &&
+                strcmp(o, "<=") != 0 && strcmp(o, ">=") != 0 && strcmp(o, "===") != 0 && strcmp(o, "!==") != 0){
+            char base[5]; u32 k;
+            for(k = 0; k + 1 < L && k < 4; k++) base[k] = o[k];
+            base[k] = 0;
+            int b = strcmp(base, "&&") == 0 ? OP_AND : strcmp(base, "||") == 0 ? OP_OR : binop(base);
+            if(b != OP_NONE) op = OP_COMPOUND + b;
+        }
+    }
     if(op != OP_NONE){
         adv();
         jsnode_t *n = node(N_ASSIGN);
@@ -1096,12 +1772,33 @@ static jsnode_t *assignment(void){
 }
 
 static jsnode_t *expression(void){
-    return assignment();
+    jsnode_t *e = assignment();
+    if(!tis(",")) return e;
+    jsnode_t *seq = node(N_SEQ);
+    seq->list = e;
+    jsnode_t *last = e;
+    while(tis(",") && !STOP()){
+        adv();
+        jsnode_t *x = assignment();
+        last->next = x;
+        last = x;
+    }
+    return seq;
 }
 
 /* A destructuring pattern: [a, b, ...rest] or {a, b: c, ...rest}.
  * Array patterns are N_ARRAY of N_IDENT / N_SPREAD(N_IDENT); object patterns are
  * N_OBJECT of N_IDENT (str = source key, a = target name) / N_SPREAD(N_IDENT). */
+/* One pattern target: a name or a nested pattern (c), with an optional default (b). */
+static jsnode_t *parse_target(void){
+    jsnode_t *it = node(N_IDENT);
+    if(tis("[") || tis("{")) it->c = parse_pattern();
+    else if(toks[ti].t == T_ID){ it->str = toks[ti].s; adv(); }
+    else { fail("bad destructuring target"); adv(); }
+    if(tis("=")){ adv(); it->b = assignment(); }
+    return it;
+}
+
 static jsnode_t *parse_pattern(void){
     jsnode_t *n, *last = NULL;
     if(tis("[")){
@@ -1109,14 +1806,9 @@ static jsnode_t *parse_pattern(void){
         n = node(N_ARRAY);
         while(!tis("]") && toks[ti].t != T_EOF && !STOP()){
             jsnode_t *it;
-            if(tis("...")){
-                adv();
-                it = node(N_SPREAD);
-                jsnode_t *id = node(N_IDENT); id->str = toks[ti].s; adv();
-                it->a = id;
-            } else {
-                it = node(N_IDENT); it->str = toks[ti].s; adv();
-            }
+            if(tis(",")){ it = node(N_EMPTY); adv(); if(last) last->next = it; else n->list = it; last = it; continue; }
+            if(tis("...")){ adv(); it = node(N_SPREAD); it->a = parse_target(); }
+            else it = parse_target();
             if(last) last->next = it; else n->list = it;
             last = it;
             if(tis(",")) adv(); else break;
@@ -1128,14 +1820,18 @@ static jsnode_t *parse_pattern(void){
     n = node(N_OBJECT);
     while(!tis("}") && toks[ti].t != T_EOF && !STOP()){
         jsnode_t *it;
-        if(tis("...")){
-            adv();
-            it = node(N_SPREAD);
-            jsnode_t *id = node(N_IDENT); id->str = toks[ti].s; adv();
-            it->a = id;
-        } else {
-            it = node(N_IDENT); it->str = toks[ti].s; adv();   /* source key */
-            if(tis(":")){ adv(); jsnode_t *tgt = node(N_IDENT); tgt->str = toks[ti].s; adv(); it->a = tgt; }
+        if(tis("...")){ adv(); it = node(N_SPREAD); it->a = parse_target(); }
+        else {
+            it = node(N_IDENT);
+            if(tis("[")){ adv(); it->computed = 1; it->d = assignment(); expect("]"); it->str = ""; }
+            else if(toks[ti].t == T_NUMBER){ char b[40]; kfmt_double(b, sizeof b, toks[ti].n); it->str = jstrdup(b, (u32)strlen(b)); adv(); }
+            else { it->str = toks[ti].s; adv(); }            /* source key */
+            if(tis(":")){ adv(); it->a = parse_target(); }
+            else {
+                jsnode_t *tgt = node(N_IDENT); tgt->str = it->str;
+                if(tis("=")){ adv(); tgt->b = assignment(); }
+                it->a = tgt;
+            }
         }
         if(last) last->next = it; else n->list = it;
         last = it;
@@ -1147,6 +1843,7 @@ static jsnode_t *parse_pattern(void){
 
 static jsnode_t *var_decl(void){
     jsnode_t *v = node(N_VAR);
+    v->op = tkw("var") ? 0 : 1;          /* 0: var (function scope), 1: let/const (block) */
     adv();
     jsnode_t *last = NULL;
     for(;;){
@@ -1180,25 +1877,78 @@ static jsnode_t *block_body(void){
     return b;
 }
 
+/* True when the token after the current one ends a class member, so the current
+ * identifier is the member's own name rather than a modifier (static, get, async). */
+static int member_name_ends_here(void){
+    if(ti + 1 >= ntok) return 1;
+    tok_t *n = &toks[ti + 1];
+    if(n->t != T_PUNCT) return 0;
+    return strcmp(n->s, "(") == 0 || strcmp(n->s, "=") == 0 || strcmp(n->s, ";") == 0 ||
+           strcmp(n->s, "}") == 0;
+}
+
+/* The key of a class member or object property: [expr], a name, a string or a number. */
+static void parse_member_key(jsnode_t *m){
+    if(tis("[")){
+        adv();
+        m->b = assignment();
+        m->computed = 1;
+        m->str = "";
+        expect("]");
+        return;
+    }
+    if(toks[ti].t == T_ID || toks[ti].t == T_STRING) m->str = toks[ti].s;
+    else if(toks[ti].t == T_NUMBER){
+        char b[40];
+        kfmt_double(b, sizeof b, toks[ti].n);
+        m->str = jstrdup(b, (u32)strlen(b));
+    } else { fail("bad class member"); m->str = ""; return; }
+    adv();
+}
+
+/* class [Name] [extends E] { members }
+ * A member node is an N_FUNCDECL: op 0 method, 1 getter, 2 setter, 3 field,
+ * 4 static initialiser block; FN_STATIC in fflags; a->the function; c->a field's
+ * initialiser; b->a computed key. */
 static jsnode_t *class_decl(void){
     jsnode_t *c = node(N_CLASS);
     adv();                                       /* class */
-    if(toks[ti].t == T_ID){ c->str = toks[ti].s; adv(); }
+    if(toks[ti].t == T_ID && !tkw("extends")){ c->str = toks[ti].s; adv(); }
     if(tkw("extends")){ adv(); c->a = postfix(); }
     expect("{");
     jsnode_t *last = NULL;
     while(!tis("}") && toks[ti].t != T_EOF && !STOP()){
         if(tis(";")){ adv(); continue; }
-        if(toks[ti].t != T_ID){ fail("bad class member"); break; }
         jsnode_t *m = node(N_FUNCDECL);
-        if((tkw("get") || tkw("set")) && ti + 2 < ntok && toks[ti+1].t == T_ID &&
-           toks[ti+2].t == T_PUNCT && strcmp(toks[ti+2].s, "(") == 0){
+        if(tkw("static") && !member_name_ends_here()){
+            adv();
+            m->fflags |= FN_STATIC;
+            if(tis("{")){                        /* static { ... }: runs once, this = the class */
+                m->op = 4;
+                m->a = node(N_FUNC);
+                m->a->str = "";
+                m->a->a = block_body();
+                if(last) last->next = m; else c->list = m;
+                last = m;
+                continue;
+            }
+        }
+        if((tkw("get") || tkw("set")) && !member_name_ends_here()){
             m->op = tkw("get") ? 1 : 2;
             adv();
         }
-        m->str = toks[ti].s;
-        adv();
-        m->a = function_rest(m->str);
+        u16 ff = 0;
+        if(tkw("async") && !member_name_ends_here() && !toks[ti+1].nl){ adv(); ff |= FN_ASYNC; }
+        if(tis("*")){ adv(); ff |= FN_GEN; }
+        parse_member_key(m);
+        if(STOP()) break;
+        if(tis("(")){
+            m->a = function_rest_f(m->str, ff);
+        } else {                                 /* a field: name [= value] */
+            m->op = 3;
+            if(tis("=")){ adv(); m->c = assignment(); }
+            if(tis(";")) adv();
+        }
         if(last) last->next = m; else c->list = m;
         last = m;
     }
@@ -1209,23 +1959,37 @@ static jsnode_t *class_decl(void){
 static jsnode_t *statement(void){
     if(tis("{")) return block_body();
     if(tis(";")){ adv(); return node(N_EMPTY); }
-    if(tkw("var") || tkw("let") || tkw("const")){
-        if(ti + 2 < ntok && toks[ti+1].t == T_ID && toks[ti+2].t == T_ID &&
-           (strcmp(toks[ti+2].s, "of") == 0 || strcmp(toks[ti+2].s, "in") == 0)){
-            /* for-in / for-of is handled by the for statement */
-        }
+    /* a label: name: statement */
+    if(toks[ti].t == T_ID && ti + 1 < ntok && toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, ":") == 0){
+        jsnode_t *l = node(N_LABEL);
+        l->str = toks[ti].s;
+        adv(); adv();
+        l->a = statement();
+        if(l->a) l->a->label = l->str;
+        return l;
+    }
+    if(tkw("var") || tkw("const") ||
+       (tkw("let") && ti + 1 < ntok && (toks[ti+1].t == T_ID || (toks[ti+1].t == T_PUNCT &&
+        (strcmp(toks[ti+1].s, "[") == 0 || strcmp(toks[ti+1].s, "{") == 0))))){
         jsnode_t *v = var_decl();
         if(tis(";")) adv();
         return v;
     }
     if(tkw("class")) return class_decl();
-    if(tkw("function") && ti + 1 < ntok && toks[ti+1].t == T_ID){
+    u16 dff = 0;
+    if(tkw("async") && ti + 1 < ntok && toks[ti+1].t == T_ID && strcmp(toks[ti+1].s, "function") == 0 && !toks[ti+1].nl){
         adv();
+        dff = FN_ASYNC;
+    }
+    if(tkw("function") && ti + 1 < ntok && (toks[ti+1].t == T_ID ||
+       (toks[ti+1].t == T_PUNCT && strcmp(toks[ti+1].s, "*") == 0 && ti + 2 < ntok && toks[ti+2].t == T_ID))){
+        adv();
+        if(tis("*")){ adv(); dff |= FN_GEN; }
         const char *name = toks[ti].s;
         adv();
         jsnode_t *d = node(N_FUNCDECL);
         d->str = name;
-        d->a = function_rest(name);
+        d->a = function_rest_f(name, dff);
         return d;
     }
     if(tkw("if")){
@@ -1260,23 +2024,38 @@ static jsnode_t *statement(void){
     }
     if(tkw("for")){
         adv();
+        int for_await = 0;
+        if(tkw("await")){ adv(); for_await = 1; }
         expect("(");
-        if((tkw("var") || tkw("let") || tkw("const")) && ti + 2 < ntok && toks[ti+1].t == T_ID &&
-           toks[ti+2].t == T_ID && (strcmp(toks[ti+2].s, "of") == 0 || strcmp(toks[ti+2].s, "in") == 0)){
+        jsnode_t *init = NULL;
+        no_in = 1;
+        if(tkw("var") || tkw("let") || tkw("const")) init = var_decl();
+        else if(!tis(";")){ init = node(N_EXPR); init->a = expression(); }
+        no_in = 0;
+        if(init && (tkw("in") || tkw("of"))){
+            /* for (x in obj) / for (const [k, v] of list) / for (a.b in obj) */
             jsnode_t *n = node(N_FORIN);
+            n->op = tkw("of") ? 1 : 0;
+            if(for_await) n->fflags |= FN_ASYNC;      /* for await (x of src) */
             adv();
-            n->str = toks[ti].s;
-            adv();
-            n->op = strcmp(toks[ti].s, "of") == 0 ? 1 : 0;
-            adv();
-            n->a = expression();
+            if(init->k == N_VAR){
+                jsnode_t *d = init->list;
+                if(d && d->b) n->b = d->b;                 /* a pattern */
+                else if(d){ jsnode_t *id = node(N_IDENT); id->str = d->str; n->b = id; }
+                n->computed = 0;                           /* declares (op of var kept below) */
+                n->c = init;                               /* var vs let: hoisting looks here */
+            } else {
+                n->b = init->a;                            /* an assignment target */
+                n->computed = 1;
+            }
+            n->a = n->op ? assignment() : expression();
             expect(")");
             n->d = statement();
             return n;
         }
+        (void)for_await;
         jsnode_t *n = node(N_FOR);
-        if(tkw("var") || tkw("let") || tkw("const")) n->a = var_decl();
-        else if(!tis(";")){ jsnode_t *e = node(N_EXPR); e->a = expression(); n->a = e; }
+        n->a = init;
         expect(";");
         if(!tis(";")) n->b = expression();
         expect(";");
@@ -1333,17 +2112,25 @@ static jsnode_t *statement(void){
     if(tkw("return")){
         adv();
         jsnode_t *n = node(N_RETURN);
-        if(!tis(";") && !tis("}")) n->a = expression();
+        if(!tis(";") && !tis("}") && !toks[ti].nl && toks[ti].t != T_EOF) n->a = expression();
         if(tis(";")) adv();
         return n;
     }
-    if(tkw("break")){ adv(); if(tis(";")) adv(); return node(N_BREAK); }
-    if(tkw("continue")){ adv(); if(tis(";")) adv(); return node(N_CONTINUE); }
+    if(tkw("break") || tkw("continue")){
+        jsnode_t *n = node(tkw("break") ? N_BREAK : N_CONTINUE);
+        adv();
+        if(toks[ti].t == T_ID && !toks[ti].nl){ n->str = toks[ti].s; adv(); }   /* a label */
+        if(tis(";")) adv();
+        return n;
+    }
+    if(tkw("debugger")){ adv(); if(tis(";")) adv(); return node(N_EMPTY); }
     jsnode_t *n = node(N_EXPR);
     n->a = expression();
     if(tis(";")) adv();
     return n;
 }
+
+static int fn_is_arrow(js_obj_t *o){ return o->fdecl && o->fdecl->arrow; }
 
 /* ---- environments ---- */
 static env_t *new_env(env_t *parent){
@@ -1372,11 +2159,21 @@ static binding_t *env_find(env_t *e, const char *name){
 
 /* ---- evaluation ---- */
 static int ctl = 0;                    /* 0 none, 1 return, 2 break, 3 continue */
+static const char *ctl_label = NULL;   /* the label of a pending break/continue (NULL: none) */
+static js_obj_t *keys_of(js_val_t v);
+static void hoist_vars(jsnode_t *f, jsnode_t *body, env_t *env);
+static void hoist_walk(jsnode_t *n, jsnode_t *f);
 static js_val_t ret_val;
-static int depth = 0;
+/* depth: declared with the debug call stack */
 static long steps = 0;
 
+#define NOINLINE __attribute__((noinline))
 static js_val_t eval(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_call(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_new(jsnode_t *n, env_t *env);
+static NOINLINE js_val_t eval_tagged(jsnode_t *n, env_t *env);
+static js_val_t coro_suspend(js_val_t v, int out_kind);
+static js_val_t coro_yield_star(js_val_t src);
 
 /* Evaluates a call/array argument list into out[], expanding ...spread elements.
  * Returns the number of values produced (capped at max). */
@@ -1385,8 +2182,8 @@ static int eval_args(jsnode_t *list, env_t *env, js_val_t *out, int max){
     for(jsnode_t *e = list; e && argc < max; e = e->next){
         if(e->k == N_SPREAD){
             js_val_t s = eval(e->a, env);
-            if(s.t == JS_OBJ && s.o->is_array)
-                for(int i = 0; i < s.o->nitems && argc < max; i++) out[argc++] = s.o->items[i];
+            js_obj_t *it = iterate_to_array(s);
+            for(int i = 0; i < it->nitems && argc < max; i++) out[argc++] = it->items[i];
         } else out[argc++] = eval(e, env);
     }
     return argc;
@@ -1402,6 +2199,7 @@ static int step(void){
 static js_val_t read_ident(env_t *env, const char *name){
     binding_t *b = env_find(env, name);
     if(b) return b->v;
+    if(name[0] == '%') return js_undef();    /* the engine's own bindings (%nt, %fn, ...) */
     if(global_obj){
         js_val_t out = js_undef();
         if(has_prop(global_obj, name)) return js_get(global_obj, name);
@@ -1440,7 +2238,7 @@ static int loose_eq(js_val_t a, js_val_t b){
 static js_val_t concat(js_val_t a, js_val_t b){
     const char *x = js_to_str(a), *y = js_to_str(b);
     u32 lx = (u32)strlen(x), ly = (u32)strlen(y);
-    if(lx + ly > 16384){ fail("string too long"); return js_str(""); }
+    if((u64)lx + ly > (256u << 20)){ fail("string too long"); return js_str(""); }
     char *r = jalloc(lx + ly + 1);
     memcpy(r, x, lx);
     memcpy(r + lx, y, ly);
@@ -1453,8 +2251,25 @@ static js_obj_t *prototype_of(js_obj_t *ctor){
     return p.t == JS_OBJ ? p.o : NULL;
 }
 
+/* ECMAScript ToInt32 / ToUint32. */
+static u32 to_u32(double x){
+    if(x != x || x == 1.0/0.0 || x == -1.0/0.0) return 0;
+    if(x > -9.2e18 && x < 9.2e18) return (u32)(unsigned long long)(long long)x;
+    double m = kfmod(x < 0 ? -x : x, 4294967296.0);
+    m = (double)(unsigned long long)m;
+    if(x < 0) m = 4294967296.0 - m;
+    return (u32)(unsigned long long)m;
+}
+static int to_i32(double x){ return (int)to_u32(x); }
+
 static js_val_t binop_eval(int op, js_val_t a, js_val_t b){
     switch(op){
+        case OP_BAND: return js_num((double)(to_i32(js_to_num(a)) & to_i32(js_to_num(b))));
+        case OP_BOR:  return js_num((double)(to_i32(js_to_num(a)) | to_i32(js_to_num(b))));
+        case OP_BXOR: return js_num((double)(to_i32(js_to_num(a)) ^ to_i32(js_to_num(b))));
+        case OP_SHL:  return js_num((double)(int)(to_u32(js_to_num(a)) << (to_u32(js_to_num(b)) & 31)));
+        case OP_SHR:  return js_num((double)(to_i32(js_to_num(a)) >> (to_u32(js_to_num(b)) & 31)));
+        case OP_USHR: return js_num((double)(to_u32(js_to_num(a)) >> (to_u32(js_to_num(b)) & 31)));
         case OP_ADD:
             if(a.t == JS_STR || b.t == JS_STR || a.t == JS_OBJ || b.t == JS_OBJ) return concat(a, b);
             return js_num(js_to_num(a) + js_to_num(b));
@@ -1479,7 +2294,13 @@ static js_val_t binop_eval(int op, js_val_t a, js_val_t b){
             return js_bool(r);
         }
         case OP_INSTANCEOF: {
-            if(a.t != JS_OBJ || b.t != JS_OBJ) return js_bool(0);
+            if(b.t != JS_OBJ){ fail("right-hand side of 'instanceof' is not callable"); return js_bool(0); }
+            js_val_t hi = js_get(b.o, "\x01Symbol(Symbol.hasInstance)");
+            if(js_callable(hi)){
+                js_val_t ar[1] = { a };
+                return js_bool(js_truthy(call_value(hi, b, 1, ar)));
+            }
+            if(a.t != JS_OBJ) return js_bool(0);
             js_obj_t *p = prototype_of(b.o);
             for(js_obj_t *x = a.o->proto; x && p; x = x->proto) if(x == p) return js_bool(1);
             return js_bool(0);
@@ -1495,10 +2316,17 @@ static js_val_t binop_eval(int op, js_val_t a, js_val_t b){
 static js_val_t get_member(js_val_t obj, const char *name){
     if(obj.t == JS_STR){
         if(strcmp(name, "length") == 0) return js_num((double)strlen(obj.s));
+        int i = as_index(name);
+        if(i >= 0){                                   /* "abc"[1] is "b" */
+            u32 L = (u32)strlen(obj.s);
+            if((u32)i >= L) return js_undef();
+            return js_str(jstrdup(obj.s + i, 1));
+        }
         return js_get(string_proto, name);
     }
     if(obj.t == JS_OBJ) return js_get(obj.o, name);
     if(obj.t == JS_NUM) return js_get(number_proto, name);
+    if(obj.t == JS_BOOL) return bool_proto ? js_get(bool_proto, name) : js_undef();
     if(obj.t == JS_NULL || obj.t == JS_UNDEF){
         char m[80] = "cannot read \"";
         u32 k = (u32)strlen(m);
@@ -1519,14 +2347,29 @@ static const char *key_of(jsnode_t *m, env_t *env){
     return js_to_str(k);
 }
 
+/* a script function's declared arity: parameters before the first default or ...rest */
+static int fn_arity(js_obj_t *o){
+    int n = 0;
+    for(jsnode_t *q = o->fdecl->list; q; q = q->next){
+        if(q->op == 1 || q->b) break;
+        n++;
+    }
+    return n;
+}
+static const char *fn_name_of(js_obj_t *o){ return o->fdecl->str ? o->fdecl->str : ""; }
+
 static js_val_t make_fn(jsnode_t *f, env_t *env){
     js_obj_t *o = new_obj();
     o->is_func = 1;
-    o->proto = object_proto;
+    o->proto = function_proto ? function_proto : object_proto;
     o->fdecl = f;
     o->closure = env;
     return js_objv(o);
 }
+
+static js_val_t destructure_src(js_val_t v);
+static void init_class_fields(js_obj_t *ctor, js_val_t self);
+static js_obj_t *pending_new_target;
 
 static js_val_t construct(js_val_t ctor, int argc, js_val_t *argv){
     if(!js_callable(ctor)){ fail("not a constructor"); return js_undef(); }
@@ -1534,7 +2377,9 @@ static js_val_t construct(js_val_t ctor, int argc, js_val_t *argv){
     obj->proto = prototype_of(ctor.o);
     if(!obj->proto) obj->proto = object_proto;
     js_val_t self = js_objv(obj);
+    pending_new_target = ctor.o;
     js_val_t r = call_value(ctor, self, argc, argv);
+    pending_new_target = NULL;
     if(r.t == JS_OBJ) return r;
     return self;
 }
@@ -1550,38 +2395,207 @@ static void obj_rest_copy(js_obj_t *rest, jsnode_t *pat, prop_t *p){
     if(!used) js_set(rest, p->k, p->v);
 }
 
+static void bind_pattern(jsnode_t *pat, js_val_t v, env_t *env);
+
+/* Binds one pattern target (a name or nested pattern, with a default) to v. */
+static void bind_target(jsnode_t *t, js_val_t v, env_t *env){
+    if(v.t == JS_UNDEF && t->b) v = eval(t->b, env);
+    if(t->c) bind_pattern(t->c, v, env);
+    else if(t->str) env_define(env, t->str, v);
+}
+
 /* Binds a destructuring pattern's targets from value v into env. */
 static void bind_pattern(jsnode_t *pat, js_val_t v, env_t *env){
     if(pat->k == N_ARRAY){
         int i = 0;
+        v = destructure_src(v);
         for(jsnode_t *it = pat->list; it; it = it->next, i++){
+            if(it->k == N_EMPTY) continue;
             if(it->k == N_SPREAD){
                 js_obj_t *r = new_array();
                 if(v.t == JS_OBJ && v.o->is_array)
                     for(int j = i; j < v.o->nitems; j++) arr_push(r, v.o->items[j]);
-                env_define(env, it->a->str, js_objv(r));
+                bind_target(it->a, js_objv(r), env);
                 break;
             }
             js_val_t item = js_undef();
             if(v.t == JS_OBJ && v.o->is_array && i < v.o->nitems) item = v.o->items[i];
-            env_define(env, it->str, item);
+            else if(v.t == JS_OBJ && !v.o->is_array){ char b[16]; kfmt_double(b, sizeof b, (double)i); item = get_member(v, b); }
+            bind_target(it, item, env);
         }
     } else {                                 /* object pattern */
         for(jsnode_t *it = pat->list; it; it = it->next){
             if(it->k == N_SPREAD){           /* ...rest: remaining own keys as a new object */
                 js_obj_t *rest = js_new_object();
                 if(v.t == JS_OBJ) obj_rest_copy(rest, pat, v.o->props);
-                env_define(env, it->a->str, js_objv(rest));
+                bind_target(it->a, js_objv(rest), env);
                 continue;
             }
-            js_val_t val = (v.t == JS_OBJ) ? get_member(v, it->str) : js_undef();
-            env_define(env, it->a ? it->a->str : it->str, val);
+            const char *key = it->computed ? js_to_str(eval(it->d, env)) : it->str;
+            js_val_t val = (v.t == JS_OBJ || v.t == JS_STR) ? get_member(v, key) : js_undef();
+            bind_target(it->a, val, env);
         }
     }
 }
 
+/* Stores v into an assignment target: a name, a member, or a destructuring literal. */
+/* The source of an array destructuring pattern, as an array: anything with a
+ * Symbol.iterator (a Set, a Map, a generator, a string) is drained into one first. */
+static js_val_t destructure_src(js_val_t v){
+    if(v.t == JS_STR) return js_objv(iterate_to_array(v));
+    if(v.t == JS_OBJ && !v.o->is_array && js_callable(js_get(v.o, "\x01Symbol(Symbol.iterator)")))
+        return js_objv(iterate_to_array(v));
+    return v;
+}
+
+static void assign_to(jsnode_t *t, js_val_t v, env_t *env){
+    if(t->k == N_IDENT){
+        binding_t *b = env_find(env, t->str);
+        if(b) b->v = v;
+        else if(global_obj) js_set(global_obj, t->str, v);
+    } else if(t->k == N_MEMBER){
+        js_val_t obj = eval(t->a, env);
+        if(obj.t == JS_OBJ) obj_set(obj.o, key_of(t, env), v);
+        else if(obj.t == JS_NULL || obj.t == JS_UNDEF) fail("cannot set a property of null or undefined");
+    } else if(t->k == N_ASSIGN && t->op == OP_SET){          /* a default: [a = 1] = ... */
+        if(v.t == JS_UNDEF) v = eval(t->b, env);
+        assign_to(t->a, v, env);
+    } else if(t->k == N_ARRAY){
+        int i = 0;
+        v = destructure_src(v);
+        for(jsnode_t *e = t->list; e; e = e->next, i++){
+            if(e->k == N_UNDEF && !e->str) continue;          /* a hole */
+            if(e->k == N_SPREAD){
+                js_obj_t *r = new_array();
+                if(v.t == JS_OBJ && v.o->is_array)
+                    for(int j = i; j < v.o->nitems; j++) arr_push(r, v.o->items[j]);
+                assign_to(e->a, js_objv(r), env);
+                break;
+            }
+            js_val_t item = js_undef();
+            if(v.t == JS_OBJ && v.o->is_array && i < v.o->nitems) item = v.o->items[i];
+            assign_to(e, item, env);
+        }
+    } else if(t->k == N_OBJECT){
+        for(jsnode_t *p = t->list; p; p = p->next){
+            if(p->k == N_SPREAD) continue;
+            const char *key = p->computed ? js_to_str(eval(p->b, env)) : p->str;
+            js_val_t val = (v.t == JS_OBJ || v.t == JS_STR) ? get_member(v, key) : js_undef();
+            assign_to(p->a, val, env);
+        }
+    } else fail("bad assignment target");
+}
+static void assign_pattern(jsnode_t *t, js_val_t v, env_t *env){ assign_to(t, v, env); }
+
+/* "a.b.c" for an expression, for error messages. */
+static void desc_into(jsnode_t *n, char *out, u32 *k, u32 cap){
+    if(!n || *k + 4 >= cap) return;
+    const char *s = NULL;
+    if(n->k == N_IDENT) s = n->str;
+    else if(n->k == N_THIS) s = "this";
+    else if(n->k == N_MEMBER){
+        desc_into(n->a, out, k, cap);
+        if(n->computed){ s = "[...]"; }
+        else { if(*k + 1 < cap) out[(*k)++] = '.'; s = n->str; }
+    } else if(n->k == N_CALL){ desc_into(n->a, out, k, cap); s = "(...)"; }
+    else s = "(expression)";
+    for(; s && *s && *k + 1 < cap; s++) out[(*k)++] = *s;
+    out[*k] = 0;
+}
+static void fail_desc(jsnode_t *n, const char *what){
+    char m[150]; u32 k = 0;
+    desc_into(n, m, &k, 100);
+    for(const char *q = what; *q && k + 1 < sizeof m; q++) m[k++] = *q;
+    m[k] = 0;
+    fail(m);
+}
+
+/* Calls, new and tagged templates each need room for 32 arguments. They live in their
+ * own functions so that eval's frame -- which every level of recursion pays for -- does
+ * not carry that room around. */
+static NOINLINE js_val_t eval_call(jsnode_t *n, env_t *env){
+    if(n->a && n->a->k == N_SUPER){
+        /* super(args): the superclass constructor runs on this */
+        binding_t *f = env_find(env, "%fn");
+        binding_t *th = env_find(env, "this");
+        js_val_t args[32];
+        int argc = eval_args(n->list, env, args, 32);
+        if(!f || !th || f->v.t != JS_OBJ || !f->v.o->parent){ fail("no superclass"); return js_undef(); }
+        js_val_t sr = call_value(js_objv(f->v.o->parent), th->v, argc, args);
+        binding_t *fb = env_find(env, "%fields");
+        if(fb && fb->v.t == JS_OBJ){ js_obj_t *cc = fb->v.o; fb->v = js_undef(); init_class_fields(cc, th->v); }
+        return sr;
+    }
+    js_val_t self = js_undef();
+    js_val_t fn;
+    if(n->a->k == N_MEMBER && n->a->a->k == N_SUPER){
+        binding_t *h = env_find(env, "%home");
+        binding_t *th = env_find(env, "this");
+        if(!h || h->v.t != JS_OBJ || !h->v.o->proto || !th){ fail("super is not available here"); return js_undef(); }
+        self = th->v;
+        fn = js_get(h->v.o->proto, key_of(n->a, env));
+    } else if(n->a->k == N_MEMBER){
+        self = eval(n->a->a, env);
+        fn = get_member(self, key_of(n->a, env));
+    } else fn = eval(n->a, env);
+    if(n->op == 1 && (fn.t == JS_NULL || fn.t == JS_UNDEF)) return js_undef();  /* fn?.() */
+    js_val_t args[32];
+    int argc = eval_args(n->list, env, args, 32);
+    if(STOP()) return js_undef();
+    if(!js_callable(fn)){ fail_desc(n->a, " is not a function"); return js_undef(); }
+    return call_value(fn, self, argc, args);
+}
+
+static NOINLINE js_val_t eval_new(jsnode_t *n, env_t *env){
+    js_val_t ctor = eval(n->a, env);
+    js_val_t args[32];
+    int argc = eval_args(n->list, env, args, 32);
+    if(STOP()) return js_undef();
+    if(!js_callable(ctor)){ fail_desc(n->a, " is not a constructor"); return js_undef(); }
+    return construct(ctor, argc, args);
+}
+
+static NOINLINE js_val_t eval_tagged(jsnode_t *n, env_t *env){
+    js_val_t self = js_undef(), fn;
+    if(n->a->k == N_MEMBER){
+        self = eval(n->a->a, env);
+        fn = get_member(self, key_of(n->a, env));
+    } else fn = eval(n->a, env);
+    if(STOP()) return js_undef();
+    if(!js_callable(fn)){ fail_desc(n->a, " is not a function"); return js_undef(); }
+    js_obj_t *strs = new_array(), *raws = new_array();
+    for(jsnode_t *e = n->b->list; e; e = e->next) arr_push(strs, js_str(e->str));
+    for(jsnode_t *e = n->c->list; e; e = e->next) arr_push(raws, js_str(e->str));
+    js_set(strs, "raw", js_objv(raws));
+    find_own(strs, "raw")->flags = PF_HIDDEN;
+    js_val_t args[32];
+    args[0] = js_objv(strs);
+    int argc = 1;
+    for(jsnode_t *e = n->list; e && argc < 32; e = e->next) args[argc++] = eval(e, env);
+    if(STOP()) return js_undef();
+    return call_value(fn, self, argc, args);
+}
+
+/* Reading a property of null or undefined: name the expression, as browsers do. */
+static NOINLINE void fail_empty_member(jsnode_t *n, env_t *env, int is_null){
+    char m[160]; u32 k = 0;
+    const char *pre = "Cannot read properties of ";
+    for(const char *q = pre; *q; q++) m[k++] = *q;
+    const char *w = is_null ? "null" : "undefined";
+    for(const char *q = w; *q; q++) m[k++] = *q;
+    const char *mid = " (reading '";
+    for(const char *q = mid; *q; q++) m[k++] = *q;
+    const char *key = key_of(n, env);
+    for(const char *q = key; *q && k < 100; q++) m[k++] = *q;
+    m[k++] = '\''; m[k++] = ')'; m[k++] = ' '; m[k++] = '-'; m[k++] = ' ';
+    desc_into(n->a, m, &k, 150);
+    m[k] = 0;
+    fail(jstrdup(m, k));
+}
+
 static js_val_t eval(jsnode_t *n, env_t *env){
     if(!n || STOP()) return js_undef();
+    eval_at = n->at;
     if(!step()) return js_undef();
     switch(n->k){
         case N_NUM: return js_num(n->num);
@@ -1592,49 +2606,57 @@ static js_val_t eval(jsnode_t *n, env_t *env){
         case N_UNDEF: return js_undef();
         case N_THIS: return read_ident(env, "this");
         case N_IDENT: return read_ident(env, n->str);
-        case N_REGEX: {
-            js_obj_t *r = new_obj();
-            r->is_regex = 1;
-            r->proto = regex_proto;
-            r->re = jalloc(sizeof(regex_data_t));
-            r->re->pat = n->str;
-            r->re->plen = (u32)strlen(n->str);
-            r->re->icase = strchr(n->flags, 'i') != NULL;
-            r->re->global = strchr(n->flags, 'g') != NULL;
-            js_set(r, "source", js_str(n->str));
-            js_set(r, "flags", js_str(n->flags));
-            js_set(r, "global", js_bool(r->re->global));
-            return js_objv(r);
-        }
+        case N_REGEX: return make_regex(n->str, n->flags, (void **)&n->d);
         case N_ARRAY: {
             js_obj_t *a = new_array();
             for(jsnode_t *e = n->list; e; e = e->next){
                 if(e->k == N_SPREAD){
                     js_val_t s = eval(e->a, env);
-                    if(s.t == JS_OBJ && s.o->is_array)
-                        for(int i = 0; i < s.o->nitems; i++) arr_push(a, s.o->items[i]);
-                } else arr_push(a, eval(e, env));
+                    js_obj_t *it = iterate_to_array(s);
+                    for(int i = 0; i < it->nitems; i++) arr_push(a, it->items[i]);
+                } else if(e->k == N_UNDEF && e->computed) arr_push(a, js_hole());
+                else arr_push(a, eval(e, env));
             }
             return js_objv(a);
         }
         case N_OBJECT: {
             js_obj_t *o = js_new_object();
             for(jsnode_t *p = n->list; p; p = p->next){
+                if(p->k == N_SPREAD){
+                    js_val_t src = eval(p->a, env);
+                    if(src.t == JS_OBJ){
+                        if(src.o->is_array){
+                            for(int i = 0; i < src.o->nitems; i++){
+                                char b[16]; kfmt_double(b, sizeof b, (double)i);
+                                js_set(o, jstrdup(b, (u32)strlen(b)), src.o->items[i]);
+                            }
+                        }
+                        js_obj_t *ks = keys_of(src);
+                        for(int i = 0; i < ks->nitems; i++){
+                            const char *k = ks->items[i].s;
+                            if(!src.o->is_array) js_set(o, k, js_get(src.o, k));
+                        }
+                    }
+                    continue;
+                }
+                const char *key = p->str;
+                if(p->computed) key = js_to_str(eval(p->b, env));
                 if(p->op == 1 || p->op == 2){
                     js_val_t fv = make_fn(p->a, env);
                     fv.o->home = o;
-                    js_set(o, p->str, js_undef());
-                    prop_t *pr = find_own(o, p->str);
+                    if(!find_own(o, key)) js_set(o, key, js_undef());
+                    prop_t *pr = find_own(o, key);
                     if(p->op == 1) pr->getter = fv.o; else pr->setter = fv.o;
                     continue;
                 }
                 js_val_t v = eval(p->a, env);
                 if(v.t == JS_OBJ && v.o->is_func && p->a->k == N_FUNC && !p->a->arrow) v.o->home = o;
-                js_set(o, p->str, v);
+                js_set(o, key, v);
             }
             return js_objv(o);
         }
         case N_FUNC: return make_fn(n, env);
+        case N_TAGGED: return eval_tagged(n, env);
         case N_MEMBER: {
             if(n->a->k == N_SUPER){
                 binding_t *h = env_find(env, "%home");
@@ -1643,51 +2665,25 @@ static js_val_t eval(jsnode_t *n, env_t *env){
             }
             js_val_t obj = eval(n->a, env);
             if(n->op == 1 && (obj.t == JS_NULL || obj.t == JS_UNDEF)) return js_undef();
+            if((obj.t == JS_NULL || obj.t == JS_UNDEF) && !STOP()){
+                fail_empty_member(n, env, obj.t == JS_NULL);
+                return js_undef();
+            }
             return get_member(obj, key_of(n, env));
         }
-        case N_CALL: {
-            if(n->a && n->a->k == N_SUPER){
-                /* super(args): the superclass constructor runs on this */
-                binding_t *f = env_find(env, "%fn");
-                binding_t *th = env_find(env, "this");
-                js_val_t args[32];
-                int argc = eval_args(n->list, env, args, 32);
-                if(!f || !th || f->v.t != JS_OBJ || !f->v.o->parent){ fail("no superclass"); return js_undef(); }
-                return call_value(js_objv(f->v.o->parent), th->v, argc, args);
-            }
-            js_val_t self = js_undef();
-            js_val_t fn;
-            if(n->a->k == N_MEMBER && n->a->a->k == N_SUPER){
-                binding_t *h = env_find(env, "%home");
-                binding_t *th = env_find(env, "this");
-                if(!h || h->v.t != JS_OBJ || !h->v.o->proto || !th){ fail("super is not available here"); return js_undef(); }
-                self = th->v;
-                fn = js_get(h->v.o->proto, key_of(n->a, env));
-            } else if(n->a->k == N_MEMBER){
-                self = eval(n->a->a, env);
-                fn = get_member(self, key_of(n->a, env));
-            } else fn = eval(n->a, env);
-            if(n->op == 1 && (fn.t == JS_NULL || fn.t == JS_UNDEF)) return js_undef();  /* fn?.() */
-            js_val_t args[32];
-            int argc = eval_args(n->list, env, args, 32);
-            if(STOP()) return js_undef();
-            if(!js_callable(fn)){ fail("not a function"); return js_undef(); }
-            return call_value(fn, self, argc, args);
-        }
-        case N_NEW: {
-            js_val_t ctor = eval(n->a, env);
-            js_val_t args[32];
-            int argc = eval_args(n->list, env, args, 32);
-            if(STOP()) return js_undef();
-            return construct(ctor, argc, args);
-        }
+        case N_CALL: return eval_call(n, env);
+        case N_NEW: return eval_new(n, env);
         case N_UNARY: {
+            if(n->op == OP_AWAIT) return coro_suspend(eval(n->a, env), CO_AWAIT);
+            if(n->op == OP_YIELD) return coro_suspend(n->a ? eval(n->a, env) : js_undef(), CO_YIELD);
+            if(n->op == OP_YIELD_STAR) return coro_yield_star(eval(n->a, env));
             if(n->op == OP_DELETE){
                 jsnode_t *t = n->a;
                 if(t->k == N_MEMBER){
                     js_val_t obj = eval(t->a, env);
                     if(obj.t == JS_OBJ){
                         const char *k = key_of(t, env);
+                        if(obj.o->kind == K_PROXY) return js_bool(proxy_delete(obj.o, k));
                         if(obj.o->is_array){
                             int idx = as_index(k);
                             if(idx >= 0 && idx < obj.o->nitems){ obj.o->items[idx] = js_undef(); return js_bool(1); }
@@ -1697,8 +2693,14 @@ static js_val_t eval(jsnode_t *n, env_t *env){
                 }
                 return js_bool(1);
             }
+            if(n->op == OP_TYPEOF && n->a->k == N_IDENT && !env_find(env, n->a->str) &&
+               !(global_obj && (has_prop(global_obj, n->a->str) ||
+                 (global_obj->hget && ({ js_val_t tmp; global_obj->hget(global_obj, n->a->str, &tmp); }))))){
+                return js_str("undefined");        /* typeof of an undeclared name is not an error */
+            }
             js_val_t v = eval(n->a, env);
             switch(n->op){
+                case OP_BNOT: return js_num((double)(~to_i32(js_to_num(v))));
                 case OP_VOID: (void)v; return js_undef();
                 case OP_NOT: return js_bool(!js_truthy(v));
                 case OP_NEG: return js_num(-js_to_num(v));
@@ -1706,7 +2708,8 @@ static js_val_t eval(jsnode_t *n, env_t *env){
                 case OP_TYPEOF: {
                     const char *t = v.t == JS_UNDEF ? "undefined" : v.t == JS_NULL ? "object" :
                                     v.t == JS_BOOL ? "boolean" : v.t == JS_NUM ? "number" :
-                                    v.t == JS_STR ? "string" : (v.o->is_func ? "function" : "object");
+                                    v.t == JS_STR ? (v.s[0] == '\x01' ? "symbol" : "string") :
+                                    (v.o->is_func ? "function" : "object");
                     return js_str(t);
                 }
             }
@@ -1724,51 +2727,91 @@ static js_val_t eval(jsnode_t *n, env_t *env){
             return js_truthy(a) ? a : eval(n->b, env);
         }
         case N_COND: return js_truthy(eval(n->a, env)) ? eval(n->b, env) : eval(n->c, env);
+        case N_SEQ: {
+            js_val_t v = js_undef();
+            for(jsnode_t *e = n->list; e && !STOP(); e = e->next) v = eval(e, env);
+            return v;
+        }
         case N_ASSIGN: {
-            js_val_t v = eval(n->b, env);
             jsnode_t *t = n->a;
-            if(n->op == OP_ADDSET || n->op == OP_SUBSET){
+            js_val_t v;
+            if(n->op == OP_COMPOUND + OP_AND || n->op == OP_COMPOUND + OP_OR || n->op == OP_COMPOUND + OP_NULLISH){
+                /* x &&= y, x ||= y, x ??= y: assign only when needed */
                 js_val_t cur = eval(t, env);
-                v = binop_eval(n->op == OP_ADDSET ? OP_ADD : OP_SUB, cur, v);
-            }
-            if(t->k == N_IDENT){
-                binding_t *b = env_find(env, t->str);
-                if(b) b->v = v;
-                else if(global_obj) js_set(global_obj, t->str, v);
-            } else if(t->k == N_MEMBER){
-                js_val_t obj = eval(t->a, env);
-                if(obj.t == JS_OBJ) obj_set(obj.o, key_of(t, env), v);
-                else fail("cannot set a property of null or undefined");
-            } else fail("bad assignment target");
+                int need = n->op == OP_COMPOUND + OP_AND ? js_truthy(cur) :
+                           n->op == OP_COMPOUND + OP_OR ? !js_truthy(cur) : (cur.t == JS_NULL || cur.t == JS_UNDEF);
+                if(!need) return cur;
+                v = eval(n->b, env);
+            } else if(n->arrow){                       /* postfix ++ / -- */
+                double old = js_to_num(eval(t, env));
+                assign_pattern(t, js_num(n->op == OP_ADDSET ? old + 1 : old - 1), env);
+                return js_num(old);
+            } else if(n->op == OP_ADDSET || n->op == OP_SUBSET || n->op > OP_COMPOUND){
+                js_val_t cur = eval(t, env);
+                js_val_t rhs = eval(n->b, env);
+                int bop = n->op == OP_ADDSET ? OP_ADD : n->op == OP_SUBSET ? OP_SUB : n->op - OP_COMPOUND;
+                v = binop_eval(bop, cur, rhs);
+            } else v = eval(n->b, env);
+            assign_pattern(t, v, env);
             return v;
         }
         case N_CLASS: {
             js_obj_t *ctor = new_obj();
             ctor->is_func = 1;
             ctor->is_class = 1;
-            ctor->closure = env;
-            ctor->proto = object_proto;
+            ctor->proto = function_proto ? function_proto : object_proto;
             js_obj_t *proto = js_new_object();
             js_set(ctor, "prototype", js_objv(proto));
+            find_own(ctor, "prototype")->flags = PF_HIDDEN;
             js_set(proto, "constructor", js_objv(ctor));
+            find_own(proto, "constructor")->flags = PF_HIDDEN;
+            js_set(ctor, "name", js_str(n->str ? n->str : ""));
+            find_own(ctor, "name")->flags = PF_HIDDEN | PF_RO;
+            /* the class body (and its methods) see the class by its own name */
+            env_t *cenv = new_env(env);
+            if(n->str) env_define(cenv, n->str, js_objv(ctor));
+            ctor->closure = cenv;
+            ctor->cnode = n;
             if(n->a){
                 js_val_t sup = eval(n->a, env);
-                if(sup.t != JS_OBJ || !sup.o->is_func){ fail("extends needs a class"); return js_undef(); }
-                ctor->parent = sup.o;
-                js_obj_t *sp = prototype_of(sup.o);
-                if(sp) proto->proto = sp;
+                if(sup.t == JS_NULL){ proto->proto = NULL; }
+                else if(sup.t != JS_OBJ || !sup.o->is_func){ fail("extends needs a class"); return js_undef(); }
+                else {
+                    ctor->parent = sup.o;
+                    ctor->proto = sup.o;                   /* static members are inherited too */
+                    js_obj_t *sp = prototype_of(sup.o);
+                    if(sp) proto->proto = sp;
+                }
             } else proto->proto = object_proto;
-            for(jsnode_t *m = n->list; m; m = m->next){
-                js_val_t fv = make_fn(m->a, env);
-                fv.o->home = proto;
-                if(m->op == 1 || m->op == 2){
-                    js_set(proto, m->str, js_undef());
-                    prop_t *pr = find_own(proto, m->str);
+            for(jsnode_t *m = n->list; m && !STOP(); m = m->next){
+                if(m->op == 3 && !(m->fflags & FN_STATIC)) continue;   /* a field: set per instance */
+                js_obj_t *target = (m->fflags & FN_STATIC) ? ctor : proto;
+                if(m->op == 4){                            /* static { ... } */
+                    js_val_t fv = make_fn(m->a, cenv);
+                    fv.o->home = ctor;
+                    call_value(fv, js_objv(ctor), 0, NULL);
+                    continue;
+                }
+                const char *key = m->computed ? js_to_str(eval(m->b, cenv)) : m->str;
+                if(m->op == 3){                            /* a static field */
+                    env_t *fe = new_env(cenv);
+                    env_define(fe, "this", js_objv(ctor));
+                    js_set(target, key, m->c ? eval(m->c, fe) : js_undef());
+                    if(key[0] == '#') find_own(target, key)->flags = PF_HIDDEN;
+                    continue;
+                }
+                js_val_t fv = make_fn(m->a, cenv);
+                fv.o->home = target;
+                if(m->op == 1 || m->op == 2){              /* get/set */
+                    if(!find_own(target, key)) js_set(target, key, js_undef());
+                    prop_t *pr = find_own(target, key);
+                    pr->flags |= PF_HIDDEN;
                     if(m->op == 1) pr->getter = fv.o; else pr->setter = fv.o;
-                } else if(strcmp(m->str, "constructor") == 0){
+                } else if(!(m->fflags & FN_STATIC) && strcmp(key, "constructor") == 0){
                     ctor->fdecl = m->a;
                 } else {
-                    js_set(proto, m->str, fv);
+                    js_set(target, key, fv);
+                    find_own(target, key)->flags = PF_HIDDEN;   /* methods are not enumerable */
                 }
             }
             if(!ctor->fdecl) ctor->default_ctor = 1;
@@ -1781,24 +2824,308 @@ static js_val_t eval(jsnode_t *n, env_t *env){
     }
 }
 
+/* Parses a lazy function's body now (it is about to run). */
+static void lazy_parse(jsnode_t *f){
+    tok_t *st = toks;
+    int sn = ntok, sti = ti, snoin = no_in;
+    u32 scap = tok_cap;
+    const char *ssrc = cur_src;
+    const char *body = f->lazy_src;
+    u32 blen = f->lazy_len;
+    if(body[0] != '{'){ fail("internal error: a lazy function body was freed"); return; }
+    tok_push();
+    lex(body, blen);
+    cur_src = body;
+    ti = 0;
+    no_in = 0;
+    u16 sflags = cur_fn_flags;
+    cur_fn_flags = f->fflags;
+    if(!STOP()) f->a = block_body();
+    cur_fn_flags = sflags;
+    f->lazy_len = 0;
+    tok_pop();
+    toks = st; ntok = sn; ti = sti; tok_cap = scap; no_in = snoin; cur_src = ssrc;
+}
+
+/* ---- coroutines: one C stack per suspended generator or async call ----
+ * This interpreter walks the tree on the C stack, so a generator body cannot simply
+ * return in the middle of it. Each generator and each async call therefore runs on a
+ * stack of its own: `yield` and `await` switch back to whoever resumed it and leave
+ * that stack untouched until the next resume. Stacks come from the kernel heap (not
+ * the script heap) and are given back as soon as the body finishes.
+ * The collector scans a suspended stack only while the generator that owns it is still
+ * reachable, so an abandoned half-finished generator is collected with its stack. */
+#define CORO_STACK   (256u * 1024u)
+#define CORO_SLACK   (24u * 1024u)    /* kept free, so deep recursion fails cleanly */
+
+void js_coro_switch(void **save_sp, void *new_sp);
+__asm__(
+".text\n"
+".globl js_coro_switch\n"
+".hidden js_coro_switch\n"
+"js_coro_switch:\n"
+"\tpushq %rbp\n\tpushq %rbx\n\tpushq %r12\n\tpushq %r13\n\tpushq %r14\n\tpushq %r15\n"
+"\tmovq %rsp, (%rdi)\n"
+"\tmovq %rsi, %rsp\n"
+"\tpopq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n"
+"\tret\n"
+".previous\n");
+
+typedef struct coro {
+    void *sp;                  /* stack pointer while switched out */
+    char *stack;               /* the stack block (NULL before the start and after the end) */
+    uintptr_t top, lo;         /* what the collector scans up to / the guard limit */
+    struct coro *resumer;
+    js_obj_t *owner;           /* the generator object or async call that owns it */
+    jsnode_t *fdecl;
+    env_t *env;
+    js_val_t self;
+    js_val_t inbox, outbox;
+    js_obj_t *result;          /* an async call's promise */
+    int state, in_kind, out_kind, is_async, is_gen;
+    int depth, ctl;            /* the interpreter's state while switched out */
+    js_val_t ret_val;
+    const char *ctl_label;
+    int scanned;               /* collector bookkeeping */
+} coro_t;
+
+static coro_t coro_main;                   /* the ordinary stack */
+static coro_t *coro_cur = &coro_main;
+static coro_t **coro_all = NULL;           /* every coroutine with a live stack (weak) */
+static u32 coro_n = 0, coro_cap = 0;
+static u32 coro_bytes = 0;                 /* stack memory handed out right now */
+#define CORO_BUDGET  (8u * 1024u * 1024u)   /* collect before going past this */
+#define CORO_LIMIT   (48u * 1024u * 1024u)  /* and give up past this */
+
+static uintptr_t main_stack_top(void){ return js_stack_top ? js_stack_top : (uintptr_t)stack_top; }
+static uintptr_t coro_top_of(coro_t *c){ return c->top ? c->top : main_stack_top(); }
+
+static void coro_forget(coro_t *c){
+    for(u32 i = 0; i < coro_n; i++) if(coro_all[i] == c){ coro_all[i] = coro_all[--coro_n]; break; }
+}
+static void coro_drop_stack(coro_t *c){
+    if(c->stack){ kfree(c->stack); c->stack = NULL; coro_bytes -= CORO_STACK; }
+    coro_forget(c);
+}
+/* Frees every coroutine stack (the script heap is about to go away). */
+static void coro_reset(void){
+    for(u32 i = 0; i < coro_n; i++) if(coro_all[i]->stack){ kfree(coro_all[i]->stack); coro_all[i]->stack = NULL; }
+    coro_n = 0;
+    coro_bytes = 0;
+    coro_cur = &coro_main;
+    memset(&coro_main, 0, sizeof coro_main);
+}
+
+static void coro_entry(void);
+
+static int coro_make_stack(coro_t *c){
+    if(coro_n == coro_cap){
+        u32 nc = coro_cap ? coro_cap * 2 : 32;
+        coro_t **na = kmalloc(sizeof(coro_t *) * nc);
+        if(!na){ fail("out of memory"); return 0; }
+        for(u32 i = 0; i < coro_n; i++) na[i] = coro_all[i];
+        if(coro_all) kfree(coro_all);
+        coro_all = na; coro_cap = nc;
+    }
+    /* generator objects are tiny, so a crowd of abandoned ones would never fill the
+     * script heap; their stacks are what costs, so they get a budget of their own */
+    if(coro_bytes + CORO_STACK > CORO_BUDGET && !in_gc){
+        gc();
+        if(coro_bytes + CORO_STACK > CORO_LIMIT){ fail("too much recursion"); return 0; }
+    }
+    char *st = kmalloc(CORO_STACK);
+    if(!st){ fail("out of memory"); return 0; }
+    coro_bytes += CORO_STACK;
+    c->stack = st;
+    c->top = ((uintptr_t)(st + CORO_STACK)) & ~(uintptr_t)15;
+    c->lo = (uintptr_t)st + CORO_SLACK;
+    uintptr_t *sp = (uintptr_t *)c->top;
+    *--sp = 0;                             /* where a return from coro_entry would go */
+    *--sp = (uintptr_t)coro_entry;         /* the first switch "returns" into the body */
+    for(int i = 0; i < 6; i++) *--sp = 0;  /* the callee-saved registers it pops */
+    c->sp = sp;
+    coro_all[coro_n++] = c;
+    return 1;
+}
+
+/* Hands the processor from one coroutine to another, with the interpreter's own
+ * per-call state (depth, pending return) travelling with it. */
+static void coro_xfer(coro_t *from, coro_t *to){
+    from->depth = depth; from->ctl = ctl; from->ret_val = ret_val; from->ctl_label = ctl_label;
+    coro_cur = to;
+    depth = to->depth; ctl = to->ctl; ret_val = to->ret_val; ctl_label = to->ctl_label;
+    js_coro_switch(&from->sp, to->sp);
+    coro_cur = from;
+    depth = from->depth; ctl = from->ctl; ret_val = from->ret_val; ctl_label = from->ctl_label;
+}
+
+/* Runs a coroutine until it yields, awaits or finishes. */
+static void coro_resume(coro_t *c, js_val_t in, int in_kind){
+    if(c->state == CS_DONE || c->state == CS_RUNNING){ c->out_kind = CO_RETURN; c->outbox = js_undef(); return; }
+    if(c->state == CS_NEW && !coro_make_stack(c)){ c->out_kind = CO_THROW; c->state = CS_DONE; return; }
+    c->inbox = in;
+    c->in_kind = in_kind;
+    c->resumer = coro_cur;
+    c->state = CS_RUNNING;
+    coro_xfer(coro_cur, c);
+    if(c->state == CS_DONE) coro_drop_stack(c);
+}
+
+/* Switches back to whoever resumed this coroutine; returns what the next resume brings. */
+static js_val_t coro_suspend(js_val_t v, int out_kind){
+    coro_t *c = coro_cur;
+    if(c == &coro_main){ fail("yield or await outside a generator"); return js_undef(); }
+    c->outbox = v;
+    c->out_kind = out_kind;
+    c->state = CS_SUSPENDED;
+    coro_xfer(c, c->resumer);
+    c->state = CS_RUNNING;
+    if(c->in_kind == CI_THROW){ thrown_val = c->inbox; thrown = 1; return js_undef(); }
+    if(c->in_kind == CI_RETURN){ ctl = 1; ret_val = c->inbox; return js_undef(); }
+    return c->inbox;
+}
+
+/* ---- what the collector needs from the coroutines ---- */
+static uintptr_t coro_scan_top(void){
+    for(u32 i = 0; i < coro_n; i++) coro_all[i]->scanned = 0;
+    coro_cur->scanned = 1;
+    return coro_top_of(coro_cur);
+}
+static void coro_scan_one(coro_t *c){
+    scan_words(c, sizeof *c);
+    for(uintptr_t a = (uintptr_t)c->sp & ~(uintptr_t)7; a < coro_top_of(c); a += 8)
+        mark_addr(*(uintptr_t *)a);
+}
+static void coro_scan_chain(void){
+    for(coro_t *c = coro_cur->resumer; c; c = c->resumer){
+        mark_addr((uintptr_t)c);
+        c->scanned = 1;
+        coro_scan_one(c);
+    }
+}
+/* A suspended generator's stack holds the only reference to much of what it is in the
+ * middle of, but it is a root only if the generator itself is still reachable; a
+ * generator the stack itself refers to therefore has to be taken in rounds. */
+static void coro_scan_suspended(void){
+    for(int round = 0; round < 64; round++){
+        int more = 0;
+        for(u32 i = 0; i < coro_n; i++){
+            coro_t *c = coro_all[i];
+            if(c->scanned || !c->stack) continue;
+            if(!blk_marked(c)) continue;
+            c->scanned = 1;
+            coro_scan_one(c);
+            drain();
+            more = 1;
+        }
+        if(!more) break;
+    }
+}
+static void coro_sweep(void){
+    for(u32 i = 0; i < coro_n; ){
+        coro_t *c = coro_all[i];
+        if(blk_marked(c)){ i++; continue; }
+        if(c->stack){ kfree(c->stack); c->stack = NULL; coro_bytes -= CORO_STACK; }
+        coro_all[i] = coro_all[--coro_n];
+    }
+}
+
+static void coro_entry(void){
+    coro_t *c = coro_cur;
+    js_val_t r = js_undef();
+    depth = 0;
+    ctl = 0;
+    ctl_label = NULL;
+    if(c->in_kind == CI_THROW){ thrown_val = c->inbox; thrown = 1; }
+    else if(c->in_kind == CI_RETURN) r = c->inbox;
+    else {
+        exec(c->fdecl->a, c->env);
+        if(ctl == 1) r = ret_val;
+    }
+    c->outbox = r;
+    c->out_kind = STOP() ? CO_THROW : CO_RETURN;
+    c->state = CS_DONE;
+    for(;;) coro_xfer(c, c->resumer);      /* never comes back */
+}
+
+/* yield* src: hands every value the inner iterable produces to our own resumer, and
+ * evaluates to the value the inner iterator finished with. */
+static js_val_t coro_yield_star(js_val_t src){
+    if(src.t != JS_OBJ) src = js_objv(iterate_to_array(src));   /* a string, say */
+    js_val_t itf = js_undef();
+    if(src.t == JS_OBJ) itf = js_get(src.o, "\x01Symbol(Symbol.iterator)");
+    js_val_t it = js_callable(itf) ? call_value(itf, src, 0, NULL) : src;
+    if(it.t != JS_OBJ){ fail("yield* needs an iterable"); return js_undef(); }
+    js_val_t nextf = js_get(it.o, "next");
+    if(!js_callable(nextf)){ fail("yield* needs an iterable"); return js_undef(); }
+    js_val_t sent = js_undef();
+    for(long guard = 0; guard < 100000000; guard++){
+        if(STOP()) return js_undef();
+        js_val_t r = call_value(nextf, it, 1, &sent);
+        if(STOP()) return js_undef();
+        if(r.t != JS_OBJ){ fail("iterator result is not an object"); return js_undef(); }
+        if(js_truthy(js_get(r.o, "done"))) return js_get(r.o, "value");
+        sent = coro_suspend(js_get(r.o, "value"), CO_YIELD);
+        if(STOP() || ctl) return js_undef();
+    }
+    return js_undef();
+}
+
+/* Makes the generator object, or starts the async call, that a call to a generator or
+ * async function evaluates to (defined with the promises, in jslib.inc). */
+static js_val_t coro_start(js_obj_t *fn, jsnode_t *f, env_t *env, js_val_t self);
+
+/* Runs a class's instance field initialisers on a new object. In a derived class this
+ * happens when super() returns, so a base field is in place before the derived one. */
+static void init_class_fields(js_obj_t *ctor, js_val_t self){
+    if(!ctor->cnode || self.t != JS_OBJ) return;
+    for(jsnode_t *m = ctor->cnode->list; m && !STOP(); m = m->next){
+        if(m->op != 3 || (m->fflags & FN_STATIC)) continue;
+        env_t *fe = new_env(ctor->closure);
+        env_define(fe, "this", self);
+        env_define(fe, "%fn", js_objv(ctor));
+        if(ctor->cnode) env_define(fe, "%home", js_get(ctor, "prototype"));
+        const char *key = m->computed ? js_to_str(eval(m->b, fe)) : m->str;
+        js_set(self.o, key, m->c ? eval(m->c, fe) : js_undef());
+        if(key[0] == '#') find_own(self.o, key)->flags = PF_HIDDEN;
+    }
+}
+
+/* The constructor a `new` expression names, for new.target inside it. */
+static js_obj_t *pending_new_target = NULL;
+
 static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
     js_obj_t *o = (fn.t == JS_OBJ) ? fn.o : NULL;
     if(!o || !o->is_func) return js_undef();   /* calling a non-function used to fault at o->native */
     if(o->native) return o->native(self, argc, argv, o->ctx);
     if(o->default_ctor){
         /* a class without a constructor passes its arguments to the superclass */
-        if(o->parent) return call_value(js_objv(o->parent), self, argc, argv);
-        return js_undef();
+        js_val_t r = js_undef();
+        if(o->parent) r = call_value(js_objv(o->parent), self, argc, argv);
+        init_class_fields(o, self);
+        return r;
     }
     if(!o->fdecl) return js_undef();
     if(depth >= MAX_DEPTH){ fail("too much recursion"); return js_undef(); }
+    if(coro_cur->lo){
+        /* a coroutine stack is much smaller than the main one and has no guard page */
+        uintptr_t csp;
+        __asm__ volatile("mov %%rsp, %0" : "=r"(csp));
+        if(csp < coro_cur->lo){ fail("too much recursion"); return js_undef(); }
+    }
     jsnode_t *f = o->fdecl;
+    if(!f->a && f->lazy_len) lazy_parse(f);
+    if(STOP()) return js_undef();
     env_t *env = new_env(o->closure);
+    if(f->str && f->str[0]) env_define(env, f->str, fn);      /* a named function sees itself */
+    js_obj_t *nt = pending_new_target;
+    pending_new_target = NULL;
     if(!f->arrow){
         /* non-strict: a plain call (no receiver) sees the global object as this */
         if(self.t == JS_UNDEF || self.t == JS_NULL) self = js_objv(global_obj);
         env_define(env, "this", self);
         env_define(env, "%fn", js_objv(o));
+        env_define(env, "%nt", nt ? js_objv(nt) : js_undef());
         if(o->home) env_define(env, "%home", js_objv(o->home));
     }
     int i = 0;
@@ -1813,20 +3140,32 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
         if(i < argc && argv[i].t != JS_UNDEF) v = argv[i];
         else if(p->b) v = eval(p->b, env);       /* default value */
         else v = js_undef();
-        env_define(env, p->str, v);
+        if(p->c) bind_pattern(p->c, v, env);
+        else env_define(env, p->str, v);
     }
     if(!f->arrow){
         js_obj_t *args = new_array();
         for(int k = 0; k < argc; k++) arr_push(args, argv[k]);
         env_define(env, "arguments", js_objv(args));
     }
+    hoist_vars(f, f->a, env);
     for(jsnode_t *s = f->a ? f->a->list : NULL; s; s = s->next)
         if(s->k == N_FUNCDECL) env_define(env, s->str, make_fn(s->a, env));
+    if(f->fflags & (FN_GEN | FN_ASYNC)) return coro_start(o, f, env, self);
+    if(o->is_class && o->cnode){
+        if(o->parent) env_define(env, "%fields", js_objv(o));   /* super() runs them */
+        else init_class_fields(o, self);
+    }
+    if(depth < 512) call_at[depth] = eval_at;
     depth++;
     int saved_ctl = ctl;
     ctl = 0;
     exec(f->a, env);
     depth--;
+    if(o->is_class && o->parent && o->cnode){
+        binding_t *fb = env_find(env, "%fields");          /* no super() ran: do it now */
+        if(fb && fb->v.t == JS_OBJ) init_class_fields(o, self);
+    }
     js_val_t r = js_undef();
     if(ctl == 1) r = ret_val;
     ctl = saved_ctl;
@@ -1835,13 +3174,16 @@ static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv)
 
 js_val_t js_call(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
     if(!js_callable(fn)) return js_undef();
-    return call_value(fn, self, argc, argv);
+    js_val_t r = call_value(fn, self, argc, argv);
+    if(depth == 0 && !STOP()){ js_val_t keep = r; js_drain_jobs(); r = keep; }
+    return r;
 }
 
 /* The keys of an object (or the indices of an array), as an array of strings. */
 static js_obj_t *keys_of(js_val_t v){
     js_obj_t *out = new_array();
     if(v.t != JS_OBJ) return out;
+    if(v.o->kind == K_PROXY) return proxy_own_keys(v.o);
     if(v.o->is_array){
         for(int i = 0; i < v.o->nitems; i++){
             char b[12]; int k = 0; int x = i;
@@ -1854,21 +3196,69 @@ static js_obj_t *keys_of(js_val_t v){
     }
     /* own properties were added newest first; list them in the order they were made */
     int n = 0;
-    for(prop_t *p = v.o->props; p; p = p->next) n++;
-    for(int i = n - 1; i >= 0; i--){
-        prop_t *p = v.o->props;
-        for(int k = 0; k < i; k++) p = p->next;
-        arr_push(out, js_str(p->k));
-    }
+    for(prop_t *p = v.o->props; p; p = p->next) if(!(p->flags & PF_HIDDEN) && p->k[0] != '\x01') n++;
+    if(!n) return out;
+    const char **tmp = jalloc(sizeof(char *) * (u32)n);
+    int k = n;
+    for(prop_t *p = v.o->props; p; p = p->next) if(!(p->flags & PF_HIDDEN) && p->k[0] != '\x01') tmp[--k] = p->k;
+    for(int i = 0; i < n; i++) arr_push(out, js_str(tmp[i]));
     return out;
 }
 
-static void exec_loop_body(jsnode_t *body, env_t *env, int *stop){
+/* Binds one value of a for-in / for-of loop to the loop's target. */
+static void forin_bind(jsnode_t *n, js_val_t v, env_t *env, env_t *loop){
+    if(n->computed) assign_to(n->b, v, loop);                     /* for (x of o): an existing target */
+    else if(n->c && n->c->op == 0 && n->b->k == N_IDENT && env_find(env, n->b->str))
+        env_find(env, n->b->str)->v = v;                          /* for (var x of o) */
+    else if(n->b->k == N_IDENT && !n->b->c) env_define(loop, n->b->str, v);
+    else bind_pattern(n->b, v, loop);
+}
+
+/* Runs a loop body and decides what the loop does next. label: the loop's own label. */
+static void exec_loop_body(jsnode_t *body, env_t *env, int *stop, const char *label){
     exec(body, env);
     *stop = 0;
-    if(ctl == 1) *stop = 1;
-    else if(ctl == 2){ ctl = 0; *stop = 1; }
-    else if(ctl == 3) ctl = 0;
+    if(ctl == 1){ *stop = 1; return; }
+    if(ctl == 2 || ctl == 3){
+        int mine = !ctl_label || (label && strcmp(ctl_label, label) == 0);
+        if(!mine){ *stop = 1; return; }            /* for an outer loop: keep unwinding */
+        if(ctl == 2) *stop = 1;
+        ctl = 0; ctl_label = NULL;
+    }
+}
+
+/* Collects the names declared with var in a function body (not in nested functions). */
+static void hoist_walk(jsnode_t *n, jsnode_t *f){
+    for(; n; n = n->next){
+        switch(n->k){
+            case N_VAR:
+                if(n->op == 0)
+                    for(jsnode_t *d = n->list; d; d = d->next) if(d->str){
+                        jsnode_t *id = node(N_IDENT); id->str = d->str; id->next = f->hoist; f->hoist = id;
+                    }
+                break;
+            case N_BLOCK: hoist_walk(n->list, f); break;
+            case N_IF: hoist_walk(n->b, f); if(n->c) hoist_walk(n->c, f); break;
+            case N_WHILE: case N_DO: hoist_walk(n->b, f); break;
+            case N_FOR: if(n->a) hoist_walk(n->a, f); hoist_walk(n->d, f); break;
+            case N_FORIN: if(n->c) hoist_walk(n->c, f); hoist_walk(n->d, f); break;
+            case N_LABEL: hoist_walk(n->a, f); break;
+            case N_TRY: hoist_walk(n->a, f); if(n->b) hoist_walk(n->b, f); if(n->c) hoist_walk(n->c, f); break;
+            case N_SWITCH: for(jsnode_t *c = n->list; c; c = c->next) hoist_walk(c->list, f); break;
+        }
+    }
+}
+static void hoist_vars(jsnode_t *f, jsnode_t *body, env_t *env){
+    if(!f->hoisted){
+        f->hoisted = 1;
+        f->hoist = NULL;
+        if(body) hoist_walk(body->k == N_BLOCK ? body->list : body, f);
+    }
+    for(jsnode_t *h = f->hoist; h; h = h->next){
+        int have = 0;
+        for(binding_t *b = env->first; b; b = b->next) if(strcmp(b->name, h->str) == 0){ have = 1; break; }
+        if(!have) env_define(env, h->str, js_undef());
+    }
 }
 
 static void exec(jsnode_t *n, env_t *env){
@@ -1886,10 +3276,24 @@ static void exec(jsnode_t *n, env_t *env){
             break;
         }
         case N_VAR:
-            for(jsnode_t *d = n->list; d; d = d->next){
-                if(d->b) bind_pattern(d->b, d->a ? eval(d->a, env) : js_undef(), env);
-                else env_define(env, d->str, d->a ? eval(d->a, env) : js_undef());
+            for(jsnode_t *d = n->list; d && !STOP(); d = d->next){
+                if(d->b){ bind_pattern(d->b, d->a ? eval(d->a, env) : js_undef(), env); continue; }
+                if(n->op == 0){
+                    /* var: the binding was hoisted to the function; only an initializer writes */
+                    binding_t *b = env_find(env, d->str);
+                    if(b){ if(d->a) b->v = eval(d->a, env); continue; }
+                    if(global_obj){                 /* a top-level var is a property of the global object */
+                        if(d->a) js_set(global_obj, d->str, eval(d->a, env));
+                        else if(!has_prop(global_obj, d->str)) js_set(global_obj, d->str, js_undef());
+                        continue;
+                    }
+                }
+                env_define(env, d->str, d->a ? eval(d->a, env) : js_undef());
             }
+            break;
+        case N_LABEL:
+            exec(n->a, env);
+            if((ctl == 2 || ctl == 3) && ctl_label && strcmp(ctl_label, n->str) == 0){ ctl = 0; ctl_label = NULL; }
             break;
         case N_CLASS: {
             js_val_t c = eval(n, env);
@@ -1904,13 +3308,13 @@ static void exec(jsnode_t *n, env_t *env){
             break;
         case N_WHILE: {
             int stop = 0;
-            while(!STOP() && !stop && js_truthy(eval(n->a, env))) exec_loop_body(n->b, env, &stop);
+            while(!STOP() && !stop && js_truthy(eval(n->a, env))) exec_loop_body(n->b, env, &stop, n->label);
             break;
         }
         case N_DO: {
             int stop = 0;
             do {
-                exec_loop_body(n->b, env, &stop);
+                exec_loop_body(n->b, env, &stop, n->label);
                 if(stop || STOP()) break;
             } while(js_truthy(eval(n->a, env)) && !STOP());
             break;
@@ -1918,32 +3322,104 @@ static void exec(jsnode_t *n, env_t *env){
         case N_FOR: {
             env_t *loop = new_env(env);
             if(n->a) exec(n->a, loop);
+            /* for (let i = …): each turn of the loop gets its own binding, so a closure
+             * made in the body captures that turn's value and not the final one. */
+            int per_iter = n->a && n->a->k == N_VAR && n->a->op == 1;
             int stop = 0;
             while(!STOP() && !stop && (!n->b || js_truthy(eval(n->b, loop)))){
-                exec_loop_body(n->d, loop, &stop);
+                env_t *body = loop;
+                if(per_iter){
+                    body = new_env(env);
+                    for(binding_t *b = loop->first; b; b = b->next) env_define(body, b->name, b->v);
+                }
+                exec_loop_body(n->d, body, &stop, n->label);
                 if(stop || STOP()) break;
+                if(per_iter){     /* copy the (possibly updated) values back for the step */
+                    for(binding_t *b = loop->first; b; b = b->next){
+                        binding_t *c = env_find(body, b->name);
+                        if(c) b->v = c->v;
+                    }
+                }
                 if(n->c) eval(n->c, loop);
             }
             break;
         }
         case N_FORIN: {
+            if(n->op == 1 && (n->fflags & FN_ASYNC)){
+                /* for await (x of src): src may be an async iterable, or a plain one
+                 * whose values are promises. Each step is awaited. */
+                js_val_t coll = eval(n->a, env);
+                if(STOP()) break;
+                js_val_t itf = js_undef();
+                int async_it = 0;
+                if(coll.t == JS_OBJ){
+                    itf = js_get(coll.o, "\x01Symbol(Symbol.asyncIterator)");
+                    async_it = js_callable(itf);
+                    if(!async_it) itf = js_get(coll.o, "\x01Symbol(Symbol.iterator)");
+                }
+                js_val_t it = js_callable(itf) ? call_value(itf, coll, 0, NULL) : coll;
+                if(it.t != JS_OBJ){ fail_desc(n->a, " is not async iterable"); break; }
+                js_val_t nextf = js_get(it.o, "next");
+                if(!js_callable(nextf)){ fail_desc(n->a, " is not async iterable"); break; }
+                int stop = 0;
+                while(!STOP() && !stop){
+                    js_val_t r = call_value(nextf, it, 0, NULL);
+                    if(STOP()) break;
+                    if(async_it) r = coro_suspend(r, CO_AWAIT);
+                    if(STOP()) break;
+                    if(r.t != JS_OBJ){ fail("iterator result is not an object"); break; }
+                    if(js_truthy(js_get(r.o, "done"))) break;
+                    js_val_t v = coro_suspend(js_get(r.o, "value"), CO_AWAIT);
+                    if(STOP()) break;
+                    env_t *loop = new_env(env);
+                    forin_bind(n, v, env, loop);
+                    exec_loop_body(n->d, loop, &stop, n->label);
+                }
+                break;
+            }
             js_val_t coll = eval(n->a, env);
+            if(STOP()) break;
             js_obj_t *items = NULL;
-            if(n->op == 1){
-                if(coll.t == JS_OBJ && coll.o->is_array) items = coll.o;
-                else if(coll.t == JS_STR){
-                    items = new_array();
-                    for(const char *p = coll.s; *p; p++){
-                        char *c = jalloc(2); c[0] = *p; c[1] = 0;
-                        arr_push(items, js_str(c));
-                    }
-                } else items = new_array();
-            } else items = keys_of(coll);
             int stop = 0;
+            if(n->op == 1){
+                if(coll.t == JS_NULL || coll.t == JS_UNDEF){ fail_desc(n->a, " is not iterable"); break; }
+                /* An object with its own iterator is stepped one value at a time, so a
+                 * loop over an endless generator runs until the body breaks out. Arrays,
+                 * strings, maps and sets take the direct route below. */
+                js_val_t it = js_undef(), nextf = js_undef();
+                if(coll.t == JS_OBJ && !coll.o->is_array &&
+                   coll.o->kind != K_MAP && coll.o->kind != K_SET){
+                    js_val_t itf = js_get(coll.o, "\x01Symbol(Symbol.iterator)");
+                    if(js_callable(itf)){
+                        it = call_value(itf, coll, 0, NULL);
+                        if(STOP()) break;
+                        if(it.t == JS_OBJ) nextf = js_get(it.o, "next");
+                    }
+                }
+                if(js_callable(nextf)){
+                    while(!STOP() && !stop){
+                        js_val_t r = call_value(nextf, it, 0, NULL);
+                        if(STOP()) break;
+                        if(r.t != JS_OBJ){ fail("iterator result is not an object"); break; }
+                        if(js_truthy(js_get(r.o, "done"))) break;
+                        env_t *loop = new_env(env);
+                        forin_bind(n, js_get(r.o, "value"), env, loop);
+                        exec_loop_body(n->d, loop, &stop, n->label);
+                    }
+                    /* leaving early lets the iterator clean up (a generator's finally) */
+                    if(stop && !STOP()){
+                        js_val_t rf = js_get(it.o, "return");
+                        if(js_callable(rf)) call_value(rf, it, 0, NULL);
+                    }
+                    break;
+                }
+                items = iterate_to_array(coll);
+                if(STOP()) break;
+            } else items = for_in_keys(coll);
             for(int i = 0; i < items->nitems && !STOP() && !stop; i++){
                 env_t *loop = new_env(env);
-                env_define(loop, n->str, items->items[i]);
-                exec_loop_body(n->d, loop, &stop);
+                forin_bind(n, items->items[i], env, loop);
+                exec_loop_body(n->d, loop, &stop, n->label);
             }
             break;
         }
@@ -1962,7 +3438,7 @@ static void exec(jsnode_t *n, env_t *env){
                 if(!running) continue;
                 for(jsnode_t *s = c->list; s && !STOP(); s = s->next){
                     exec(s, inner);
-                    if(ctl == 2){ ctl = 0; return; }
+                    if(ctl == 2 && !ctl_label){ ctl = 0; return; }
                     if(ctl) return;
                 }
             }
@@ -1973,7 +3449,7 @@ static void exec(jsnode_t *n, env_t *env){
             if(n->b && (failed || thrown)){
                 js_val_t err;
                 if(thrown){ err = thrown_val; thrown = 0; }
-                else { err = js_str(jstrdup(err_msg, (u32)strlen(err_msg))); failed = 0; }
+                else { err = make_error_for_msg(err_msg); failed = 0; }
                 env_t *ce = new_env(env);
                 if(n->str) env_define(ce, n->str, err);
                 exec(n->b, ce);
@@ -1999,8 +3475,8 @@ static void exec(jsnode_t *n, env_t *env){
             ret_val = n->a ? eval(n->a, env) : js_undef();
             ctl = 1;
             break;
-        case N_BREAK: ctl = 2; break;
-        case N_CONTINUE: ctl = 3; break;
+        case N_BREAK: ctl = 2; ctl_label = n->str; break;
+        case N_CONTINUE: ctl = 3; ctl_label = n->str; break;
         case N_EMPTY: break;
         default:
             eval(n, env);
@@ -2014,17 +3490,23 @@ static js_val_t arg(int argc, js_val_t *argv, int i){
     return i < argc ? argv[i] : js_undef();
 }
 
+/* Set by a host that wants every console.log line (the test runner prints them). */
+void (*js_log_sink)(const char *) = NULL;
+
 static js_val_t native_log(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
-    char out[160] = "";
+    char out[1024] = "";
     int k = 0;
     for(int i = 0; i < argc; i++){
         const char *s = js_to_str(argv[i]);
-        for(const char *p = s; *p && k < 150; p++) out[k++] = *p;
-        if(i + 1 < argc && k < 150) out[k++] = ' ';
+        for(const char *p = s; *p && k < (int)sizeof out - 10; p++) out[k++] = *p;
+        if(i + 1 < argc && k < (int)sizeof out - 10) out[k++] = ' ';
     }
     out[k] = 0;
-    memcpy(last_log, out, (u32)k + 1);
+    if(k > (int)sizeof last_log - 1) k = (int)sizeof last_log - 1;
+    memcpy(last_log, out, (u32)k);
+    last_log[k] = 0;
+    if(js_log_sink) js_log_sink(out);
     return js_undef();
 }
 
@@ -2064,7 +3546,17 @@ static js_val_t arr_index_of(js_val_t self, int argc, js_val_t *argv, void *ctx)
     return js_num(-1);
 }
 
+/* Array.prototype.includes: like indexOf but SameValueZero, so NaN is found. */
 static js_val_t arr_includes(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    js_val_t needle = arg(argc, argv, 0);
+    if(needle.t == JS_NUM && needle.n != needle.n){
+        if(self.t != JS_OBJ) return js_bool(0);
+        for(int i = 0; i < self.o->nitems; i++){
+            js_val_t e = self.o->items[i];
+            if(e.t == JS_NUM && e.n != e.n) return js_bool(1);
+        }
+        return js_bool(0);
+    }
     js_val_t r = arr_index_of(self, argc, argv, ctx);
     return js_bool(r.n >= 0);
 }
@@ -2088,8 +3580,9 @@ static js_val_t arr_for_each(js_val_t self, int argc, js_val_t *argv, void *ctx)
     (void)ctx;
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_undef();
     for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])) continue;
         js_val_t a[3] = { self.o->items[i], js_num(i), self };
-        call_value(argv[0], js_undef(), 3, a);
+        call_value(argv[0], argc > 1 ? argv[1] : js_undef(), 3, a);
     }
     return js_undef();
 }
@@ -2099,8 +3592,9 @@ static js_val_t arr_map(js_val_t self, int argc, js_val_t *argv, void *ctx){
     js_obj_t *out = new_array();
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_objv(out);
     for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])){ arr_push(out, js_hole()); continue; }
         js_val_t a[3] = { self.o->items[i], js_num(i), self };
-        arr_push(out, call_value(argv[0], js_undef(), 3, a));
+        arr_push(out, call_value(argv[0], argc > 1 ? argv[1] : js_undef(), 3, a));
     }
     return js_objv(out);
 }
@@ -2110,8 +3604,9 @@ static js_val_t arr_filter(js_val_t self, int argc, js_val_t *argv, void *ctx){
     js_obj_t *out = new_array();
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_objv(out);
     for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])) continue;
         js_val_t a[3] = { self.o->items[i], js_num(i), self };
-        if(js_truthy(call_value(argv[0], js_undef(), 3, a))) arr_push(out, self.o->items[i]);
+        if(js_truthy(call_value(argv[0], argc > 1 ? argv[1] : js_undef(), 3, a))) arr_push(out, self.o->items[i]);
     }
     return js_objv(out);
 }
@@ -2120,8 +3615,11 @@ static js_val_t arr_reduce(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_undef();
     int i = 0;
-    js_val_t acc = argc > 1 ? argv[1] : (self.o->nitems ? self.o->items[i++] : js_undef());
+    while(argc < 2 && i < self.o->nitems && is_hole(self.o->items[i])) i++;
+    if(argc < 2 && i >= self.o->nitems){ fail("Reduce of empty array with no initial value"); return js_undef(); }
+    js_val_t acc = argc > 1 ? argv[1] : self.o->items[i++];
     for(; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])) continue;
         js_val_t a[4] = { acc, self.o->items[i], js_num(i), self };
         acc = call_value(argv[0], js_undef(), 4, a);
     }
@@ -2232,7 +3730,9 @@ static js_val_t str_repeat(js_val_t self, int argc, js_val_t *argv, void *ctx){
     const char *s = js_to_str(self);
     int k = argc ? (int)js_to_num(argv[0]) : 0;
     u32 n = (u32)strlen(s);
-    if(k <= 0 || n * (u32)k > 16384){ return js_str(""); }
+    if(k < 0){ fail("Invalid count value"); return js_str(""); }
+    if(k == 0 || n == 0) return js_str("");
+    if((u64)n * (u64)k > (256u << 20)){ fail("Invalid string length"); return js_str(""); }
     char *o = jalloc(n * (u32)k + 1);
     for(int i = 0; i < k; i++) memcpy(o + (u32)i * n, s, n);
     o[n * (u32)k] = 0;
@@ -2514,7 +4014,7 @@ static js_val_t str_pad(js_val_t self, int argc, js_val_t *argv, int start){
     int target = argc ? (int)js_to_num(argv[0]) : 0;
     const char *pad = argc > 1 ? js_to_str(argv[1]) : " ";
     u32 pl = (u32)strlen(pad);
-    if(target <= (int)sl || pl == 0 || target > 16384) return js_str(s);
+    if(target <= (int)sl || pl == 0 || target > (64 << 20)) return js_str(s);
     u32 need = (u32)target - sl, w = 0;
     char *o = jalloc((u32)target + 1);
     if(start){
@@ -2699,8 +4199,9 @@ static js_val_t arr_some(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_bool(0);
     for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])) continue;
         js_val_t a[3] = { self.o->items[i], js_num(i), self };
-        if(js_truthy(call_value(argv[0], js_undef(), 3, a))) return js_bool(1);
+        if(js_truthy(call_value(argv[0], argc > 1 ? argv[1] : js_undef(), 3, a))) return js_bool(1);
     }
     return js_bool(0);
 }
@@ -2708,8 +4209,9 @@ static js_val_t arr_every(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     if(self.t != JS_OBJ || !self.o->is_array || argc < 1) return js_bool(1);
     for(int i = 0; i < self.o->nitems && !STOP(); i++){
+        if(is_hole(self.o->items[i])) continue;
         js_val_t a[3] = { self.o->items[i], js_num(i), self };
-        if(!js_truthy(call_value(argv[0], js_undef(), 3, a))) return js_bool(0);
+        if(!js_truthy(call_value(argv[0], argc > 1 ? argv[1] : js_undef(), 3, a))) return js_bool(0);
     }
     return js_bool(1);
 }
@@ -2790,11 +4292,24 @@ static js_val_t num_to_fixed(js_val_t self, int argc, js_val_t *argv, void *ctx)
 static js_val_t g_parse_int(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     const char *s = js_to_str(arg(argc, argv, 0));
-    while(*s == ' ') s++;
+    while(*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v') s++;
     int neg = 0;
     if(*s == '-'){ neg = 1; s++; } else if(*s == '+') s++;
+    int radix = argc > 1 ? (int)js_to_num(argv[1]) : 0;
+    if(radix && (radix < 2 || radix > 36)) return js_num(nan_value());
+    if((!radix || radix == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')){ s += 2; radix = 16; }
+    if(!radix) radix = 10;
     double v = 0; int any = 0;
-    while(*s >= '0' && *s <= '9'){ v = v * 10 + (*s - '0'); s++; any = 1; }
+    for(;; s++){
+        int c = (unsigned char)*s, d;
+        if(c >= '0' && c <= '9') d = c - '0';
+        else if(c >= 'a' && c <= 'z') d = c - 'a' + 10;
+        else if(c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+        else break;
+        if(d >= radix) break;
+        v = v * radix + d;
+        any = 1;
+    }
     if(!any) return js_num(nan_value());
     return js_num(neg ? -v : v);
 }
@@ -2948,9 +4463,19 @@ static js_val_t math_fn(js_val_t self, int argc, js_val_t *argv, void *ctx){
 }
 
 /* ---- timers ---- */
-typedef struct { int used, id, interval; u64 due; u32 ms; js_val_t fn; } timer_t_;
-static timer_t_ timers[32];
+typedef struct { int used, id, interval; u64 due; u32 ms; js_val_t fn; js_obj_t *args; } timer_t_;
+#define MAX_TIMERS 512
+static timer_t_ timers[MAX_TIMERS];
 static int next_timer_id = 1;
+static int in_timer = 0;              /* a timer callback is running (its new timers are nested) */
+static u64 page_start_tick = 0;       /* when the page's scripts first ran */
+/* Throttling, like browsers: chained timers wait at least a frame, and once a page has
+ * settled (10 s), short timers run at most every 100 ms. Keeps busy pages off the CPU. */
+static u32 clamp_ms(u32 ms){
+    if(in_timer && ms < 16) ms = 16;
+    if(page_start_tick && timer_ticks() > page_start_tick + 1000 && ms < 100) ms = 100;
+    return ms;
+}
 
 static js_val_t add_timer(js_val_t self, int argc, js_val_t *argv, int repeat){
     (void)self;
@@ -2958,14 +4483,16 @@ static js_val_t add_timer(js_val_t self, int argc, js_val_t *argv, int repeat){
     if(!js_callable(fn)) return js_undef();
     double ms = argc > 1 ? js_to_num(argv[1]) : 0;
     if(ms != ms || ms < 0) ms = 0;
-    for(int i = 0; i < 32; i++){
+    for(int i = 0; i < MAX_TIMERS; i++){
         if(timers[i].used) continue;
         timers[i].used = 1;
         timers[i].id = next_timer_id++;
         timers[i].interval = repeat;
-        timers[i].ms = (u32)ms;
-        timers[i].due = timer_ticks() + (u64)(ms / 10);
+        timers[i].ms = clamp_ms((u32)ms);
+        timers[i].due = timer_ticks() + (u64)(timers[i].ms / 10);
         timers[i].fn = fn;
+        timers[i].args = NULL;
+        if(argc > 2){ timers[i].args = new_array(); for(int k = 2; k < argc; k++) arr_push(timers[i].args, argv[k]); }
         return js_num(timers[i].id);
     }
     return js_undef();
@@ -2975,19 +4502,46 @@ static js_val_t g_set_interval(js_val_t self, int argc, js_val_t *argv, void *ct
 static js_val_t g_clear_timer(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     int id = (int)js_to_num(arg(argc, argv, 0));
-    for(int i = 0; i < 32; i++) if(timers[i].used && timers[i].id == id) timers[i].used = 0;
+    for(int i = 0; i < MAX_TIMERS; i++) if(timers[i].used && timers[i].id == id) timers[i].used = 0;
     return js_undef();
 }
 
+static u64 timers_cool_until = 0;     /* a settled page's timers rest until then */
 int js_timers_tick(u64 now){
     int ran = 0;
-    for(int i = 0; i < 32 && !STOP(); i++){
-        if(!timers[i].used || timers[i].due > now) continue;
+    /* a settled page may use at most about a quarter of the CPU for its timers:
+       after a round that took X, the timers rest for 3X */
+    int settled = page_start_tick && timer_ticks() > page_start_tick + 1000;
+    if(settled && timer_ticks() < timers_cool_until) return 0;
+    u64 round_start = timer_ticks();
+    /* an error in an earlier script or callback does not stop the timers */
+    failed = 0; thrown = 0;
+    /* the earliest due first, so setTimeout(f, 0) chains run in order */
+    for(int round = 0; round < MAX_TIMERS; round++){
+        int best = -1;
+        for(int i = 0; i < MAX_TIMERS; i++){
+            if(!timers[i].used || timers[i].due > now) continue;
+            if(best < 0 || timers[i].due < timers[best].due || (timers[i].due == timers[best].due && timers[i].id < timers[best].id)) best = i;
+        }
+        if(best < 0) break;
+        int i = best;
         js_val_t fn = timers[i].fn;
-        if(timers[i].interval) timers[i].due = now + (u64)(timers[i].ms / 10 ? timers[i].ms / 10 : 1);
+        js_obj_t *args = timers[i].args;
+        if(timers[i].interval){ timers[i].ms = clamp_ms(timers[i].ms); timers[i].due = now + (u64)(timers[i].ms / 10 ? timers[i].ms / 10 : 1); }
         else timers[i].used = 0;
-        call_value(fn, js_undef(), 0, NULL);
+        in_timer = 1;
+        call_value(fn, js_undef(), args ? args->nitems : 0, args ? args->items : NULL);
+        in_timer = 0;
+        failed = 0; thrown = 0;
+        js_drain_jobs();
+        failed = 0; thrown = 0;
         ran++;
+        if(ran >= 8) break;             /* the rest wait for the next tick */
+        if(timer_ticks() > round_start + 2) break;   /* 20 ms of timers per tick at most */
+    }
+    if(settled && ran){
+        u64 took = timer_ticks() - round_start;
+        timers_cool_until = timer_ticks() + (took ? took * 3 : 1);
     }
     return ran;
 }
@@ -3001,6 +4555,7 @@ static js_val_t prevent_default(js_val_t self, int argc, js_val_t *argv, void *c
 
 js_val_t js_compile_function(const char *src, u32 len, const char *param){
     if(!arena) js_init();
+    lazy_on = 0;
     lex(src, len);
     ti = 0;
     jsnode_t *f = node(N_FUNC);
@@ -3015,21 +4570,43 @@ js_val_t js_compile_function(const char *src, u32 len, const char *param){
         last = s;
     }
     f->a = body;
+    ntok = 0;
     if(STOP()) return js_undef();
     return make_fn(f, global_env);
 }
 
 /* Gives the script heap back to the kernel (the next js_init makes a new one). */
 void js_release(void){
+    coro_reset();
     if(arena) kfree(arena);
     arena = arena_end = NULL;
     free_list = NULL;
     nroots = 0;
-    for(int i = 0; i < 32; i++) timers[i].used = 0;
+    for(int i = 0; i < MAX_TIMERS; i++) timers[i].used = 0;
 }
 
 void js_init(void){
+    coro_reset();
     heap_reset();
+    itab = NULL; itab_cap = itab_n = 0;
+    object_proto = array_proto = string_proto = regex_proto = number_proto = NULL;
+    global_obj = NULL; global_env = NULL;
+    /* register the roots first: a collection may run while the built-ins are made */
+    js_gc_root(&global_obj, sizeof global_obj);
+    js_gc_root(&coro_cur, sizeof coro_cur);
+    js_gc_root(&toks, sizeof toks);
+    js_gc_root(&itab, sizeof itab);
+    js_gc_root(&global_env, sizeof global_env);
+    js_gc_root(&object_proto, sizeof object_proto);
+    js_gc_root(&array_proto, sizeof array_proto);
+    js_gc_root(&string_proto, sizeof string_proto);
+    js_gc_root(&regex_proto, sizeof regex_proto);
+    js_gc_root(&number_proto, sizeof number_proto);
+    js_gc_root(&ret_val, sizeof ret_val);
+    js_gc_root(&thrown_val, sizeof thrown_val);
+    js_gc_root(&toks, sizeof toks);
+    js_gc_root(timers, sizeof timers);
+    js_gc_root(&cur_src, sizeof cur_src);       /* the text being parsed (lazy bodies point into it) */
     failed = 0;
     thrown = 0;
     err_msg[0] = 0;
@@ -3038,13 +4615,18 @@ void js_init(void){
     depth = 0;
     steps = 0;
     prevented = 0;
-    for(int i = 0; i < 32; i++) timers[i].used = 0;
+    for(int i = 0; i < MAX_TIMERS; i++) timers[i].used = 0;
+    page_start_tick = timer_ticks();
+    timers_cool_until = 0;
+    in_timer = 0;
 
     object_proto = new_obj();
     array_proto = new_obj();
     string_proto = new_obj();
     regex_proto = new_obj();
     number_proto = new_obj();
+    function_proto = NULL; bool_proto = NULL;
+    jslib_early();
     js_set(number_proto, "toFixed", js_objv(js_new_native(num_to_fixed, NULL)));
 
     global_obj = js_new_object();
@@ -3158,18 +4740,7 @@ void js_init(void){
     js_set(date, "now", js_objv(js_new_native(date_now, NULL)));
     js_set(global_obj, "Date", js_objv(date));
     /* the globals that hold pointers into the heap */
-    js_gc_root(&global_obj, sizeof global_obj);
-    js_gc_root(&toks, sizeof toks);
-    js_gc_root(&global_env, sizeof global_env);
-    js_gc_root(&object_proto, sizeof object_proto);
-    js_gc_root(&array_proto, sizeof array_proto);
-    js_gc_root(&string_proto, sizeof string_proto);
-    js_gc_root(&regex_proto, sizeof regex_proto);
-    js_gc_root(&number_proto, sizeof number_proto);
-    js_gc_root(&ret_val, sizeof ret_val);
-    js_gc_root(&thrown_val, sizeof thrown_val);
-    js_gc_root(&toks, sizeof toks);
-    js_gc_root(timers, sizeof timers);
+    jslib_init();
 }
 
 /* Used by the browser to add the preventDefault function to event objects. */
@@ -3179,24 +4750,36 @@ js_val_t js_prevent_default_fn(void){
 
 int js_run(const char *src, u32 len){
     if(!arena) js_init();
+    tok_level = 0;
     failed = 0;
     thrown = 0;
     err_msg[0] = 0;
     ctl = 0;
     steps = 0;
+    /* keep the text: lazily parsed function bodies point into it */
+    char *keep = jalloc(len + 1);
+    if((char *)keep == scratch) return -1;
+    memcpy(keep, src, len);
+    keep[len] = 0;
+    src = keep;
+    cur_src = keep;
+    src_base = keep;
+    lazy_on = js_parse_only != 2;          /* 2: parse every body now (syntax checks) */
     lex(src, len);
     if(failed) return -1;
     ti = 0;
     jsnode_t *prog = node(N_BLOCK);
     jsnode_t *last = NULL;
     char parse_err[160] = "";
+    u32 parse_err_at = 0xFFFFFFFFu;
+    report_at = 0xFFFFFFFFu;
     while(toks[ti].t != T_EOF && !thrown){
         int start = ti;
         failed = 0;
         jsnode_t *s = statement();
         if(failed){
             /* a statement we cannot parse: remember why, skip it, and carry on */
-            if(!parse_err[0]) ui_copy_js(parse_err, err_msg, sizeof parse_err);
+            if(!parse_err[0]){ ui_copy_js(parse_err, err_msg, sizeof parse_err); parse_err_at = err_have_at ? err_at : 0xFFFFFFFFu; }
             failed = 0;
             int depth = 0;
             while(toks[ti].t != T_EOF){
@@ -3214,7 +4797,7 @@ int js_run(const char *src, u32 len){
     if(thrown){
         if(thrown){
             char m[120] = "Uncaught ";
-            const char *t = js_to_str(thrown_val);
+            const char *t = uncaught_text();
             u32 k = 9;
             for(const char *q = t; *q && k < 110; q++) m[k++] = *q;
             m[k] = 0;
@@ -3225,16 +4808,30 @@ int js_run(const char *src, u32 len){
         }
         return -1;
     }
+    toks = NULL; ntok = 0; tok_cap = 0; tok_valid[0] = 0;   /* done with the tokens (lazy bodies re-lex) */
+    tok_free_level(0);
+    if(js_parse_only){
+        if(parse_err[0]){ ui_copy_js(err_msg, parse_err, sizeof err_msg); report_at = parse_err_at; return -1; }
+        return 0;
+    }
+    /* top-level var names and function declarations become properties of the global object */
+    hoist_walk(prog->list, prog);
+    for(jsnode_t *h = prog->hoist; h; h = h->next)
+        if(global_obj && !has_prop(global_obj, h->str) && !env_find(global_env, h->str)) js_set(global_obj, h->str, js_undef());
     for(jsnode_t *s = prog->list; s && !STOP(); s = s->next)
-        if(s->k == N_FUNCDECL) env_define(global_env, s->str, make_fn(s->a, global_env));
+        if(s->k == N_FUNCDECL){
+            js_val_t fv = make_fn(s->a, global_env);
+            if(global_obj) js_set(global_obj, s->str, fv); else env_define(global_env, s->str, fv);
+        }
     for(jsnode_t *s = prog->list; s && !STOP(); s = s->next){
         if(s->k == N_FUNCDECL) continue;
         exec(s, global_env);
         ctl = 0;
     }
+    if(!STOP()) js_drain_jobs();
     if(thrown){
         char m[120] = "Uncaught ";
-        const char *t = js_to_str(thrown_val);
+        const char *t = uncaught_text();
         u32 k = 9;
         for(const char *q = t; *q && k < 110; q++) m[k++] = *q;
         m[k] = 0;
@@ -3246,7 +4843,10 @@ int js_run(const char *src, u32 len){
     }
     if(!failed && parse_err[0]){
         ui_copy_js(err_msg, parse_err, sizeof err_msg);
+        report_at = parse_err_at;
         return -1;
     }
     return failed ? -1 : 0;
 }
+
+#include "jslib.inc"

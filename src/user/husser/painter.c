@@ -50,24 +50,31 @@ static int glyph_cov(const unsigned char *g, int fx, int fy){   /* fx,fy in 1/25
     return top + (bot - top) * ty / 256;
 }
 /* Each glyph is resampled once per size into a coverage mask and kept: painting text is
- * then one blend a pixel, and whole runs of clear or solid pixels go eight at a time. */
-#define GC_MAXSCALE 4
-static unsigned char gc_mask[128][GC_MAXSCALE][FONT_W * GC_MAXSCALE * FONT_H * GC_MAXSCALE];
-static unsigned char gc_have[128][GC_MAXSCALE];
+ * then one blend a pixel, and whole runs of clear or solid pixels go eight at a time.
+ * Sizes are quarter steps s4 of the 8 x 16 font: a glyph is 2*s4 x 4*s4 pixels. */
+#include "amdroid/heap.h"
+#define GC_MAX_S4 24
+static unsigned char *gc_mask[128][GC_MAX_S4 + 1];
 
-static const unsigned char *glyph_mask(unsigned char c, int scale){
-    unsigned char *m = gc_mask[c][scale - 1];
-    if(gc_have[c][scale - 1]) return m;
-    int W = FONT_W * scale, H = FONT_H * scale;
+static void resample(unsigned char c, int s4, unsigned char *m){
+    int W = 2 * s4, H = 4 * s4;
     const unsigned char *g = font8x16[c];
     for(int oy = 0; oy < H; oy++){
-        int fy = ((oy * 2 + 1) << 7) / scale - 128;
+        int fy = ((oy * 2 + 1) << 9) / s4 - 128;
         for(int ox = 0; ox < W; ox++){
-            int cov = glyph_cov(g, ((ox * 2 + 1) << 7) / scale - 128, fy);
+            int cov = glyph_cov(g, ((ox * 2 + 1) << 9) / s4 - 128, fy);
             m[oy * W + ox] = (unsigned char)(cov < 0 ? 0 : cov > 255 ? 255 : cov);
         }
     }
-    gc_have[c][scale - 1] = 1;
+}
+static const unsigned char *glyph_mask(unsigned char c, int s4){
+    if(s4 > GC_MAX_S4) return NULL;
+    unsigned char *m = gc_mask[c][s4];
+    if(m) return m;
+    m = kmalloc((u64)8 * s4 * s4);
+    if(!m) return NULL;
+    resample(c, s4, m);
+    gc_mask[c][s4] = m;
     return m;
 }
 
@@ -100,26 +107,27 @@ static void draw_glyph_italic(int x, int y, const unsigned char *m, int W, int H
     }
 }
 
-static void draw_text(int x, int y, const char *s, u32 color, u32 scale, int italic){
-    if(!scale) scale = 1;
-    int W = FONT_W * (int)scale, H = FONT_H * (int)scale;
+static void draw_text(int x, int y, const char *s, u32 color, u32 s4, int italic){
+    if(s4 < 2) s4 = 4;
+    int W = 2 * (int)s4, H = 4 * (int)s4;
     if(y + H <= 0 || y >= (int)vp_h) return;
     for(; *s; s++, x += W){
         unsigned char c = (unsigned char)*s;
         if(c > 127) c = '?';
         if(c == ' ' || x + W <= 0) continue;
         if(x >= (int)vp_w) break;
-        if(scale <= GC_MAXSCALE){
-            if(italic) draw_glyph_italic(x, y, glyph_mask(c, (int)scale), W, H, color);
-            else       draw_glyph(x, y, glyph_mask(c, (int)scale), W, H, color);
+        const unsigned char *m = glyph_mask(c, (int)s4);
+        if(m){
+            if(italic) draw_glyph_italic(x, y, m, W, H, color);
+            else       draw_glyph(x, y, m, W, H, color);
             continue;
         }
         const unsigned char *g = font8x16[c];              /* too big to keep: resample as it is drawn */
         for(int oy = 0; oy < H; oy++){
-            int fy = ((oy * 2 + 1) << 7) / (int)scale - 128;
+            int fy = ((oy * 2 + 1) << 9) / (int)s4 - 128;
             int sh = italic ? ((H - 1 - oy) >> 2) : 0;
             for(int ox = 0; ox < W; ox++){
-                int cov = glyph_cov(g, ((ox * 2 + 1) << 7) / (int)scale - 128, fy);
+                int cov = glyph_cov(g, ((ox * 2 + 1) << 9) / (int)s4 - 128, fy);
                 if(cov > 0 && x + ox >= 0 && y + oy >= 0) blendpx((u32)(x + ox + sh), (u32)(y + oy), color, (u32)cov);
             }
         }
@@ -127,7 +135,8 @@ static void draw_text(int x, int y, const char *s, u32 color, u32 scale, int ita
 }
 
 static void blit_image(const web_cmd_t *c, const u32 *px, u32 iw, u32 ih){
-    /* nearest neighbour, scaled to c->w x c->h, clipped to the viewport */
+    /* nearest neighbour, scaled to c->w x c->h, clipped to the viewport. The top byte of a
+       pixel is its transparency: 0 opaque, 255 clear, in between blended over the page. */
     int dw = c->w, dh = c->h;
     if(dw <= 0 || dh <= 0 || !px) return;
     int x0 = c->x, y0 = c->y;
@@ -136,15 +145,22 @@ static void blit_image(const web_cmd_t *c, const u32 *px, u32 iw, u32 ih){
     int x1 = c->x + dw, y1 = c->y + dh;
     if(x1 > (int)vp_w) x1 = (int)vp_w;
     if(y1 > (int)vp_h) y1 = (int)vp_h;
+    if(x1 <= x0) return;
+    static u32 sxs[HUSSER_MAX_W];            /* the source column of each target column */
+    for(int dx = x0; dx < x1; dx++){
+        u32 sx = (u32)(((i64)(dx - c->x) * (i64)iw) / (i64)dw);
+        sxs[dx - x0] = sx >= iw ? iw - 1 : sx;
+    }
     for(int dy = y0; dy < y1; dy++){
         u32 sy = (u32)(((i64)(dy - c->y) * (i64)ih) / (i64)dh);
         if(sy >= ih) sy = ih - 1;
         const u32 *row = px + (u64)sy * iw;
         u32 *dst = (u32 *)((u8 *)vram + (u64)dy * VP_PITCH * 4);
         for(int dx = x0; dx < x1; dx++){
-            u32 sx = (u32)(((i64)(dx - c->x) * (i64)iw) / (i64)dw);
-            if(sx >= iw) sx = iw - 1;
-            dst[dx] = row[sx];
+            u32 p = row[sxs[dx - x0]];
+            u32 t = p >> 24;
+            if(t == 0) dst[dx] = p;
+            else if(t < 255) blendpx((u32)dx, (u32)dy, p & 0xFFFFFF, 256 - t);
         }
     }
 }
@@ -155,7 +171,7 @@ void painter_cmds(const web_cmd_t *cmds, int n, int scroll, const void *hover_no
     for(int i = 0; i < n; i++){
         const web_cmd_t *c = &cmds[i];
         int y = c->y - scroll;
-        if(c->kind == WEB_CMD_RECT){
+        if(c->kind == WEB_CMD_RECT || c->kind == WEB_CMD_VIDEO){     /* a video box is black until the browser draws in it */
             int x0 = c->x < 0 ? 0 : c->x, y0 = y < 0 ? 0 : y;
             int x1 = c->x + c->w, y1 = y + c->h;
             if(x1 > (int)vp_w) x1 = (int)vp_w;

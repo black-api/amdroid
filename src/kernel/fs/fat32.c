@@ -181,11 +181,11 @@ static int fat_set(u32 c, u32 val){
     u32 off = c * 4;
     for(u32 f = 0; f < num_fats; f++){
         u32 sec = fat_start + f * fat_size + off / 512;
-        if(read_sector(sec) != 0) return -1;
+        if(read_sector(sec) != 0){ console_printf("[fat] fat_set: cannot read sector %u\n", sec); return -1; }
         memcpy(wbuf, sector_buf, 512);
         u32 *e = (u32*)(wbuf + off % 512);
         *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
-        if(write_sector(sec, wbuf) != 0) return -1;
+        if(write_sector(sec, wbuf) != 0){ console_printf("[fat] fat_set: cannot write sector %u\n", sec); return -1; }
     }
     return 0;
 }
@@ -215,6 +215,7 @@ static int fat_alloc_chain(u32 n, u32 *first){
     if(fat_set(prev, 0x0FFFFFFF) != 0) goto fail;
     return 0;
 fail:
+    console_printf("[fat] alloc: wanted %u cluster(s), linked %u\n", n, got);
     if(*first) fat_free_chain(*first);
     *first = 0;
     return -1;
@@ -223,7 +224,10 @@ fail:
 static int write_cluster(u32 c, const u8 *src){
     u32 lba = cluster_to_lba(c);
     for(u32 i = 0; i < sectors_per_cluster; i++)
-        if(write_sector(lba + i, src + i * 512) != 0) return -1;
+        if(write_sector(lba + i, src + i * 512) != 0){
+            console_printf("[fat] write: sector %u of cluster %u failed\n", lba + i, c);
+            return -1;
+        }
     return 0;
 }
 
@@ -323,10 +327,17 @@ static int write_entry(const void *data, u32 size, const u8 n83[11]){
     u32 csize = sectors_per_cluster * 512;
     u32 ncl = (size + csize - 1) / csize;
     u32 first = 0;
-    if(ncl && fat_alloc_chain(ncl, &first) != 0) return -1;
+    if(ncl && fat_alloc_chain(ncl, &first) != 0){
+        console_printf("[fat] write: no chain for %u cluster(s) of %u bytes\n", ncl, size);
+        return -1;
+    }
 
     u8 *cbuf = kmalloc(csize);
-    if(!cbuf){ if(first) fat_free_chain(first); return -1; }
+    if(!cbuf){
+        console_printf("[fat] write: no memory for a %u-byte cluster buffer\n", csize);
+        if(first) fat_free_chain(first);
+        return -1;
+    }
     const u8 *src = data;
     u32 left = size, c = first;
     for(u32 k = 0; k < ncl; k++){
@@ -339,6 +350,9 @@ static int write_entry(const void *data, u32 size, const u8 n83[11]){
     }
     kfree(cbuf);
 
+    /* the data is on the medium before the directory entry says it is there */
+    if(!on_usb) ata_flush();
+
     struct dirloc loc = dir_has_found ? dir_found : dir_free;
     u8 e[32];
     memset(e, 0, 32);
@@ -347,9 +361,14 @@ static int write_entry(const void *data, u32 size, const u8 n83[11]){
     *(u16*)(e + 20) = (u16)(first >> 16);
     *(u16*)(e + 26) = (u16)(first & 0xFFFF);
     *(u32*)(e + 28) = size;
-    if(dir_entry_write(&loc, e) != 0){ if(first) fat_free_chain(first); return -1; }
+    if(dir_entry_write(&loc, e) != 0){
+        console_printf("[fat] write: directory entry for %u bytes failed\n", size);
+        if(first) fat_free_chain(first);
+        return -1;
+    }
     if(old_first) fat_free_chain(old_first);
     fsinfo_invalidate();
+    if(!on_usb) ata_flush();
     return 0;
 }
 
@@ -446,6 +465,63 @@ int fat32_read_path(const char *path, void *buf, u32 max, u32 *out_size){
     }
 }
 
+/* ======================= open files: read any range =======================
+   For big files (videos): the cluster chain is walked once at open and kept, so a
+   read anywhere costs only the sectors it needs. */
+int fat32_open(const char *path, fat32_file_t *f){
+    memset(f, 0, sizeof *f);
+    u32 dir = root_cluster;
+    const char *p = path;
+    for(;;){
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        u8 n83[11], ent[32];
+        if(comp_to_83(p, len, n83) != 0) return -1;
+        if(dir_lookup(dir, n83, ent) != 1) return -1;
+        if(!slash){
+            if(ent[11] & 0x10) return -1;
+            u32 first = (*(u16*)(ent + 26)) | ((u32)(*(u16*)(ent + 20)) << 16);
+            f->size = *(u32*)(ent + 28);
+            f->cluster_bytes = sectors_per_cluster * 512;
+            u32 n = (f->size + f->cluster_bytes - 1) / f->cluster_bytes;
+            f->chain = kmalloc((n ? n : 1) * sizeof(u32));
+            if(!f->chain) return -1;
+            u32 c = first, k = 0;
+            while(c >= 2 && c < 0x0FFFFFF8 && k < n){ f->chain[k++] = c; c = fat_next(c); }
+            f->nclusters = k;
+            return 0;
+        }
+        if(!(ent[11] & 0x10)) return -1;
+        dir = (*(u16*)(ent + 26)) | ((u32)(*(u16*)(ent + 20)) << 16);
+        p = slash + 1;
+    }
+}
+
+/* Reads len bytes at off into buf; returns the bytes read (fewer at the end), -1 on error. */
+int fat32_read_at(fat32_file_t *f, u32 off, void *buf, u32 len){
+    if(!f->chain || off >= f->size) return 0;
+    if(len > f->size - off) len = f->size - off;
+    u8 *out = buf;
+    u32 done = 0;
+    while(done < len){
+        u32 pos = off + done;
+        u32 ci = pos / f->cluster_bytes, in = pos % f->cluster_bytes;
+        if(ci >= f->nclusters) break;
+        u32 sec = in / 512, so = in % 512;
+        if(read_sector(cluster_to_lba(f->chain[ci]) + sec) != 0) return -1;
+        u32 take = 512 - so;
+        if(take > len - done) take = len - done;
+        memcpy(out + done, sector_buf + so, take);
+        done += take;
+    }
+    return (int)done;
+}
+
+void fat32_close(fat32_file_t *f){
+    if(f->chain) kfree(f->chain);
+    memset(f, 0, sizeof *f);
+}
+
 /* ======================= paths anywhere in the disk =======================
    Walks the directories before the last component. Works for writes,
    deletes, new directories and listings. */
@@ -478,8 +554,8 @@ static int resolve_parent(const char *path, u32 *dir, u8 leaf[11]){
 
 int fat32_write_path(const char *path, const void *data, u32 size){
     u32 dir; u8 leaf[11];
-    if(resolve_parent(path, &dir, leaf) != 0) return -1;
-    if(dir_scan_in(dir, leaf) != 0) return -1;
+    if(resolve_parent(path, &dir, leaf) != 0){ console_printf("[fat] write: no parent directory for %s\n", path); return -1; }
+    if(dir_scan_in(dir, leaf) != 0){ console_printf("[fat] write: cannot scan the directory holding %s\n", path); return -1; }
     return write_entry(data, size, leaf);
 }
 
@@ -525,6 +601,7 @@ int fat32_mkdir(const char *path){
     *(u16*)(e + 26) = (u16)(nc & 0xFFFF);
     if(dir_entry_write(&dir_free, e) != 0){ fat_free_chain(nc); return -1; }
     fsinfo_invalidate();
+    if(!on_usb) ata_flush();
     return 0;
 }
 

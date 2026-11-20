@@ -42,6 +42,7 @@ void ui_app_leave(void){
 u64 ui_app_cycles(int a){ return a >= 0 && a < UI_MAX_APPS ? app_cyc[a] : 0; }
 
 void ui_redraw(void){ win_mark_dirty(cur_app); }
+void ui_redraw_rect(rect_t r){ win_mark_dirty_rect(cur_app, r); }
 
 void ui_msg_set(const char *s){ ui_notify(-1, s, ""); }
 int ui_app_index(const struct app *app){

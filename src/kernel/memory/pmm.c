@@ -5,7 +5,7 @@
 #define PAGE_SIZE 4096
 /* the bitmap covers up to 4 GB (128 KiB); the real total comes from the
  * multiboot memory map, never from a constant */
-#define PMM_MAX_MEM (4ull * 1024 * 1024 * 1024)     /* the bitmap's reach */
+#define PMM_MAX_MEM (1ull * 1024 * 1024 * 1024)     /* the kernel identity-maps the first 1 GB (boot.asm) */
 #define MAX_PAGES (PMM_MAX_MEM / PAGE_SIZE)         /* 2^20 pages */
 #define BITMAP_BYTES (MAX_PAGES / 8)                /* 128 KiB */
 

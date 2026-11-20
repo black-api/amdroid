@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+<title>Am-Droid Engine Test</title>
+<style>
+  body { background: #ffffff; color: #1a1a1a; font-family: sans-serif; margin: 0; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 32px; }
+  h1 { color: #0b5fff; font-size: 32px; }
+  h2 { color: #222; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
+  p { line-height: 1.5; }
+  a { color: #0b5fff; }
+  .card { background: #f4f6f8; border: 1px solid #d8dde2; padding: 16px; margin: 12px 0; }
+  .pill { background: #0b5fff; color: #ffffff; padding: 4px 10px; }
+  code { background: #eee; color: #c7254e; padding: 2px 4px; }
+  ul li { color: #333; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+  th { background: #0b5fff; color: #fff; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Hello from the Am-Droid browser</h1>
+    <p>This page is rendered by a <b>from-scratch</b> engine: HTML parsing, CSS,
+       layout and painting, all written in C with <i>no libraries</i>.</p>
+
+    <div class="card">
+      <span class="pill">NOTE</span>
+      Boxes, borders, backgrounds and padding are laid out here, not faked.
+    </div>
+
+    <h2>Things it does</h2>
+    <ul>
+      <li>Block and inline layout with word wrapping</li>
+      <li>Colors, backgrounds, borders and padding</li>
+      <li>Links like <a href="http://example.com/">this one</a></li>
+      <li>Inline <code>code</code> spans</li>
+    </ul>
+
+    <h2>A table</h2>
+    <table>
+      <tr><th>Feature</th><th>Status</th></tr>
+      <tr><td>HTML parser</td><td>working</td></tr>
+      <tr><td>CSS cascade</td><td>working</td></tr>
+      <tr><td>Flexbox</td><td>not yet</td></tr>
+    </table>
+
+    <h2>Script</h2>
+    <p id="out">(this text is replaced by JavaScript)</p>
+    <script>
+      document.getElementById('out').innerHTML =
+        'JavaScript ran: 2 + 3 = ' + (2 + 3);
+    </script>
+  </div>
+</body>
+</html>

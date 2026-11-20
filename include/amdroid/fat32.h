@@ -1,6 +1,11 @@
 #ifndef AMDROID_FAT32_H
 #define AMDROID_FAT32_H
 #include "amdroid/types.h"
+/* An open file: its size and cluster chain (fat32_open / fat32_read_at / fat32_close). */
+typedef struct { u32 size, cluster_bytes, nclusters; u32 *chain; } fat32_file_t;
+int fat32_open(const char *path, fat32_file_t *f);                 /* 0 on success */
+int fat32_read_at(fat32_file_t *f, u32 off, void *buf, u32 len);   /* bytes read, or -1 */
+void fat32_close(fat32_file_t *f);
 int fat32_init(void);                 /* returns 0 on success */
 int fat32_list_root(void (*cb)(const char *name, int is_dir, u32 size));
 int fat32_read_file(const char *name, void *buf, u32 max, u32 *out_size);

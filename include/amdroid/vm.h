@@ -18,7 +18,7 @@ int  vm_map_user(u64 cr3, u64 virt, u64 phys, u64 flags);
 u64  vm_alloc_user_page(u64 cr3, u64 virt);           /* allocates and maps one zeroed page */
 /* User programs are linked at the base; keep the signal trampoline far
  * above any realistic image's end (text + rodata + data + bss), not inside it. */
-#define VM_SIG_TRAMPOLINE (VM_USER_BASE + 0x4000000)   /* BASE + 64 MB */
+#define VM_SIG_TRAMPOLINE (VM_USER_BASE + 0x1FFF0000)  /* just below 0x60000000 (Husser's shared region) */
 void vm_map_trampoline(u64 cr3);
 void vm_switch(u64 cr3);
 u64  vm_read_cr3(void);

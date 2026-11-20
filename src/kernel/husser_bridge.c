@@ -14,7 +14,7 @@
 
 #define HUSSER_SHM_PAGES (HUSSER_SHM_BYTES / 4096)
 #define STACK_TOP        0x7F000000ULL      /* user stack lives far above the image */
-#define STACK_PAGES      16                 /* 64 KiB */
+#define STACK_PAGES      2048               /* 8 MiB: the JS interpreter and regex matcher recurse */
 
 extern u8 husser_blob_start[], husser_blob_end[];
 extern char husser_bss_end[];               /* from husser_defs.inc */
@@ -60,6 +60,25 @@ static void shm_write(u64 off, const void *src, u64 len){
         memcpy((void*)(unsigned long)(shm_pages[page] + inner), s, take);
         s += take; off += take; len -= take;
     }
+}
+
+/* Reads bytes from the shared region at shm offset off (page by page). */
+void husser_read(u64 off, void *dst, u64 len){
+    if(!shm_ready || off + len > HUSSER_SHM_BYTES) return;
+    u8 *d = dst;
+    while(len){
+        u64 page = off / 4096;
+        u32 inner = (u32)(off % 4096);
+        u32 take = 4096 - inner;
+        if(take > len) take = (u32)len;
+        memcpy(d, (const void *)(unsigned long)(shm_pages[page] + inner), take);
+        d += take; off += take; len -= take;
+    }
+}
+
+/* the header, writable: the browser posts media state there */
+volatile husser_shm_t *husser_header_rw(void){
+    return shm_ready ? (volatile husser_shm_t *)(unsigned long)shm_pages[0] : NULL;
 }
 
 /* ---- commands ----
@@ -118,6 +137,15 @@ int husser_open(u32 vw, u32 vh){
     volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
     memset((void*)m, 0, HUSSER_VRAM_OFF);        /* the whole header, zeroed */
     m->magic = HUSSER_MAGIC; m->ver = HUSSER_VER;
+    /* the heap: ultra mode when the machine has plenty of memory (and it is free) */
+    u64 ram_mb = pmm_total_pages() * 4096 / (1024 * 1024);
+    u64 free_mb = pmm_free_pages() * 4096 / (1024 * 1024);
+    u32 heap = HUSSER_HEAP_NORMAL;
+    m->ultra = 0;
+    if(ram_mb > HUSSER_ULTRA_RAM_MB && free_mb > (HUSSER_HEAP_ULTRA >> 20) + 128){ heap = HUSSER_HEAP_ULTRA; m->ultra = 1; }
+    else if(free_mb < (HUSSER_HEAP_NORMAL >> 20) + 32) heap = (u32)((free_mb > 96 ? free_mb - 64 : 32) << 20);
+    m->heap_bytes = heap;
+    m->ram_mb = (u32)ram_mb;
     m->vw = vw; m->vh = vh;
     m->state = H_STATE_BOOT;
     qn = 0; inflight = 0;
@@ -138,6 +166,12 @@ int husser_open(u32 vw, u32 vh){
     /* zero pages to the end of the bss (the arena and static pools) */
     u64 bss_end = (u64)(unsigned long)husser_bss_end;
     while(va < bss_end){ if(!vm_alloc_user_page(cr3, va)){ vm_free_space(cr3); return -1; } va += 4096; }
+    /* the heap (its size was chosen with the shared header above) */
+    {
+        volatile husser_shm_t *hm = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
+        for(u64 hv = HUSSER_HEAP_VA; hv < HUSSER_HEAP_VA + hm->heap_bytes; hv += 4096)
+            if(!vm_alloc_user_page(cr3, hv)){ vm_free_space(cr3); return -1; }
+    }
     /* the stack, far above the image */
     for(u32 i = 0; i < STACK_PAGES; i++)
         if(!vm_alloc_user_page(cr3, STACK_TOP - (u64)(i + 1) * 4096)){ vm_free_space(cr3); return -1; }
@@ -204,6 +238,15 @@ void husser_res(u32 kind, u32 idx, const void *bytes, u32 len){
     m->res_idx = idx;
     m->res_len = bytes ? len : 0xFFFFFFFFu;
     post(H_CMD_RES_DONE, 0, 0);
+}
+
+/* The answer to script fetch `id` (bytes NULL: it failed). */
+void husser_fetch_res(u32 id, u32 status, const void *bytes, u32 len){
+    if(husser_pid < 0 || !shm_ready) return;
+    wait_idle(200);
+    volatile husser_shm_t *m = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
+    m->res_status = status;
+    husser_res(4, id, bytes, len);
 }
 
 void husser_link_url(u32 idx){ post(H_CMD_LINK_URL, (i32)idx, 0); }

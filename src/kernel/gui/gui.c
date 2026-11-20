@@ -21,6 +21,12 @@ static int drag_px = 0, drag_py = 0;               /* where a title-bar drag sta
 static u64 start_opened_at = 0;      /* when the Start menu opened, for its slide */
 static int hov_item = -1;
 static u64 hov_since = 0;            /* when the pointer came onto that taskbar item */
+static int g_mx = 0, g_my = 0, g_held = 0;     /* the pointer, for the panels and apps */
+static int present_all = 0;          /* show the whole back buffer again after this frame */
+int ui_mouse_x(void){ return g_mx; }
+int ui_mouse_y(void){ return g_my; }
+int ui_mouse_held(void){ return g_held; }
+void gui_present_all(void){ present_all = 1; }
 
 static void set_start(int open, u64 now){
     if(open && !start_open){ start_opened_at = now; tb_menu_reset(); }
@@ -137,6 +143,7 @@ static void close_all(void){
 static void run_item(item_t it, u64 now, int *next_vt){
     if(it.kind == IT_START || it.kind == IT_SEARCH){ set_start(!start_open, now); return; }
     if(it.kind == IT_TERM){ launch(UI_MAX_APPS, now, next_vt); return; }
+    if(it.kind == IT_CC){ pn_toggle(PN_CC, now); return; }
     int a = it.app;
     if(win_is_open(a) && !win_is_min(a) && win_top_app() == a){ win_minimize(a); return; }
     launch(a, now, next_vt);
@@ -145,7 +152,16 @@ static void run_item(item_t it, u64 now, int *next_vt){
 /* ---- right-click menus ---- */
 
 enum { A_OPEN = 1, A_CLOSE, A_MIN, A_MAX, A_RESTORE, A_SNAP_L, A_SNAP_R,
-       A_TERM, A_APP, A_WALL, A_SORT, A_ABOUT_APP };
+       A_TERM, A_APP, A_WALL, A_SORT, A_ABOUT_APP,
+       A_DND, A_ISL_RESET, A_ISL_SET, A_WID_REMOVE, A_WID_RESET, A_WID_TOGGLE, A_WID_SET, A_DOCK_TOGGLE, A_DOCK_SET };
+
+/* Settings, on the page for one of the new features. */
+static void open_settings_page(int page, u64 now, int *next_vt){
+    int set = -1;
+    for(int a = 0; a < ui_app_count(); a++) if(ui_apps[a]->icon == UI_ICO_SETTINGS) set = a;
+    ui_settings_page(page);
+    if(set >= 0){ launch(set, now, next_vt); win_mark_dirty(set); }
+}
 
 static int find_app(int icon){
     for(int a = 0; a < ui_app_count(); a++) if(ui_apps[a]->icon == icon) return a;
@@ -174,7 +190,29 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
         cm_open(x, y, m, k, a, (u32)sw, (u32)sh, now);
         return;
     }
-    if(isl_hit(x, y)) return;
+    if(pn_hit(bar, (u32)sw, x, y)) return;
+    if(isl_hit(x, y)){
+        add(m, &k, ui_prefs.dnd ? "Turn off Do Not Disturb" : "Do Not Disturb", A_DND, 0);
+        add(m, &k, "Reset island position", A_ISL_RESET, 0);
+        add(m, &k, "Island settings", A_ISL_SET, 1);
+        cm_open(x, y, m, k, -1, (u32)sw, (u32)sh, now);
+        return;
+    }
+    int dk = dk_hit(x, y);
+    if(dk >= 0){
+        add(m, &k, win_is_open(dk) ? (win_is_min(dk) ? "Show" : "Bring to front") : "Open", A_OPEN, 0);
+        if(win_is_open(dk)){ add(m, &k, "Close window", A_CLOSE, 1); m[k - 1].danger = 1; }
+        add(m, &k, "Hide the dock", A_DOCK_TOGGLE, 1);
+        add(m, &k, "Dock settings", A_DOCK_SET, 0);
+        cm_open(x, y, m, k, dk, (u32)sw, (u32)sh, now);
+        return;
+    }
+    if(dk_over(x, y)){
+        add(m, &k, "Hide the dock", A_DOCK_TOGGLE, 0);
+        add(m, &k, "Dock settings", A_DOCK_SET, 0);
+        cm_open(x, y, m, k, -1, (u32)sw, (u32)sh, now);
+        return;
+    }
     int a = win_at(x, y);
     if(a >= 0){
         rect_t r = win_rect_of(a);
@@ -187,6 +225,16 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
         add(m, &k, "Close", A_CLOSE, 1);
         m[k - 1].danger = 1;
         cm_open(x, y, m, k, a, (u32)sw, (u32)sh, now);
+        return;
+    }
+    int wd = wid_at(x, y);
+    if(wd >= 0){
+        desk_select(-1);
+        add(m, &k, "Remove this widget", A_WID_REMOVE, 0);
+        add(m, &k, "Reset widget places", A_WID_RESET, 0);
+        add(m, &k, "Hide all widgets", A_WID_TOGGLE, 1);
+        add(m, &k, "Widget settings", A_WID_SET, 0);
+        cm_open(x, y, m, k, wd, (u32)sw, (u32)sh, now);
         return;
     }
     int d = desk_hit(x, y);
@@ -202,6 +250,7 @@ static void on_right_press(rect_t bar, int n, int sw, int sh, int x, int y, u64 
     if(files >= 0){ add(m, &k, "Open Files", A_APP, 0); m[k - 1].action = A_APP + 100 * (files + 1); }
     if(bro >= 0){ add(m, &k, "Open Browser", A_APP, 0); m[k - 1].action = A_APP + 100 * (bro + 1); }
     add(m, &k, "Next wallpaper", A_WALL, 1);
+    add(m, &k, ui_prefs.wid_on ? "Hide widgets" : "Show widgets", A_WID_TOGGLE, 0);
     if(set >= 0){ add(m, &k, "Settings", A_APP, 0); m[k - 1].action = A_APP + 100 * (set + 1); }
     add(m, &k, "Sort icons", A_SORT, 1);
     add(m, &k, "About am-droid", A_ABOUT_APP, 0);
@@ -230,6 +279,15 @@ static void do_action(int action, int a, u64 now, int *next_vt){
         }
         case A_SORT:    desk_sort(); break;
         case A_ABOUT_APP:{ int ab = find_app(UI_ICO_ABOUT); if(ab >= 0) launch(ab, now, next_vt); break; }
+        case A_DND:       ui_prefs.dnd = !ui_prefs.dnd; ui_prefs_changed(); break;
+        case A_ISL_RESET: isl_reset_position(); ui_prefs_changed(); break;
+        case A_ISL_SET:   open_settings_page(1, now, next_vt); break;
+        case A_WID_REMOVE: wid_remove(a); break;
+        case A_WID_RESET: wid_reset_positions(); break;
+        case A_WID_TOGGLE: ui_prefs.wid_on = !ui_prefs.wid_on; ui_prefs_changed(); break;
+        case A_WID_SET:   open_settings_page(3, now, next_vt); break;
+        case A_DOCK_TOGGLE: ui_prefs.dock_on = !ui_prefs.dock_on; ui_prefs_changed(); break;
+        case A_DOCK_SET:  open_settings_page(2, now, next_vt); break;
     }
 }
 
@@ -240,9 +298,16 @@ static void on_press(rect_t bar, int n, int sw, int x, int y, u64 now, int *next
         if(cm_click(x, y, &action, &ctx)) do_action(action, ctx, now, next_vt);
         return;                                    /* a click outside only closes the menu */
     }
+    if(pn_which()){
+        if(pn_hit(bar, (u32)sw, x, y)){
+            int a = pn_press(bar, (u32)sw, x, y, now);
+            if(a >= 0) launch(a, now, next_vt);
+            return;
+        }
+        pn_close_outside(now);                       /* a click elsewhere closes it, and still does its job */
+    }
     if(isl_hit(x, y)){
-        int a = isl_click();
-        if(a >= 0) launch(a, now, next_vt);
+        isl_press(x, y);                             /* a click or a drag: decided when the button comes up */
         return;
     }
 
@@ -263,9 +328,20 @@ static void on_press(rect_t bar, int n, int sw, int x, int y, u64 now, int *next
         run_item(it[hi], now, next_vt);
         return;
     }
+    if(tb_clock_hit(bar, x, y)){ pn_toggle(PN_NC, now); return; }
+
+    int dk = dk_hit(x, y);
+    if(dk >= 0){
+        if(win_is_open(dk) && !win_is_min(dk) && win_top_app() == dk) win_minimize(dk);
+        else launch(dk, now, next_vt);
+        return;
+    }
+    if(dk_over(x, y)) return;                        /* the dock's own surface */
 
     int a = win_at(x, y);
     if(a < 0){
+        int wd = wid_at(x, y);
+        if(wd >= 0){ desk_select(-1); wid_press(wd, x, y); return; }
         /* the desktop: icons */
         int open = desk_press(x, y, now);
         if(open >= 0) launch(open, now, next_vt);
@@ -309,11 +385,14 @@ static void compose(box_t box, u64 now, const item_t *it, int n, rect_t bar, int
     if(from < 0){
         wall_draw();
         desk_draw();
+        wid_draw();
     }
     win_draw_all(now, from < 0 ? 0 : from);
+    dk_draw();
     isl_draw(now);
     tb_draw(it, n, bar, hover, hov_amt, win_top_app(), start_open);
     if(start_open) tb_menu_draw(bar, sw, tb_menu_slide(now, start_opened_at), mx, my);
+    pn_draw(bar, sw, now);
     cm_draw(mx, my, now);
     ui_cursor(mx, my);
 }
@@ -322,6 +401,7 @@ static void compose(box_t box, u64 now, const item_t *it, int n, rect_t bar, int
 static void on_key(int c, u64 now, int *next_vt){
     int top = win_top_app();
     if(c == 27 && cm_is_open()){ cm_close(); return; }
+    if(pn_key(c)) return;
     if(start_open){
         int r = tb_menu_key(c);
         if(r >= 0){ launch(r, now, next_vt); return; }
@@ -353,9 +433,12 @@ int gui_run(void){
 
     u32 sw = fb_width(), sh = fb_height();
     scr_w = (int)sw; scr_h = (int)sh;
+    prefs_load();
     wall_init(sw, sh);
     win_init(sw, sh);
     desk_init(sw, sh);
+    wid_init(sw, sh);
+    dk_init(sw, sh);
     gui_damage_all();
 
     /* first notifications: who signed in, and the network */
@@ -394,7 +477,10 @@ int gui_run(void){
             if(ev.pressed & 1) on_press(bar, n, (int)sw, mx, my, now, &next_vt);
             if(ev.pressed & 2) on_right_press(bar, n, (int)sw, (int)sh, mx, my, now);
             held = ev.btns;
-            if(ev.wheel && !cm_is_open() && !start_open){
+            g_mx = mx; g_my = my; g_held = held;
+            if(ev.wheel && pn_which() && pn_hit(bar, sw, mx, my)){
+                pn_scroll(ev.wheel);
+            } else if(ev.wheel && !cm_is_open() && !start_open){
                 int a = win_at(mx, my);
                 if(a >= 0 && ui_apps[a]->scroll){
                     ui_app_enter(a);
@@ -404,6 +490,13 @@ int gui_run(void){
                 }
             }
         }
+        g_mx = mx; g_my = my; g_held = held;
+        {
+            int a = isl_drag(mx, my, held & 1);          /* a click on the island ends here */
+            if(a >= 0) launch(a, now, &next_vt);
+        }
+        wid_update(mx, my, held);
+        pn_update(bar, sw, mx, my, held);
         desk_update(mx, my, held & 1);
         for(int a = 0; a < apps; a++)
             if(win_is_open(a) && ui_apps[a]->tick){ ui_app_enter(a); ui_apps[a]->tick(); ui_app_leave(); }
@@ -437,12 +530,13 @@ int gui_run(void){
         }
 
         /* what the pointer is over, topmost first: a menu, the island, the taskbar, a window, the desktop */
-        int over_menu = cm_inside(mx, my) || (start_open && ui_contains(tb_menu(bar, sw), mx, my));
+        int over_menu = cm_inside(mx, my) || (start_open && ui_contains(tb_menu(bar, sw), mx, my)) || pn_hit(bar, sw, mx, my);
         int hover = over_menu ? -1 : tb_hit(bar, n, mx, my);
-        int over_top = over_menu || hover >= 0 || isl_hit(mx, my);
+        int over_top = over_menu || hover >= 0 || isl_hit(mx, my) || dk_over(mx, my);
         int over_win = over_top ? -1 : win_at(mx, my);
         win_set_pointer(over_top ? -1 : mx, over_top ? -1 : my);
-        desk_set_hover(over_top || over_win >= 0 ? -1 : desk_hit(mx, my));
+        desk_set_hover(over_top || over_win >= 0 || wid_at(mx, my) >= 0 || wid_dragging() ? -1 : desk_hit(mx, my));
+        dk_update(mx, my, over_menu || isl_hit(mx, my), now);
         {
             /* the focused app follows the pointer while it is over its window */
             int tp = win_top_app();
@@ -467,8 +561,12 @@ int gui_run(void){
         if(next_vt) break;
 
         /* every layer reports what changed since it was last drawn */
+        prefs_tick(now);
         isl_update(sw, now, ui_anim_on);
         desk_damage(mx, my);
+        wid_damage(now);
+        dk_damage(now);
+        pn_damage(bar, sw, now);
         win_damage(now);
         isl_damage(now);
         tb_damage(n, bar, hover, hov_amt, win_top_app(), start_open, now);
@@ -493,10 +591,12 @@ int gui_run(void){
                 pixels += (u64)box_area(b);
             }
             fb_clear_base_clip();
-            for(int i = 0; i < ntodo; i++)
+            if(present_all){ fb_present(0, 0, sw, sh); present_all = 0; }
+            else for(int i = 0; i < ntodo; i++)
                 fb_present((u32)todo[i].x0, (u32)todo[i].y0, (u32)(todo[i].x1 - todo[i].x0), (u32)(todo[i].y1 - todo[i].y0));
             perf_frame(sched_tsc() - t0, pixels);
         }
+        if(present_all){ fb_present(0, 0, sw, sh); present_all = 0; }      /* brightness changed with nothing else to draw */
         perf_loop(now);
         proc_sleep_ticks(1);              /* to the next timer tick; programs started from the GUI run meanwhile */
     }

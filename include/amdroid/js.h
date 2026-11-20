@@ -10,17 +10,20 @@
 enum { JS_UNDEF, JS_NULL, JS_BOOL, JS_NUM, JS_STR, JS_OBJ };
 
 typedef struct js_obj js_obj_t;
-typedef struct js_val { int t; double n; int b; const char *s; js_obj_t *o; } js_val_t;
+/* 16 bytes: the type, then the one field that type uses */
+typedef struct js_val { int t; union { double n; int b; const char *s; js_obj_t *o; }; } js_val_t;
 
 typedef js_val_t (*js_native_fn)(js_val_t self, int argc, js_val_t *argv, void *ctx);
 /* Host property hooks: get returns 1 and sets *out when it handles the name. */
 typedef int (*js_get_fn)(js_obj_t *o, const char *name, js_val_t *out);
 typedef int (*js_set_fn)(js_obj_t *o, const char *name, js_val_t v);
 
+void         js_set_heap_size(u32 bytes);         /* before the first js_init (default 8 MB) */
 void         js_init(void);
 void         js_release(void);                    /* frees the script heap */                       /* empties the interpreter (call per page) */
 int          js_run(const char *src, u32 len);    /* 0 on success, -1 on error (see js_error) */
 const char  *js_error(void);
+u32          js_error_at(void);                   /* source offset of a parse error, or 0xFFFFFFFF */
 const char  *js_last_log(void);                   /* the last console.log line */
 /* Compiles a function body (with the parameter names given) into a function value. */
 js_val_t     js_compile_function(const char *src, u32 len, const char *param);
@@ -41,6 +44,7 @@ js_val_t     js_null(void);
 js_val_t     js_bool(int b);
 js_val_t     js_num(double n);
 js_val_t     js_str(const char *s);
+js_val_t     js_str_copy(const char *s, u32 n);    /* a copy in the script heap */
 js_val_t     js_objv(js_obj_t *o);
 js_obj_t    *js_global(void);
 js_obj_t    *js_new_object(void);
@@ -50,10 +54,16 @@ void         js_array_push(js_obj_t *a, js_val_t v);
 void         js_set(js_obj_t *o, const char *name, js_val_t v);
 js_val_t     js_get(js_obj_t *o, const char *name);
 void         js_set_hooks(js_obj_t *o, js_get_fn get, js_set_fn set, void *host);
+void         js_set_proto(js_obj_t *o, js_obj_t *proto);
 void        *js_host(js_obj_t *o);
 js_val_t     js_call(js_val_t fn, js_val_t self, int argc, js_val_t *argv);
 int          js_callable(js_val_t v);
 const char  *js_to_str(js_val_t v);
+/* An ArrayBuffer holding a copy of data, kept as raw bytes until a script looks inside. */
+js_obj_t    *js_new_buffer_bytes(const u8 *data, u32 len);
+/* The bytes of an ArrayBuffer/typed array/DataView: *raw points at them when they are raw
+   (nothing copied), else up to max are copied to out. The length, or -1 for other values. */
+int          js_bytes_of(js_val_t v, const u8 **raw, u8 *out, u32 max);
 double       js_to_num(js_val_t v);
 int          js_truthy(js_val_t v);
 

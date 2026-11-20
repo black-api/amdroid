@@ -1,0 +1,6 @@
+# private notes
+PROGRESS.md
+
+# the OS's virtual disk (may hold account data)
+disk.img
+disk-*-backup.img

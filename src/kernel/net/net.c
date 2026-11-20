@@ -340,7 +340,25 @@ int net_resolve(const char *name, u32 *ip, u32 server, u16 port){
     if(!server) server = dns_ip;
     if(!port) port = 53;
     if(!server) return -1;
-    return dns_query(server, port, name, ip);
+    /* answers from the usual server are kept for 5 minutes: a page's images and scripts
+       come from a handful of hosts, and each lookup is a round trip */
+    #define DNS_CACHE 32
+    static struct { char name[64]; u32 ip; u64 at; } cache[DNS_CACHE];
+    int cacheable = server == dns_ip && port == 53 && strlen(name) < sizeof cache[0].name;
+    u64 now = timer_ticks();
+    if(cacheable){
+        for(int i = 0; i < DNS_CACHE; i++)
+            if(cache[i].ip && strcmp(cache[i].name, name) == 0 && now - cache[i].at < 30000){ *ip = cache[i].ip; return 0; }
+    }
+    int r = dns_query(server, port, name, ip);
+    if(r == 0 && cacheable){
+        int slot = 0;
+        for(int i = 1; i < DNS_CACHE; i++) if(cache[i].at < cache[slot].at) slot = i;
+        strcpy(cache[slot].name, name);
+        cache[slot].ip = *ip;
+        cache[slot].at = now ? now : 1;
+    }
+    return r;
 }
 
 u32 net_dns(void){ return dns_ip; }
@@ -372,12 +390,12 @@ int udp_send(u32 ip, u16 dport, u16 sport, const void *data, u32 len){
 #define TF_RST 0x04
 #define TF_PSH 0x08
 #define TF_ACK 0x10
-#define RXBUF 61440              /* receive buffer, and so the largest window we offer */
+#define RXBUF 65535              /* receive buffer, and so the largest window we offer (no scaling) */
 #define MAX_SOCK 8
 
 enum { TS_FREE = 0, TS_SYN_SENT, TS_ESTABLISHED, TS_CLOSED_BY_PEER, TS_LISTEN, TS_SYN_RCVD };
 
-#define MSS 1000
+#define MSS 1460                 /* full Ethernet frames; announced in our SYN */
 #define OOO_SLOTS 4
 
 typedef struct {
@@ -615,18 +633,24 @@ int net_ping(u32 ip, u32 timeout_ms, u32 *rtt_ms){
 }
 
 static int tcp_seg(tcb_t *s, u32 seq, u8 flags, const u8 *data, u32 len){
-    u8 seg[20 + 1400];
-    if(len > 1400) return -1;
-    memset(seg, 0, 20);
+    u8 seg[24 + MSS];
+    if(len > MSS) return -1;
+    memset(seg, 0, 24);
     put16(seg, s->lport); put16(seg + 2, s->rport);
     put32(seg + 4, seq); put32(seg + 8, s->rcv_nxt);
-    seg[12] = 5 << 4; seg[13] = flags;
+    u32 hl = 20;
+    if(flags & TF_SYN){
+        /* the largest segment we take: without it the peer assumes 536 bytes */
+        seg[20] = 2; seg[21] = 4; put16(seg + 22, MSS);
+        hl = 24;
+    }
+    seg[12] = (u8)((hl / 4) << 4); seg[13] = flags;
     u32 win = s->rx ? RXBUF - s->rx_len : 4096;
     if(win > 65535) win = 65535;
     put16(seg + 14, (u16)win);
     s->adv_wnd = win;
-    memcpy(seg + 20, data, len);
-    u32 total = 20 + len;
+    memcpy(seg + hl, data, len);
+    u32 total = hl + len;
     u16 c = checksum(seg, total, pseudo_sum(my_ip, s->ip, IPPROTO_TCP, (u16)total));
     put16(seg + 16, c);
     return send_ip(s->ip, IPPROTO_TCP, seg, total) ? 0 : -1;

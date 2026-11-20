@@ -1,7 +1,7 @@
 #include "amdroid/heap.h"
 #include "amdroid/types.h"
 
-#define HEAP_SIZE (32*1024*1024)
+#define HEAP_SIZE (96*1024*1024)   /* the browser buffers big pages and, in ultra mode, caches resources */
 static char heap_buf[HEAP_SIZE];
 
 typedef struct block {

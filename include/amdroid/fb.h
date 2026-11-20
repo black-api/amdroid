@@ -25,11 +25,17 @@ void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color);
 /* Lay a w x h picture over what is drawn: each pixel is a colour weighted by its coverage,
  * with the share of the background that shows through in the top byte (255 = all). */
 void fb_blit_over(i32 x, i32 y, u32 w, u32 h, const u32 *src);
+/* ...stretched from sw x sh to dw x dh (bilinear) */
+void fb_blit_over_scaled(i32 x, i32 y, u32 dw, u32 dh, u32 sw, u32 sh, const u32 *src);
+/* Screen brightness 20..100 (%), applied when the picture is shown. */
+void fb_set_brightness(int percent);
 /* Draw into another buffer of w x h pixels for a while, then into the screen again. */
 void fb_target(u32 *buf, u32 w, u32 h);
 void fb_target_screen(void);
 /* Copies rows from physical pages (not contiguous) into the back buffer. */
 void fb_copy_region_pages(u32 x, u32 y, u32 w, u32 h, const u64 *pages, u32 pitch_px);
+/* the same, stretching a sw x sh picture to dw x dh (nearest pixel) */
+void fb_scale_region_pages(i32 x, i32 y, u32 dw, u32 dh, const u64 *pages, u32 sw, u32 sh, u32 pitch_px);
 void fb_clear(u32 color);
 void fb_draw_char(u32 x, u32 y, char c, u32 fg, u32 bg);
 void fb_draw_text(u32 x, u32 y, const char *s, u32 fg, u32 bg);

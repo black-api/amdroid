@@ -8,7 +8,7 @@
 #include "string.h"
 #include "amdroid/js.h"
 
-#define MAX_LISTENERS 64
+#define MAX_LISTENERS 1024          /* real pages (YouTube) and the reader add hundreds */
 
 typedef struct { wnode_t *n; char type[32]; js_val_t fn; } listener_t;
 static listener_t listeners[MAX_LISTENERS];
@@ -31,6 +31,7 @@ const char *web_js_error(void){ return js_err; }
 const char *web_console(void){ return js_last_log(); }
 
 void dom_reset(void){
+    web_active = NULL;
     nlisteners = 0;
     document = NULL;
     dirty = 0;
@@ -46,6 +47,7 @@ void web_set_url(const char *url){
     while(url[k] && k + 1 < sizeof page_url){ page_url[k] = url[k]; k++; }
     page_url[k] = 0;
 }
+const char *web_page_url(void){ return page_url; }
 
 /* Methods every element shares (made once per page; kept alive by the collector root). */
 enum { M_QS, M_QSA, M_BYTAG, M_BYCLASS, M_REMOVE_CHILD, M_REMOVE, M_NOOP, M_INSERT_BEFORE, M_COUNT };
@@ -181,18 +183,63 @@ static js_val_t create_text_node(js_val_t self, int argc, js_val_t *argv, void *
     return js_objv(wrap(n));
 }
 
+static void unlink_child(wnode_t *p, wnode_t *c);
+/* A child list's end pointer, checked: a list that a script left inconsistent is repaired
+ * rather than followed into a crash. */
+static void fix_last(wnode_t *p){
+    if(!p->first){ p->last = NULL; return; }
+    if(!p->last || p->last->next || p->last->parent != p){
+        wnode_t *x = p->first;
+        for(int guard = 0; x->next && guard < 1000000; guard++) x = x->next;
+        p->last = x;
+    }
+}
 static js_val_t append_child(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     if(self.t != JS_OBJ || argc < 1 || argv[0].t != JS_OBJ) return js_undef();
     wnode_t *p = (wnode_t *)js_host(self.o);
     wnode_t *c = (wnode_t *)js_host(argv[0].o);
     if(!p || !c) return js_undef();
+    for(wnode_t *x = p; x; x = x->parent) if(x == c) return argv[0];   /* into itself: a loop */
+    if(c->parent) unlink_child(c->parent, c);      /* moving a node takes it out of its old place */
+    fix_last(p);
     c->next = NULL;
     c->parent = p;
     if(!p->first) p->first = c; else p->last->next = c;
     p->last = c;
     dirty = 1;
     return argv[0];
+}
+
+/* node.cloneNode(deep): a copy of the element (its fields and attributes) and, when deep,
+ * of everything inside it. Script objects and listeners are not copied, as in browsers. */
+static wnode_t *clone_tree(const wnode_t *n, int deep, int depth){
+    wnode_t *c = web_new_node();
+    if(!c) return NULL;
+    wnode_t *keep_attrs = NULL; (void)keep_attrs;
+    *c = *n;
+    c->parent = c->first = c->last = c->next = NULL;
+    c->jsobj = NULL;
+    c->attrs = NULL;
+    for(wattr_t *a = n->attrs; a; a = a->next) wnode_attr_set(c, a->name, a->val ? a->val : "", a->val ? (u32)strlen(a->val) : 0);
+    if(deep && depth < 64){
+        for(const wnode_t *k = n->first; k; k = k->next){
+            wnode_t *kc = clone_tree(k, 1, depth + 1);
+            if(!kc) break;
+            kc->parent = c;
+            if(!c->first) c->first = kc; else c->last->next = kc;
+            c->last = kc;
+        }
+    }
+    return c;
+}
+static js_val_t clone_node(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    if(argc < 1 || argv[0].t != JS_OBJ) return js_null();
+    wnode_t *n = (wnode_t *)js_host(argv[0].o);
+    if(!n) return js_null();
+    wnode_t *c = clone_tree(n, argc > 1 && js_truthy(argv[1]), 0);
+    return c ? js_objv(wrap(c)) : js_null();
 }
 
 /* ---- finding elements ---- */
@@ -269,8 +316,10 @@ static js_val_t m_insert_before(js_val_t self, int argc, js_val_t *argv, void *c
     if(argc < 1 || argv[0].t != JS_OBJ) return js_undef();
     wnode_t *p = self_node(self), *c = (wnode_t *)js_host(argv[0].o);
     wnode_t *ref = argc > 1 && argv[1].t == JS_OBJ ? (wnode_t *)js_host(argv[1].o) : NULL;
-    if(!p || !c) return js_undef();
+    if(!p || !c || c == ref) return argv[0];
+    for(wnode_t *x = p; x; x = x->parent) if(x == c) return argv[0];   /* into itself: a loop */
     if(c->parent) unlink_child(c->parent, c);
+    fix_last(p);
     c->parent = p;
     if(!ref || ref->parent != p){            /* no reference: append */
         c->next = NULL;
@@ -416,6 +465,18 @@ static int style_get(js_obj_t *o, const char *name, js_val_t *out){
     return 1;
 }
 
+/* document.title = "..." changes the page title */
+static int doc_set(js_obj_t *o, const char *name, js_val_t v){
+    (void)o;
+    if(strcmp(name, "title") == 0){
+        const char *t = js_to_str(v);
+        u32 k = 0;
+        while(t[k] && k + 1 < sizeof web_title_buf){ web_title_buf[k] = t[k]; k++; }
+        web_title_buf[k] = 0;
+        return 1;
+    }
+    return 0;
+}
 static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
     (void)o;
     if(strcmp(name, "getElementById") == 0){ *out = js_objv(js_new_native(get_by_id, NULL)); return 1; }
@@ -437,6 +498,13 @@ static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
         return 1;
     }
     if(strcmp(name, "readyState") == 0){ *out = js_str("complete"); return 1; }
+    /* what libraries like jQuery check before anything else */
+    if(strcmp(name, "nodeType") == 0){ *out = js_num(9); return 1; }
+    if(strcmp(name, "nodeName") == 0){ *out = js_str("#document"); return 1; }
+    if(strcmp(name, "defaultView") == 0){ *out = js_objv(js_global()); return 1; }
+    if(strcmp(name, "ownerDocument") == 0){ *out = js_null(); return 1; }
+    if(strcmp(name, "compatMode") == 0){ *out = js_str(web_quirks ? "BackCompat" : "CSS1Compat"); return 1; }
+    if(strcmp(name, "characterSet") == 0 || strcmp(name, "charset") == 0){ *out = js_str("UTF-8"); return 1; }
     if(strcmp(name, "cookie") == 0){ *out = js_str(""); return 1; }
     if(strcmp(name, "location") == 0){ *out = js_get(js_global(), "location"); return 1; }
     return 0;
@@ -445,6 +513,10 @@ static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
 static js_obj_t *wrap(wnode_t *n){
     if(n->jsobj) return (js_obj_t *)n->jsobj;
     js_obj_t *o = js_new_object();
+    /* elements inherit from HTMLElement.prototype (browser_api.inc), so polyfills can patch them */
+    js_val_t he = js_get(js_global(), !n->text && (strcmp(n->tag, "video") == 0 || strcmp(n->tag, "audio") == 0)
+                                          ? "HTMLVideoElement" : "HTMLElement");   /* media_api.js gives video its methods */
+    if(he.t == JS_OBJ){ js_val_t pr = js_get(he.o, "prototype"); if(pr.t == JS_OBJ) js_set_proto(o, pr.o); }
     js_set_hooks(o, elem_get, elem_set, n);
     js_set(o, "appendChild", js_objv(js_new_native(append_child, NULL)));
     js_set(o, "addEventListener", js_objv(js_new_native(add_listener, NULL)));
@@ -491,6 +563,23 @@ static int elem_get(js_obj_t *o, const char *name, js_val_t *out){
         *out = js_objv(a);
         return 1;
     }
+    if(strcmp(name, "firstChild") == 0){ *out = n->first ? js_objv(wrap(n->first)) : js_null(); return 1; }
+    if(strcmp(name, "lastChild") == 0){ *out = n->last ? js_objv(wrap(n->last)) : js_null(); return 1; }
+    if(strcmp(name, "nextSibling") == 0){ *out = n->next ? js_objv(wrap(n->next)) : js_null(); return 1; }
+    if(strcmp(name, "previousSibling") == 0 || strcmp(name, "previousElementSibling") == 0){
+        wnode_t *prev = NULL;
+        int el = name[8] == 'E';
+        for(wnode_t *c = n->parent ? n->parent->first : NULL; c && c != n; c = c->next) if(!el || !c->text) prev = c;
+        *out = prev ? js_objv(wrap(prev)) : js_null();
+        return 1;
+    }
+    if(strcmp(name, "lastElementChild") == 0){
+        wnode_t *last = NULL;
+        for(wnode_t *c = n->first; c; c = c->next) if(!c->text) last = c;
+        *out = last ? js_objv(wrap(last)) : js_null();
+        return 1;
+    }
+    if(strcmp(name, "childElementCount") == 0){ int k = 0; for(wnode_t *c = n->first; c; c = c->next) if(!c->text) k++; *out = js_num(k); return 1; }
     if(strcmp(name, "firstElementChild") == 0){
         wnode_t *c = n->first;
         while(c && c->text) c = c->next;
@@ -504,6 +593,9 @@ static int elem_get(js_obj_t *o, const char *name, js_val_t *out){
         return 1;
     }
     if(strcmp(name, "nodeType") == 0){ *out = js_num(n->text ? 3 : 1); return 1; }
+    if(strcmp(name, "ownerDocument") == 0){ *out = js_objv(document); return 1; }
+    if(strcmp(name, "nodeName") == 0 && n->text){ *out = js_str("#text"); return 1; }
+    if(strcmp(name, "localName") == 0 && !n->text){ *out = js_str(n->tag); return 1; }
     if(strcmp(name, "innerHTML") == 0){
         static char buf[4096];
         u32 len = 0;
@@ -514,7 +606,7 @@ static int elem_get(js_obj_t *o, const char *name, js_val_t *out){
     if(strcmp(name, "href") == 0 && n->href){ *out = js_str(n->href); return 1; }
     if(strcmp(name, "value") == 0){ *out = js_str(n->value ? n->value : ""); return 1; }
     if(strcmp(name, "className") == 0){ *out = js_str(n->cls ? n->cls : ""); return 1; }
-    if(strcmp(name, "tagName") == 0){
+    if(strcmp(name, "tagName") == 0 || strcmp(name, "nodeName") == 0){
         static char up[12];
         u32 k = 0;
         for(; n->tag[k] && k + 1 < sizeof up; k++) up[k] = (n->tag[k] >= 'a' && n->tag[k] <= 'z') ? (char)(n->tag[k] - 32) : n->tag[k];
@@ -549,6 +641,8 @@ static int elem_set(js_obj_t *o, const char *name, js_val_t v){
 }
 
 /* ---- clicks ---- */
+static void request_nav(const char *url);
+const char *web_page_url(void);
 
 int web_dispatch(const void *node, const char *type, const char *key){
     int ran = 0;
@@ -582,7 +676,149 @@ int web_dispatch(const void *node, const char *type, const char *key){
     return ran;
 }
 
-int web_click(const void *node){ return web_dispatch(node, "click", NULL); }
+int web_click(const void *node){
+    /* a click lets the page open a pop-up (window.open) while its handlers run */
+    js_set(js_global(), "__amdroidGesture", js_bool(1));
+    int r = web_dispatch(node, "click", NULL);
+    js_set(js_global(), "__amdroidGesture", js_bool(0));
+    return r;
+}
+
+/* ---- clicked open: menus, <details>, search boxes behind script-only buttons ---- */
+wnode_t *web_active = NULL;
+
+static int is_text_box(const wnode_t *n){
+    if(n->text) return 0;
+    if(strcmp(n->tag, "textarea") == 0) return 1;
+    if(strcmp(n->tag, "input") != 0) return 0;
+    const char *t = wnode_attr_get((wnode_t *)n, "type");
+    return !t || strcmp(t, "text") == 0 || strcmp(t, "search") == 0 || strcmp(t, "email") == 0 || strcmp(t, "url") == 0;
+}
+static wnode_t *find_text_box(wnode_t *n, int depth){
+    for(wnode_t *c = n->first; c; c = c->next){
+        if(c->text) continue;
+        if(is_text_box(c)) return c;
+        if(depth < 12){ wnode_t *r = find_text_box(c, depth + 1); if(r) return r; }
+    }
+    return NULL;
+}
+static int opener(const wnode_t *n){
+    if(n->text) return 0;
+    if(strcmp(n->tag, "button") == 0 || strcmp(n->tag, "summary") == 0) return 1;
+    if(wnode_attr_get((wnode_t *)n, "aria-expanded") || wnode_attr_get((wnode_t *)n, "aria-haspopup")) return 1;
+    const char *r = wnode_attr_get((wnode_t *)n, "role");
+    return r && strcmp(r, "button") == 0;
+}
+
+static int has_word(const char *s, const char *w){
+    if(!s) return 0;
+    u32 wl = (u32)strlen(w);
+    for(; *s; s++){
+        u32 k = 0;
+        while(k < wl && s[k] && (s[k] | 32) == w[k]) k++;
+        if(k == wl) return 1;
+    }
+    return 0;
+}
+static int text_has(const wnode_t *n, const char *w, int depth){
+    for(const wnode_t *c = n->first; c; c = c->next){
+        if(c->text){ char b[64]; u32 k = c->tlen < 63 ? c->tlen : 63; memcpy(b, c->txt, k); b[k] = 0; if(has_word(b, w)) return 1; }
+        else if(depth < 4 && text_has(c, w, depth + 1)) return 1;
+    }
+    return 0;
+}
+static int looks_like_search(const wnode_t *n){
+    return has_word(n->cls, "search") || has_word(n->id, "search") || has_word(wnode_attr_get((wnode_t *)n, "aria-label"), "search") ||
+           (n->parent && has_word(n->parent->cls, "search")) || text_has(n, "search", 0);
+}
+
+const void *web_activate(const void *node){
+    wnode_t *n = (wnode_t *)node;
+    wnode_t *op = n;
+    while(op && !opener(op)) op = op->parent;
+    if(!op){
+        /* a click on something else closes what was open (inside it, it stays) */
+        wnode_t *a = web_active;
+        int inside = 0;
+        for(wnode_t *p = n; p && a; p = p->parent) if(p == a || p == a->parent){ inside = 1; break; }
+        if(web_active && !inside){ web_active = NULL; dirty = 1; }
+        return NULL;
+    }
+    if(strcmp(op->tag, "summary") == 0 && op->parent && strcmp(op->parent->tag, "details") == 0){
+        wnode_t *d = op->parent;
+        if(wnode_attr_get(d, "open")){
+            /* closing: drop the attribute */
+            wattr_t **pp = &d->attrs;
+            while(*pp){ if(strcmp((*pp)->name, "open") == 0){ *pp = (*pp)->next; break; } pp = &(*pp)->next; }
+        } else wnode_attr_set(d, "open", "", 0);
+        dirty = 1;
+        return NULL;
+    }
+    int opening = web_active != op;
+    if(web_active && web_active != op) wnode_attr_set(web_active, "aria-expanded", "false", 5);
+    web_active = opening ? op : NULL;
+    if(wnode_attr_get(op, "aria-expanded")) wnode_attr_set(op, "aria-expanded", opening ? "true" : "false", opening ? 4 : 5);
+    dirty = 1;
+    if(!opening) return NULL;
+    /* a search button that opens its dialog with scripts: show the dialog's text box instead */
+    if(!looks_like_search(op)) return NULL;
+    wnode_t *scope = op;
+    for(int up = 0; up < 4 && scope->parent; up++){
+        scope = scope->parent;
+        wnode_t *box = find_text_box(scope, 0);
+        if(box){
+            for(wnode_t *p = box; p && p != scope; p = p->parent){ p->force_show = 1; p->hidden = 0; }
+            return box;
+        }
+    }
+    return NULL;
+}
+
+/* Enter in a text box: a GET form goes to its action with the fields as a query. */
+static void url_enc(char *out, u32 *k, u32 cap, const char *s){
+    static const char hex[] = "0123456789ABCDEF";
+    for(; s && *s && *k + 4 < cap; s++){
+        unsigned char c = (unsigned char)*s;
+        if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out[(*k)++] = (char)c;
+        else if(c == ' ') out[(*k)++] = '+';
+        else { out[(*k)++] = '%'; out[(*k)++] = hex[c >> 4]; out[(*k)++] = hex[c & 15]; }
+    }
+}
+static void form_fields(wnode_t *n, char *out, u32 *k, u32 cap){
+    for(wnode_t *c = n->first; c; c = c->next){
+        if(c->text) continue;
+        if(strcmp(c->tag, "input") == 0 || strcmp(c->tag, "textarea") == 0){
+            const char *name = wnode_attr_get(c, "name");
+            const char *t = wnode_attr_get(c, "type");
+            if(!name || !name[0]) continue;
+            if(t && (strcmp(t, "submit") == 0 || strcmp(t, "button") == 0 || strcmp(t, "reset") == 0 || strcmp(t, "image") == 0 || strcmp(t, "file") == 0)) continue;
+            if(t && (strcmp(t, "checkbox") == 0 || strcmp(t, "radio") == 0) && !wnode_attr_get(c, "checked")) continue;
+            if(*k + 2 < cap && out[*k - 1] != '?') out[(*k)++] = '&';
+            url_enc(out, k, cap, name);
+            if(*k + 2 < cap) out[(*k)++] = '=';
+            url_enc(out, k, cap, c->value ? c->value : (t && (strcmp(t, "checkbox") == 0 || strcmp(t, "radio") == 0) ? "on" : ""));
+            continue;
+        }
+        form_fields(c, out, k, cap);
+    }
+}
+static void submit_form(wnode_t *box){
+    wnode_t *f = box->parent;
+    while(f && (f->text || strcmp(f->tag, "form") != 0)) f = f->parent;
+    if(!f) return;
+    const char *action = wnode_attr_get(f, "action");
+    char url[1024]; u32 k = 0;
+    for(const char *q = action ? action : ""; *q && *q != '?' && *q != '#' && k + 2 < sizeof url; q++) url[k++] = *q;
+    if(k == 0){
+        /* no action: the page itself (without its query) */
+        const char *self = web_page_url();
+        for(const char *q = self; *q && *q != '?' && *q != '#' && k + 2 < sizeof url; q++) url[k++] = *q;
+    }
+    url[k++] = '?';
+    form_fields(f, url, &k, sizeof url);
+    url[k] = 0;
+    request_nav(url);
+}
 
 /* A key typed into a text box: edits its value and fires keydown and input. */
 int web_is_input(const void *node){
@@ -601,6 +837,12 @@ int web_key_input(const void *node, int c){
     v[len] = 0;
     if(c == '\b'){
         if(len) v[len - 1] = 0;
+    } else if(c == '\n' || c == '\r'){
+        kfree(v);
+        js_take_prevented();
+        web_dispatch(n, "keydown", "Enter");
+        if(!js_take_prevented()) submit_form(n);  /* a search box submits on Enter */
+        return 1;
     } else if(c >= 32 && c <= 126){
         v[len] = (char)c;
         v[len + 1] = 0;
@@ -674,7 +916,8 @@ static js_obj_t *storage(void){
 static js_val_t match_media(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     js_obj_t *o = js_new_object();
-    js_set(o, "matches", js_bool(0));
+    const char *q = argc ? js_to_str(argv[0]) : "";
+    js_set(o, "matches", js_bool(q && q[0] ? css_media_matches(q) : 0));
     js_set(o, "media", argc ? js_str(js_to_str(argv[0])) : js_str(""));
     js_set(o, "addListener", js_objv(methods[M_NOOP]));
     js_set(o, "removeListener", js_objv(methods[M_NOOP]));
@@ -696,6 +939,51 @@ static js_val_t computed_style(js_val_t self, int argc, js_val_t *argv, void *ct
     js_set_hooks(st, style_get, NULL, NULL);
     return js_objv(st);
 }
+
+/* ---- navigation started by a script: location.href = ..., location.assign(...) ---- */
+static char nav_req[1024];
+static int nav_pending = 0;
+static void request_nav(const char *url){
+    u32 k = 0;
+    while(url[k] && k + 1 < sizeof nav_req){ nav_req[k] = url[k]; k++; }
+    nav_req[k] = 0;
+    nav_pending = 1;
+}
+/* The address a script asked to go to (once), or NULL. The browser resolves it. */
+const char *web_take_navigation(void){
+    if(!nav_pending) return NULL;
+    nav_pending = 0;
+    return nav_req;
+}
+static js_val_t loc_assign(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    if(argc > 0) request_nav(js_to_str(argv[0]));
+    return js_undef();
+}
+static js_val_t loc_to_string(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)argc; (void)argv; (void)ctx;
+    return js_str(page_url);
+}
+static int loc_set(js_obj_t *o, const char *name, js_val_t v){
+    (void)o;
+    if(strcmp(name, "href") == 0){ request_nav(js_to_str(v)); return 1; }
+    return 0;
+}
+/* The YouTube reader: on youtube.com the browser reads the page's own data (ytInitialData)
+ * and draws the page itself, instead of running YouTube's 15 MB app. "#full" in the
+ * address runs YouTube's own scripts instead. */
+int web_youtube_reader(void){
+    const char *u = page_url;
+    const char *h = u;
+    if(strncmp(h, "https://", 8) == 0) h += 8; else if(strncmp(h, "http://", 7) == 0) h += 7; else return 0;
+    const char *e = h; while(*e && *e != '/' && *e != '?' && *e != '#' && *e != ':') e++;
+    u32 L = (u32)(e - h);
+    int yt = (L == 11 && strncmp(h, "youtube.com", 11) == 0) || (L >= 12 && strncmp(e - 12, ".youtube.com", 12) == 0);
+    if(!yt) return 0;
+    for(const char *q = u; *q; q++) if(*q == '#' && strncmp(q, "#full", 5) == 0) return 0;
+    return 1;
+}
+#include "youtube_reader.inc"
 
 /* window.location from the page address */
 static js_obj_t *make_location(void){
@@ -738,8 +1026,10 @@ static js_obj_t *make_location(void){
     js_set(l, "hash", js_str(hash));
     js_set(l, "origin", js_str(origin));
     js_set(l, "reload", js_objv(methods[M_NOOP]));
-    js_set(l, "assign", js_objv(methods[M_NOOP]));
-    js_set(l, "replace", js_objv(methods[M_NOOP]));
+    js_set(l, "assign", js_objv(js_new_native(loc_assign, NULL)));
+    js_set(l, "replace", js_objv(js_new_native(loc_assign, NULL)));
+    js_set(l, "toString", js_objv(js_new_native(loc_to_string, NULL)));
+    js_set_hooks(l, NULL, loc_set, NULL);
     return l;
 }
 
@@ -764,6 +1054,7 @@ static void setup_window(void){
     js_set(g, "sessionStorage", js_objv(storage()));
     js_set(g, "matchMedia", js_objv(js_new_native(match_media, NULL)));
     js_set(g, "requestAnimationFrame", js_objv(js_new_native(raf, NULL)));
+    js_set(g, "__amdroidClone", js_objv(js_new_native(clone_node, NULL)));
     js_set(g, "cancelAnimationFrame", js_get(g, "clearTimeout"));
     js_set(g, "getComputedStyle", js_objv(js_new_native(computed_style, NULL)));
     js_obj_t *listen = js_new_native(global_listen, NULL);
@@ -771,9 +1062,11 @@ static void setup_window(void){
     js_set(g, "removeEventListener", js_objv(methods[M_NOOP]));
     js_set(g, "scrollTo", js_objv(methods[M_NOOP]));
     js_set(g, "scrollBy", js_objv(methods[M_NOOP]));
-    js_set(g, "innerWidth", js_num(1280));
-    js_set(g, "innerHeight", js_num(800));
-    js_set(g, "devicePixelRatio", js_num(1));
+    js_set(g, "innerWidth", js_num(css_viewport_w()));
+    js_set(g, "innerHeight", js_num(css_viewport_h()));
+    js_set(g, "outerWidth", js_num(css_viewport_w()));
+    js_set(g, "outerHeight", js_num(css_viewport_h()));
+    js_set(g, "devicePixelRatio", js_num((double)WEB_DPR_NUM / WEB_DPR_DEN));
     js_set(g, "scrollY", js_num(0));
     js_set(g, "pageYOffset", js_num(0));
 }
@@ -790,30 +1083,65 @@ static void fire_global(const char *type){
     }
 }
 
+#include "media_api.inc"
+#include "browser_api.inc"
+static char script_errs[WEB_SCRIPTS_MAX][100];
+/* The error script i stopped with, or "" (for diagnostics). */
+const char *web_script_error(int i){ return i >= 0 && i < WEB_SCRIPTS_MAX ? script_errs[i] : ""; }
+
 void dom_run_scripts(void){
     js_err[0] = 0;
     js_init();
-    void *pool; u32 pool_n;
-    web_pool_range(&pool, &pool_n);
-    js_gc_root(pool, pool_n);
+    web_pool_roots();
     js_gc_root(listeners, sizeof listeners);
     js_gc_root(&document, sizeof document);
     js_gc_root(methods, sizeof methods);
     setup_window();
     document = js_new_object();
-    js_set_hooks(document, doc_get, NULL, NULL);
+    js_set_hooks(document, doc_get, doc_set, NULL);
     js_set(document, "addEventListener", js_get(js_global(), "addEventListener"));
     js_set(document, "removeEventListener", js_objv(methods[M_NOOP]));
     js_set(js_global(), "document", js_objv(document));
+    /* the browser APIs written in JavaScript (browser_api.inc) */
+    js_set_proto(document, js_new_object());
+    if(js_run(browser_api_js, (u32)sizeof browser_api_js - 1) != 0){
+        const char *e = js_error();
+        u32 k = 0;
+        const char *pre = "browser API setup: ";
+        while(pre[k] && k + 1 < sizeof js_err){ js_err[k] = pre[k]; k++; }
+        for(u32 i = 0; e[i] && k + 1 < sizeof js_err; i++) js_err[k++] = e[i];
+        js_err[k] = 0;
+    }
+    /* fetch(), MediaSource, <video> (media_api.js) */
+    media_setup();
+    if(js_run(media_api_js, (u32)sizeof media_api_js - 1) != 0){
+        const char *e = js_error();
+        u32 k = 0;
+        const char *pre = "media API setup: ";
+        while(pre[k] && k + 1 < sizeof js_err){ js_err[k] = pre[k]; k++; }
+        for(u32 i = 0; e[i] && k + 1 < sizeof js_err; i++) js_err[k++] = e[i];
+        js_err[k] = 0;
+    }
     /* each <script> runs on its own: one that fails does not stop the others */
     for(int i = 0; i < web_nscripts && web_js; i++){
+        script_errs[i][0] = 0;
         if(web_script_len[i] == 0) continue;
         if(js_run(web_js + web_script_start[i], web_script_len[i]) != 0){
             const char *e = js_error();
             u32 k = 0;
             while(e[k] && k + 1 < sizeof js_err){ js_err[k] = e[k]; k++; }
             js_err[k] = 0;
+            for(k = 0; e[k] && k + 1 < sizeof script_errs[i]; k++) script_errs[i][k] = e[k];
+            script_errs[i][k] = 0;
         }
+    }
+    if(web_youtube_reader() && js_run(youtube_reader_js, (u32)sizeof youtube_reader_js - 1) != 0){
+        const char *e = js_error();
+        u32 k = 0;
+        const char *pre = "YouTube reader: ";
+        while(pre[k] && k + 1 < sizeof js_err){ js_err[k] = pre[k]; k++; }
+        for(u32 i = 0; e[i] && k + 1 < sizeof js_err; i++) js_err[k++] = e[i];
+        js_err[k] = 0;
     }
     if(web_root) attach_attributes(web_root);
     fire_global("DOMContentLoaded");

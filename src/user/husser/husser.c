@@ -7,6 +7,9 @@
 #include "amdroid/types.h"
 #include "amdroid/husser_proto.h"
 #include "amdroid/web.h"
+#include "amdroid/js.h"
+void heap_init(void *base, u64 bytes);
+void web_layout_release(void);
 #include "string.h"
 
 /* ---- system calls (same numbers as the kernel's syscall table) ---- */
@@ -25,6 +28,7 @@ static i64 sc3(i64 n, i64 a, i64 b, i64 c){
  * the top of the user stack the kernel maps (STACK_TOP in the bridge) */
 __asm__(".global stack_top\nstack_top = 0x7F000000");
 static void sys_exit(i64 code){ sc3(SYS_EXIT, code, 0, 0); for(;;){} }
+static u64 now_ticks(void){ return (u64)sc3(SYS_TICKS, 0, 0, 0); }
 static void idle_sleep(void){ sc3(SYS_SLEEP, 1, 0, 0); }   /* 10 ms: no CPU while idle */
 
 static volatile husser_shm_t *const shm = (husser_shm_t *)HUSSER_SHM_VA;
@@ -44,7 +48,19 @@ static int page_h = 0;
 static u32 scroll = 0;
 static void *hover_node = NULL;
 static void *focus_node = NULL;
-static char sheet_done[16];
+#define SHEETS 48
+static char sheet_done[SHEETS];
+/* Loading: resources arrive one after another; the page is laid out again at most every
+ * LAYOUT_EVERY ticks while they do (and at once when the last one is in), not once per
+ * resource. The first layout waits up to CSS_WAIT ticks for the stylesheets, so the page
+ * does not appear unstyled and then jump. */
+#define LAYOUT_EVERY 30
+#define CSS_WAIT     500
+static u64 last_layout_cost = 0;          /* ticks the last layout took: wait at least twice that */
+static int relayout_pending = 0;
+static int awaiting_css = 0;
+static u64 load_tick = 0, last_layout_tick = 0;
+static u64 now_ticks(void);
 static u32 last_cmd_seq = 0;
 
 void painter_target(u32 *buf, u32 w, u32 h);
@@ -65,10 +81,70 @@ static void str_copy(char *dst, const char *src, u32 cap){
 /* ---- page painting ---- */
 static void paint_frame(void){
     if(!have_page){ painter_clear(0x10181D); return; }
-    painter_clear(0x1C2328);                       /* C_WIN */
+    u32 canvas = 0xFFFFFF;                         /* a page that sets no background is white, as in any browser */
+    web_canvas_bg(&canvas);
+    painter_clear(canvas);                         /* the page background fills the whole window */
     int n = 0;
     const web_cmd_t *cmds = web_cmds(&n);
     painter_cmds(cmds, n, (int)scroll, hover_node);
+    /* the <video> box, where the browser draws the picture (viewport coordinates) */
+    int vx, vy, vw, vh;
+    if(web_video_box(&vx, &vy, &vw, &vh)){ shm->video_x = vx; shm->video_y = vy - (int)scroll; shm->video_w = vw; shm->video_h = vh; }
+    else shm->video_w = 0;
+    shm->video_seq++;
+}
+
+/* ---- fetch() and media: the page's requests go to the browser, its answers come back ---- */
+static int media_inflight = 0;
+static u32 ms_seen = 0;
+static u64 ms_tick = 0;
+static void media_pump(void){
+    /* fetch requests: rewritten whenever the list changes (the browser takes new ids only) */
+    u32 ids[HUSSER_FETCH_MAX];
+    const char *urls[HUSSER_FETCH_MAX];
+    int changed;
+    int n = web_fetch_requests(ids, urls, HUSSER_FETCH_MAX, &changed);
+    if(changed){
+        for(int k = 0; k < n; k++){
+            u8 *ent = (u8 *)(HUSSER_SHM_VA + HUSSER_FETCHQ_OFF + (u64)k * 4096);
+            ent[0] = ids[k] & 255; ent[1] = ids[k] >> 8 & 255; ent[2] = ids[k] >> 16 & 255; ent[3] = ids[k] >> 24;
+            str_copy((char *)ent + 4, urls[k], HUSSER_FETCH_URL);
+        }
+        shm->fetch_count = (u32)n;
+        shm->fetch_seq++;
+    }
+    /* media commands, one at a time */
+    if(media_inflight && shm->media_ack == shm->media_seq){ web_media_acked(shm->ms_seq); media_inflight = 0; }
+    if(!media_inflight){
+        u32 cmd, len; i32 a; i64 t0, t1; const u8 *data;
+        if(web_media_next(&cmd, &a, &t0, &t1, &data, &len)){
+            if(data && len) memcpy((void *)(HUSSER_SHM_VA + HUSSER_MEDIA_OFF), data, len);
+            shm->media_cmd = cmd; shm->media_a = a; shm->media_t0 = t0; shm->media_t1 = t1; shm->media_len = len;
+            web_media_pop();
+            __asm__ volatile("" ::: "memory");
+            shm->media_seq++;
+            media_inflight = 1;
+        }
+    }
+    /* the state, ten times a second, to the page's script */
+    u64 now = now_ticks();
+    if(shm->ms_seq != ms_seen && now >= ms_tick + 10){
+        ms_seen = shm->ms_seq;
+        ms_tick = now;
+        web_mstate_t st;
+        st.seq = shm->ms_seq;
+        st.time_us = shm->ms_time_us; st.duration_us = shm->ms_duration_us;
+        st.playing = shm->ms_playing; st.ended = shm->ms_ended; st.stalled = shm->ms_stalled; st.ready = shm->ms_ready;
+        st.video_w = shm->ms_video_w; st.video_h = shm->ms_video_h;
+        for(int k = 0; k < 2; k++){
+            st.pending[k] = shm->ms_pending[k];
+            st.nranges[k] = shm->ms_nranges[k] > 8 ? 8 : shm->ms_nranges[k];
+            for(u32 i = 0; i < st.nranges[k] * 2; i++) st.ranges[k][i] = shm->ms_ranges[k][i];
+        }
+        st.error_seq = shm->ms_error_seq;
+        st.error = (const char *)shm->ms_error;
+        web_media_state(&st);
+    }
 }
 static void update_stats(void){
     shm->page_h = (u32)page_h;
@@ -118,7 +194,7 @@ static const void *hit_node(i32 x, i32 y, int *out_link){
     int found_link = -1;
     for(int i = 0; i < n; i++){
         const web_cmd_t *c = &cmds[i];
-        if(c->kind != WEB_CMD_TEXT) continue;
+        if(!c->dom) continue;                      /* text, images and element boxes can be hit */
         if(px >= c->x && px < c->x + c->w && py >= c->y && py < c->y + c->h){ found = c->dom; found_link = c->link; }
     }
     *out_link = found_link;
@@ -126,11 +202,34 @@ static const void *hit_node(i32 x, i32 y, int *out_link){
 }
 
 /* ---- resources: the browser fetches, we decode ---- */
+static int sheets_pending(void){
+    int ns = web_stylesheet_count(), n = 0;
+    for(int i = 0; i < ns && i < SHEETS; i++){
+        if(sheet_done[i]) continue;
+        const char *href = web_stylesheet(i);
+        if(!href || !href[0] || starts(href, "data:")){ sheet_done[i] = 1; continue; }
+        n++;
+    }
+    return n;
+}
+/* Anything the page still waits for (stylesheets, scripts, images). */
+static int outstanding(void){
+    int n = sheets_pending() + web_scripts_pending();
+    int ni = web_image_count();
+    for(int i = 0; i < ni; i++){
+        if(web_image_state(i) != 0 || !web_image_wanted(i)) continue;
+        const char *href = web_image(i);
+        if(href && href[0] && !starts(href, "data:")) n++;
+    }
+    return n;
+}
+
 static void emit_needs(void){
     if(!have_page) return;
     u32 slot = 0;
+    /* stylesheets first: the first layout waits for them */
     int ns = web_stylesheet_count();
-    for(int i = 0; i < ns && slot < HUSSER_NEED_MAX && i < 16; i++){
+    for(int i = 0; i < ns && slot < HUSSER_NEED_MAX && i < SHEETS; i++){
         if(sheet_done[i]) continue;
         const char *href = web_stylesheet(i);
         if(!href || !href[0] || starts(href, "data:")){ sheet_done[i] = 1; continue; }
@@ -139,12 +238,24 @@ static void emit_needs(void){
         str_copy(shm->need[slot].url, href, HUSSER_URL_NEED);
         slot++;
     }
+    /* then scripts: the page's scripts run once every external one is here */
+    int nsc = web_script_count();
+    for(int i = 0; i < nsc && slot < HUSSER_NEED_MAX; i++){
+        const char *src = web_script_src(i);
+        if(!src) continue;
+        if(starts(src, "data:")){ web_add_script(i, "", 0); continue; }
+        shm->need[slot].kind = 3;
+        shm->need[slot].idx = (u32)i;
+        str_copy(shm->need[slot].url, src, HUSSER_URL_NEED);
+        slot++;
+    }
+    if(nsc && !web_scripts_pending() && web_run_scripts()) relayout_pending = 1;
     int ni = web_image_count();
     for(int i = 0; i < ni && slot < HUSSER_NEED_MAX; i++){
-        if(web_image_state(i) != 0) continue;
+        if(web_image_state(i) != 0 || !web_image_wanted(i)) continue;   /* only images a layout showed */
         const char *href = web_image(i);
         if(!href || !href[0]) continue;
-        if(starts(href, "data:")){ web_add_image_data_url(i, href); continue; }
+        if(starts(href, "data:")){ web_add_image_data_url(i, href); relayout_pending = 1; continue; }
         shm->need[slot].kind = 2;
         shm->need[slot].idx = (u32)i;
         str_copy(shm->need[slot].url, href, HUSSER_URL_NEED);
@@ -154,9 +265,28 @@ static void emit_needs(void){
     shm->need_seq++;
 }
 
+/* Lays the page out again and shows it. */
+static void emit_needs(void);
+static void layout_now(void){
+    u64 t0 = now_ticks();
+    page_h = web_layout((int)shm->vw);
+    laid_width = (int)shm->vw;
+    web_clear_dirty();
+    scroll = clamp_scroll(scroll);
+    paint_frame();
+    frame_ready();
+    relayout_pending = 0;
+    last_layout_tick = now_ticks();
+    last_layout_cost = last_layout_tick - t0;
+    emit_needs();                             /* the layout may have shown images not asked for yet */
+}
+
 static void load_page(u32 len, u32 initial_scroll){
     if(len > HUSSER_PAGE_BYTES) len = HUSSER_PAGE_BYTES;
     web_set_url((const char *)shm->page_url);
+    web_set_viewport((int)shm->vw, (int)shm->vh);
+    web_set_adblock((int)shm->adblock);
+    web_layout_release();                     /* nothing of the old page can be hit or painted */
     if(web_load((const char *)PAGE_SRC, len) != 0){
             str_copy((char *)shm->js_error, "This page could not be parsed.", HUSSER_MSG_MAX);
         shm->js_error_seq++;
@@ -166,31 +296,43 @@ static void load_page(u32 len, u32 initial_scroll){
     have_page = 1;
     focus_node = hover_node = NULL;
     shm->input_focus = 0;
-    for(int i = 0; i < 16; i++) sheet_done[i] = 0;
-    page_h = web_layout((int)shm->vw);
-    laid_width = (int)shm->vw;
-    scroll = clamp_scroll(initial_scroll);
-    paint_frame();
-    frame_ready();
+    /* the last page's script error and console line are not this page's */
+    if(shm->js_error[0]){ shm->js_error[0] = 0; shm->js_error_seq++; }
+    if(shm->console[0]){ shm->console[0] = 0; shm->console_seq++; }
+    for(int i = 0; i < SHEETS; i++) sheet_done[i] = 0;
+    load_tick = now_ticks();
+    relayout_pending = 0;
+    scroll = initial_scroll;
+    awaiting_css = sheets_pending() > 0;
     emit_needs();
+    if(!awaiting_css) layout_now();
+    else update_stats();                      /* the title shows while the stylesheets come */
 }
 
 static void res_done(void){
     if(!have_page) return;
     u32 kind = shm->res_kind, idx = shm->res_idx, len = shm->res_len;
-    if(len != RES_FAIL){
-        if(kind == 1 && idx < 16){ web_add_css((const char *)RES_SRC, len); sheet_done[idx] = 1; }
-        else if(kind == 2){ web_add_image((int)idx, (const char *)RES_SRC, len); }
-        else { if(kind == 1 && idx < 16) sheet_done[idx] = 1; }
-    } else {
-        if(kind == 1 && idx < 16) sheet_done[idx] = 1;      /* the failed sheet is left out */
-        else if(kind == 2) web_add_image((int)idx, "", 0);  /* the failed image shows its alt text */
+    if(kind == 4){                                      /* a script's fetch(): its promise settles */
+        web_fetch_done(idx, shm->res_status, RES_SRC, len == RES_FAIL ? 0 : len, len == RES_FAIL);
+        if(web_dirty()) relayout_pending = 1;
+        return;
     }
-    page_h = web_layout((int)shm->vw);
-    laid_width = (int)shm->vw;
-    paint_frame();
-    frame_ready();
-    emit_needs();
+    if(len != RES_FAIL){
+        if(kind == 1 && idx < SHEETS){ web_add_css_at((int)idx, (const char *)RES_SRC, len); sheet_done[idx] = 1; }
+        else if(kind == 2){ web_add_image((int)idx, (const char *)RES_SRC, len); }
+        else if(kind == 3){ web_add_script((int)idx, (const char *)RES_SRC, len); }
+    } else {
+        if(kind == 1 && idx < SHEETS) sheet_done[idx] = 1;  /* the failed sheet is left out */
+        else if(kind == 2) web_add_image((int)idx, "", 0);  /* the failed image shows its alt text */
+        else if(kind == 3) web_add_script((int)idx, "", 0); /* the failed script is skipped */
+    }
+    relayout_pending = 1;
+    emit_needs();                                       /* the browser fetches the next ones meanwhile */
+    if(awaiting_css){
+        if(sheets_pending() == 0){ awaiting_css = 0; layout_now(); }
+        return;
+    }
+    if(outstanding() == 0 || now_ticks() >= last_layout_tick + LAYOUT_EVERY + 2 * last_layout_cost) layout_now();
 }
 
 static void do_click(i32 x, i32 y){
@@ -198,16 +340,18 @@ static void do_click(i32 x, i32 y){
     const void *node = hit_node(x, y, &link);
     if(node){
         web_click(node);
-        if(web_is_input(node)){ focus_node = (void *)node; shm->input_focus = 1; relayout_if_dirty(); frame_ready(); return; }
+        if(web_is_input(node)){ focus_node = (void *)node; shm->input_focus = 1; web_activate(node); relayout_if_dirty(); frame_ready(); return; }
         focus_node = NULL;
         shm->input_focus = 0;
         if(web_take_prevented()){ relayout_if_dirty(); frame_ready(); return; }
-        if(link >= 0){
-            const char *href = web_link(link);
-            if(href && href[0] && !starts(href, "javascript:") && !starts(href, "mailto:")){
-                str_copy((char *)shm->nav_url, href, HUSSER_URL_MAX);
-                shm->nav_seq++;
-            }
+        const char *href = link >= 0 ? web_link(link) : NULL;
+        if(href && href[0] && !starts(href, "javascript:") && !starts(href, "mailto:") && !(href[0] == '#' && href[1] == 0)){
+            str_copy((char *)shm->nav_url, href, HUSSER_URL_MAX);
+            shm->nav_seq++;
+        } else {
+            /* not a link: buttons open their menus, a search button shows its box */
+            const void *box = web_activate(node);
+            if(box && web_is_input(box)){ focus_node = (void *)box; shm->input_focus = 1; }
         }
         relayout_if_dirty();
         frame_ready();
@@ -215,6 +359,7 @@ static void do_click(i32 x, i32 y){
     }
     focus_node = NULL;
     shm->input_focus = 0;
+    web_activate(NULL);                           /* a click on nothing closes an open menu */
     relayout_if_dirty();
     frame_ready();
 }
@@ -255,6 +400,9 @@ void _start(void){
 
 void husser_main(void){
     if(shm->magic != HUSSER_MAGIC || shm->ver != HUSSER_VER) sys_exit(3);
+    heap_init((void *)HUSSER_HEAP_VA, shm->heap_bytes);
+    /* the script heap: most of the memory in ultra mode, so the collector rarely runs */
+    js_set_heap_size(shm->ultra ? (200u << 20) : (shm->heap_bytes >= (208u << 20) ? (104u << 20) : (shm->heap_bytes / 2)));
     set_size(shm->vw, shm->vh);
     shm->state = H_STATE_BOOT;
 
@@ -290,7 +438,30 @@ void husser_main(void){
             shm->ack_seq = last_cmd_seq;      /* the sender waits for this */
         }
         if(have_page){
-            if(web_tick()){ relayout_if_dirty(); frame_ready(); }
+            /* a script navigated (location.href = ...): the browser loads it */
+            const char *to = web_take_navigation();
+            if(to && to[0]){ str_copy((char *)shm->nav_url, to, HUSSER_URL_MAX); shm->nav_seq++; }
+        }
+        if(have_page){
+            /* the stylesheets are late: show the page without them */
+            u64 t = now_ticks();
+            if(awaiting_css && t >= load_tick + CSS_WAIT){ awaiting_css = 0; layout_now(); }
+            /* resources that came in since the last layout */
+            if(relayout_pending && !awaiting_css && t >= last_layout_tick + LAYOUT_EVERY + 2 * last_layout_cost) layout_now();
+        }
+        if(have_page) media_pump();
+        if(have_page && !awaiting_css){
+            /* scripts changed the page from a timer: lay it out again at most 4 times a second */
+            static u64 last_timer_layout = 0;
+            static int pending = 0;
+            if(web_tick() || web_dirty()) pending = 1;
+            u64 now = (u64)sc3(SYS_TICKS, 0, 0, 0);
+            if(pending && now >= last_timer_layout + 25){
+                pending = 0;
+                last_timer_layout = now;
+                relayout_if_dirty();
+                frame_ready();
+            }
         }
         idle_sleep();
     }

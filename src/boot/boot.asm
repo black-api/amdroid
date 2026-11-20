@@ -103,7 +103,7 @@ _start:
     testl $(1<<29), %edx
     jz no_longmode
 
-    # Set up paging: identity map the first 256MB (2MB huge pages)
+    # Set up paging: identity map the first 1GB (2MB huge pages, one full PD)
     # PML4[0] -> PDPT
     movl $pdpt, %eax
     orl $0x3, %eax
@@ -115,7 +115,7 @@ _start:
     orl $0x3, %eax
     movl %eax, pdpt
 
-    # PD: 2MB huge pages identity map first 256MB
+    # PD: 2MB huge pages identity map the first 1GB (the page allocator stays below it)
     movl $pd, %edi
     movl $0, %ecx
 2:
@@ -126,7 +126,7 @@ _start:
     movl $0, 4(%edi)
     addl $8, %edi
     incl %ecx
-    cmpl $128, %ecx
+    cmpl $512, %ecx
     jl 2b
 
     # Enable PAE

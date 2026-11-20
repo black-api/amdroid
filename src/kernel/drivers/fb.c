@@ -190,6 +190,42 @@ void fb_blit_over(i32 x, i32 y, u32 w, u32 h, const u32 *src){
     touch(y0, y1);
 }
 
+/* The same picture stretched to dw x dh (bilinear, in the weighted-colour form, so the edges
+ * stay smooth). Used to magnify icons. */
+void fb_blit_over_scaled(i32 x, i32 y, u32 dw, u32 dh, u32 sw, u32 sh, const u32 *src){
+    if(!ready || !src || !dw || !dh) return;
+    u32 x0, y0, x1, y1;
+    cut(&x0, &y0, &x1, &y1, x, y, dw, dh, cx0, cy0, cx1, cy1);
+    if(x1 <= x0) return;
+    /* source coordinates in 16.16, stepped instead of divided for every pixel */
+    i32 stx = (i32)((sw << 16) / dw), sty = (i32)((sh << 16) / dh);
+    i32 maxx = (i32)((sw - 1) << 16), maxy = (i32)((sh - 1) << 16);
+    for(u32 yy = y0; yy < y1; yy++){
+        i32 fy = (i32)(yy - (u32)y) * sty + (sty >> 1) - 0x8000;
+        if(fy < 0) fy = 0; else if(fy > maxy) fy = maxy;
+        u32 sy0 = (u32)fy >> 16, ty = ((u32)fy >> 8) & 255;
+        u32 sy1 = sy0 + 1 < sh ? sy0 + 1 : sy0;
+        const u32 *r0 = src + (u64)sy0 * sw, *r1 = src + (u64)sy1 * sw;
+        u32 *p = backbuf + (u64)yy * fb_w + x0;
+        i32 fx = (i32)(x0 - (u32)x) * stx + (stx >> 1) - 0x8000;
+        for(u32 xx = x0; xx < x1; xx++, p++, fx += stx){
+            i32 cfx = fx < 0 ? 0 : fx > maxx ? maxx : fx;
+            u32 sx0 = (u32)cfx >> 16, tx = ((u32)cfx >> 8) & 255;
+            u32 sx1 = sx0 + 1 < sw ? sx0 + 1 : sx0;
+            u32 w00 = (256 - tx) * (256 - ty), w10 = tx * (256 - ty), w01 = (256 - tx) * ty, w11 = tx * ty;
+            u32 a = r0[sx0], b = r0[sx1], c = r1[sx0], d = r1[sx1];
+            u32 t = ((a >> 24) * w00 + (b >> 24) * w10 + (c >> 24) * w01 + (d >> 24) * w11) >> 16;
+            if(t >= 255) continue;
+            u32 r = (((a >> 16) & 255) * w00 + ((b >> 16) & 255) * w10 + ((c >> 16) & 255) * w01 + ((d >> 16) & 255) * w11) >> 16;
+            u32 g = (((a >> 8) & 255) * w00 + ((b >> 8) & 255) * w10 + ((c >> 8) & 255) * w01 + ((d >> 8) & 255) * w11) >> 16;
+            u32 bl = ((a & 255) * w00 + (b & 255) * w10 + (c & 255) * w01 + (d & 255) * w11) >> 16;
+            u32 col = (r << 16) | (g << 8) | bl;
+            *p = t ? col + mix(0, *p, t + (t >> 7)) : col;
+        }
+    }
+    touch(y0, y1);
+}
+
 /* Drawing can be pointed at another buffer for a while (to prepare a picture once and
  * reuse it), then back at the screen. */
 static struct { u32 *buf; u32 w, h, bx0, by0, bx1, by1, cx0, cy0, cx1, cy1, d0, d1; } screen;
@@ -243,6 +279,48 @@ void fb_copy_region_pages(u32 x, u32 y, u32 w, u32 h, const u64 *pages, u32 pitc
     touch(y0, y1);
 }
 
+/* Like fb_copy_region_pages, but the sw x sh picture is stretched to dw x dh (nearest
+ * pixel). Rows are gathered into a line buffer first (a row of the picture can cross
+ * pages), and a destination row that repeats the one above is copied whole. Used for
+ * video: the decoder converts at the video's own size and the stretch happens here, in
+ * the copy that has to be made anyway. */
+void fb_scale_region_pages(i32 x, i32 y, u32 dw, u32 dh, const u64 *pages, u32 sw, u32 sh, u32 pitch_px){
+    if(!ready || !pages || !pitch_px || !sw || !sh || !dw || !dh) return;
+    u32 x0, y0, x1, y1;
+    cut(&x0, &y0, &x1, &y1, x, y, dw, dh, cx0, cy0, cx1, cy1);
+    if(x1 <= x0) return;
+    static u32 line[4096];
+    static u32 xmap[4096];
+    static u32 map_sw = 0, map_dw = 0;
+    if(sw > 4096 || dw > 4096) return;
+    if(map_sw != sw || map_dw != dw){
+        for(u32 i = 0; i < dw; i++){ u32 sx = (u32)(((u64)(2 * i + 1) * sw) / (2 * dw)); xmap[i] = sx < sw ? sx : sw - 1; }
+        /* (x may be left of the clip: xmap is indexed from the picture's own left edge) */
+        map_sw = sw; map_dw = dw;
+    }
+    i64 last_sy = -1;
+    for(u32 yy = y0; yy < y1; yy++){
+        u32 sy = (u32)(((u64)(2 * ((i64)yy - y) + 1) * sh) / (2 * dh));
+        if(sy >= sh) sy = sh - 1;
+        u32 *dst = backbuf + (u64)yy * fb_w;
+        if((i64)sy == last_sy && yy > y0){ memcpy(dst + x0, dst - fb_w + x0, (x1 - x0) * 4); continue; }
+        /* the source row, whole */
+        u64 off = (u64)sy * pitch_px * 4;
+        u32 left = sw * 4;
+        u8 *lp = (u8 *)line;
+        while(left){
+            u64 page = off / 4096;
+            u32 in = (u32)(off % 4096), take = 4096 - in;
+            if(take > left) take = left;
+            memcpy(lp, (const u8 *)(unsigned long)(pages[page] + in), take);
+            lp += take; off += take; left -= take;
+        }
+        for(u32 xx = x0; xx < x1; xx++) dst[xx] = line[xmap[(i64)xx - x]];
+        last_sy = sy;
+    }
+    touch(y0, y1);
+}
+
 void fb_draw_char(u32 x, u32 y, char c, u32 fg, u32 bg){
     if(!ready) return;
     if((unsigned char)c > 127) c = '?';
@@ -270,13 +348,33 @@ void fb_draw_text(u32 x, u32 y, const char *s, u32 fg, u32 bg){
 
 /* Shows part of the back buffer on the screen. The hardware pitch (bytes per row)
  * may be more than w*4. */
+/* Screen brightness, 256 = full. Applied while the picture is copied to the screen. */
+static u32 bright = 256;
+void fb_set_brightness(int percent){
+    if(percent < 20) percent = 20;
+    if(percent > 100) percent = 100;
+    bright = (u32)percent * 256 / 100;
+}
+
 void fb_present(u32 x, u32 y, u32 w, u32 h){
     if(!ready) return;
     u32 x0, y0, x1, y1;
     cut(&x0, &y0, &x1, &y1, x, y, w, h, 0, 0, fb_w, fb_h);
     if(x1 <= x0) return;
-    for(u32 yy = y0; yy < y1; yy++)
-        memcpy((u8*)fb_addr + (u64)yy * fb_pitch + (u64)x0 * 4, backbuf + (u64)yy * fb_w + x0, (size_t)(x1 - x0) * 4);
+    if(bright >= 256){
+        for(u32 yy = y0; yy < y1; yy++)
+            memcpy((u8*)fb_addr + (u64)yy * fb_pitch + (u64)x0 * 4, backbuf + (u64)yy * fb_w + x0, (size_t)(x1 - x0) * 4);
+        return;
+    }
+    /* dimmed: every pixel is scaled on its way to the screen; the back buffer stays untouched */
+    for(u32 yy = y0; yy < y1; yy++){
+        const u32 *s = backbuf + (u64)yy * fb_w + x0;
+        u32 *d = (u32*)((u8*)fb_addr + (u64)yy * fb_pitch) + x0;
+        for(u32 n = x1 - x0; n; n--, s++, d++){
+            u32 p = *s;
+            *d = ((((p & 0xFF00FF) * bright) >> 8) & 0xFF00FF) | ((((p & 0x00FF00) * bright) >> 8) & 0x00FF00);
+        }
+    }
 }
 
 /* Shows the rows that were drawn to since the last call. */

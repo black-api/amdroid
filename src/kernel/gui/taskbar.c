@@ -23,6 +23,7 @@ int tb_items(item_t *it){
     it[n++] = (item_t){ IT_SEARCH, 0 };
     for(int a = 0; a < ui_app_count(); a++) it[n++] = (item_t){ IT_APP, a };
     it[n++] = (item_t){ IT_TERM, 0 };
+    it[n++] = (item_t){ IT_CC, 0 };
     return n;
 }
 
@@ -37,6 +38,10 @@ int tb_hit(rect_t bar, int n, int x, int y){
     for(int i = 0; i < n; i++)
         if(ui_contains(tb_item(bar, i), x, y)) return i;
     return -1;
+}
+
+int tb_clock_hit(rect_t bar, int x, int y){
+    return ui_contains((rect_t){ bar.x + bar.w - BAR_CLOCK_W, bar.y + 4, BAR_CLOCK_W - 10, bar.h - 8 }, x, y);
 }
 
 /* ---- live system stats (real measurements, sampled twice a second) ----
@@ -69,18 +74,22 @@ static void tb_stats(u64 now){
     st_sampled = 1;
 }
 
+u32 tb_cpu_tenths(void){ return st_cpu; }
+u32 tb_ram_pct(void){ return st_ram_pct; }
+
 /* The bar is redrawn when anything it shows changes: the numbers, the clock, the icon under
  * the pointer, which apps are open and which one has the focus. The label over an icon is
  * part of it. */
 #define TIP_H 44
 void tb_damage(int n, rect_t bar, int hover, int hover_amt, int top, int start_open, u64 now){
-    static int sh_hover = -1, sh_amt, sh_top = -1, sh_start, sh_open;
+    static int sh_hover = -1, sh_amt, sh_top = -1, sh_start, sh_open, sh_pn;
     static u32 sh_cpu, sh_ram;
     static char sh_clock[8];
     tb_stats(now);
     int open = 0;
     for(int a = 0; a < ui_app_count(); a++) if(win_is_open(a)) open |= 1 << a;
-    int icons = hover == sh_hover && hover_amt == sh_amt && top == sh_top && start_open == sh_start && open == sh_open;
+    int pn = pn_which();
+    int icons = hover == sh_hover && hover_amt == sh_amt && top == sh_top && start_open == sh_start && open == sh_open && pn == sh_pn;
     int numbers = st_cpu == sh_cpu && st_ram_pct == sh_ram && ui_streq(st_clock, sh_clock);
     if(icons && numbers) return;
     if(icons){
@@ -88,7 +97,7 @@ void tb_damage(int n, rect_t bar, int hover, int hover_amt, int top, int start_o
         int sx = (int)(bar.x + BAR_PAD + (u32)n * BAR_ITEM);
         gui_damage(sx, (int)bar.y + 2, (int)(bar.x + bar.w) - sx - 16, (int)bar.h - 4);
     } else gui_damage((int)bar.x - 48, (int)bar.y - TIP_H, (int)bar.w + 96, (int)bar.h + TIP_H);
-    sh_hover = hover; sh_amt = hover_amt; sh_top = top; sh_start = start_open; sh_open = open;
+    sh_hover = hover; sh_amt = hover_amt; sh_top = top; sh_start = start_open; sh_open = open; sh_pn = pn;
     sh_cpu = st_cpu; sh_ram = st_ram_pct;
     ui_copy(sh_clock, st_clock, sizeof sh_clock);
 }
@@ -105,6 +114,7 @@ void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int 
         if(it[i].kind == IT_START){ ico = UI_ICO_START; if(start_open) col = ui_accent(); }
         else if(it[i].kind == IT_SEARCH){ ico = UI_ICO_SEARCH; }
         else if(it[i].kind == IT_TERM){ ico = UI_ICO_TERM; }
+        else if(it[i].kind == IT_CC){ ico = UI_ICO_CC; if(pn_which() == PN_CC) col = ui_accent(); }
         else {
             ico = ui_apps[it[i].app]->icon;
             if(it[i].app == top) col = ui_accent();
@@ -135,12 +145,12 @@ void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int 
         ui_text(sx + 16, bar.y + 25, ram, C_MUTED, 1);
         u32 cw = ui_text_w(st_clock, UI_SCALE);
         int ty = (int)bar.y + ((int)bar.h - (int)UI_CH) / 2;
-        ui_text(bar.x + bar.w - cw - 20, (u32)ty, st_clock, C_MUTED, UI_SCALE);
+        ui_text(bar.x + bar.w - cw - 20, (u32)ty, st_clock, pn_which() == PN_NC ? ui_accent() : C_MUTED, UI_SCALE);
     }
     /* a label over the icon under the pointer, once the hover has faded in */
     if(hover >= 0 && hover < n && hover_amt > 160){
         const char *label = it[hover].kind == IT_START ? "Start" : it[hover].kind == IT_SEARCH ? "Search" :
-                            it[hover].kind == IT_TERM ? "Terminal" : ui_apps[it[hover].app]->name;
+                            it[hover].kind == IT_TERM ? "Terminal" : it[hover].kind == IT_CC ? "Control Center" : ui_apps[it[hover].app]->name;
         rect_t r = tb_item(bar, hover);
         u32 lw = ui_text_w(label, 1) + 24;
         u32 lx = r.x + r.w / 2 - lw / 2;

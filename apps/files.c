@@ -184,25 +184,41 @@ static void draw_viewer(rect_t b){
     }
 }
 
+/* 1234 -> "1.2 KB" */
+static void fmt_size(u32 n, char *out){
+    out[0] = 0;
+    if(n < 1024){ ui_num(n, out); ui_cat(out, " B"); return; }
+    u32 unit = n < 1024 * 1024 ? 1024 : 1024 * 1024;
+    u32 whole = n / unit, tenth = (n % unit) * 10 / unit;
+    char t[12];
+    ui_num(whole, t); ui_cat(out, t);
+    if(whole < 100){ ui_cat(out, "."); ui_num(tenth, t); ui_cat(out, t); }
+    ui_cat(out, unit == 1024 ? " KB" : " MB");
+}
+
 static void f_draw(rect_t b, int focused){
     (void)focused;
     last_body = b;
     if(vbuf){ draw_viewer(b); return; }
 
+    /* where we are, and how much is here */
     char p[PATH_LEN + 4] = "/";
     ui_cat(p, path);
-    ui_text(b.x, b.y + 4, p, C_TEXT, UI_SCALE);
+    ui_text(b.x, b.y + 4, p, ui_accent(), UI_SCALE);
     char cnt[24] = "";
     ui_num((u32)nents, cnt);
     ui_cat(cnt, nents == 1 ? " item" : " items");
-    ui_text(b.x + ui_text_w(p, UI_SCALE) + 20, b.y + 14, cnt, C_DIM, 1);
-    rect_t upb = ui_button(b, 150);
-    ui_rrect(upb.x, upb.y, upb.w, upb.h, 10, C_CARD_HI);
-    ui_text(upb.x + (upb.w - ui_text_w("Up", UI_SCALE)) / 2, upb.y + 4, "Up", path[0] ? C_TEXT : C_DIM, UI_SCALE);
+    ui_text(b.x + ui_text_w(p, UI_SCALE) + 20, b.y + 14, cnt, C_MUTED, 1);
+    /* Up: lit when there is a folder above */
+    rect_t upb = ui_button(b, 110);
+    int can_up = path[0] != 0;
+    ui_rrect(upb.x, upb.y, upb.w, upb.h, 10, can_up ? ui_accent() : C_CARD);
+    ui_text(upb.x + (upb.w - ui_text_w("Up", UI_SCALE)) / 2, upb.y + 4, "Up", can_up ? 0x0A0E12 : C_DIM, UI_SCALE);
 
     rect_t hd = ui_list_head(b);
-    ui_text(hd.x + 20, hd.y + 4, "Name", C_DIM, UI_SCALE);
-    ui_text_right((rect_t){ hd.x, hd.y, hd.w - 20, hd.h }, hd.y + 4, "Size", C_DIM, UI_SCALE);
+    ui_text(hd.x + 60, hd.y + 4, "Name", C_MUTED, UI_SCALE);
+    ui_text_right((rect_t){ hd.x, hd.y, hd.w - 20, hd.h }, hd.y + 4, "Size", C_MUTED, UI_SCALE);
+    ui_fill((rect_t){ hd.x, hd.y + hd.h - 2, hd.w, 1 }, C_SEP);
 
     int rows = ui_list_rows(b);
     for(int i = 0; i < rows; i++){
@@ -210,17 +226,29 @@ static void f_draw(rect_t b, int focused){
         if(idx >= nents) break;
         rect_t r = ui_list_row(b, i);
         int hot = idx == sel;
-        ui_fill(r, hot ? C_CARD_HI : C_CARD);
-        if(hot) ui_fill((rect_t){ r.x, r.y, 4, r.h }, ui_accent());
+        ui_rrect(r.x, r.y + 1, r.w, r.h - 2, 8, hot ? C_CARD_HI : (i & 1) ? 0x1F282E : C_CARD);
+        if(hot) ui_fill((rect_t){ r.x, r.y + 8, 4, r.h - 16 }, ui_accent());
         u32 ty = r.y + (r.h - UI_CH) / 2;
-        ui_text(r.x + 20, ty, ents[idx].name, ents[idx].is_dir ? ui_accent() : C_TEXT, UI_SCALE);
+        ui_icon(ents[idx].is_dir ? UI_ICO_FILES : UI_ICO_NOTES, r.x + 14, r.y + (r.h - 32) / 2,
+                ents[idx].is_dir ? ui_accent() : C_MUTED);
+        ui_text(r.x + 60, ty, ents[idx].name, ents[idx].is_dir ? ui_accent() : C_TEXT, UI_SCALE);
         char sz[16] = "";
-        if(ents[idx].is_dir) ui_cat(sz, "<DIR>");
-        else { ui_num(ents[idx].size, sz); ui_cat(sz, " B"); }
+        if(ents[idx].is_dir) ui_cat(sz, "folder");
+        else fmt_size(ents[idx].size, sz);
         ui_text_right((rect_t){ r.x, r.y, r.w - 20, r.h }, ty, sz, C_MUTED, UI_SCALE);
     }
-    if(nents == 0)
-        ui_text(b.x + 20, ui_list_row(b, 0).y + 4, "(this folder is empty)", C_MUTED, UI_SCALE);
+    if(nents == 0){
+        /* an empty folder: a big icon and a line, in the middle of the list */
+        rect_t first = ui_list_row(b, 0);
+        u32 cx = b.x + b.w / 2, cy = first.y + 70;
+        ui_icon(UI_ICO_FILES, cx - 16, cy, C_DIM);
+        const char *m = "This folder is empty";
+        ui_text(cx - ui_text_w(m, UI_SCALE) / 2, cy + 48, m, C_MUTED, UI_SCALE);
+        if(!path[0]){
+            const char *h = "No disk files here yet.";
+            ui_text(cx - ui_text_w(h, 1) / 2, cy + 88, h, C_DIM, 1);
+        }
+    }
     if(nents > rows){
         /* a scrollbar: where the visible rows sit in the whole list */
         rect_t first = ui_list_row(b, 0);
@@ -259,7 +287,7 @@ static void f_click(rect_t b, int x, int y){
         if(ui_contains(back_btn(b), x, y)) viewer_close();
         return;
     }
-    if(ui_contains(ui_button(b, 150), x, y)){ up(); return; }
+    if(ui_contains(ui_button(b, 110), x, y)){ up(); return; }
     int rows = ui_list_rows(b);
     for(int i = 0; i < rows; i++){
         if(ui_contains(ui_list_row(b, i), x, y) && top + i < nents){
