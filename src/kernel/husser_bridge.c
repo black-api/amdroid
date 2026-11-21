@@ -210,6 +210,16 @@ void husser_set_url(const char *url){
     m->page_url[i] = 0;
 }
 
+/* The page's cookies (for document.cookie): read by Husser when the next page loads. */
+void husser_set_cookies(const char *s){
+    if(husser_pid < 0 || !shm_ready) return;
+    wait_idle(200);
+    u32 n = 0;
+    while(s[n] && n + 1 < HUSSER_COOKIE_IN) n++;
+    shm_write(HUSSER_COOKIE_OFF, s, n);
+    shm_write(HUSSER_COOKIE_OFF + n, "", 1);
+}
+
 /* The page and resource areas are read by Husser while it works on them, so they are
  * written only once it has finished what it was doing (normally at once). */
 int husser_load(const void *html, u32 len, u32 scroll){

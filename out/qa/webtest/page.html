@@ -1,0 +1,86 @@
+<!DOCTYPE html><html><head><title>Am-Droid web test</title><style>
+body{font-family:sans-serif;margin:16px}
+h1{font-size:22px;margin:0 0 8px}
+.results{
+  li{margin:2px 0}
+  .pass::before{content:"\2713  PASS  ";color:#080;font-weight:bold}
+  .fail::before{content:"\2717  FAIL  ";color:#c00;font-weight:bold}
+  & .pass{color:#222}
+}
+.photo{float:right;margin:0 0 8px 12px;border:1px solid #999;padding:4px;background:#f4f4f4}
+.photo figcaption{font-size:12px;color:#555}
+q::before{content:open-quote} q::after{content:close-quote}
+</style></head><body>
+<figure class="photo"><img src="/prog.jpg" width="200" height="140"><figcaption>Progressive JPEG decoded in the OS, floated right with text beside it</figcaption></figure>
+<h1>Browser gaps: in-OS test</h1>
+<p>This paragraph flows beside the floated picture. <q>Quotes come from ::before and ::after</q>, the PASS and FAIL marks too, and the list styles come from nested CSS rules.</p>
+<ul class="results" id="r"></ul>
+<script>
+var R = document.getElementById('r');
+function rep(name, ok, extra){ var li = document.createElement('li'); li.className = ok ? 'pass' : 'fail'; li.textContent = name + (extra ? ' - ' + extra : ''); R.appendChild(li); console.log((ok ? 'PASS ' : 'FAIL ') + name + (extra ? ' - ' + extra : '')); }
+var steps = [];
+function step(f){ steps.push(f); }
+function next(){ var f = steps.shift(); if(f) f(); else console.log('ALL DONE'); }
+step(function(){
+  var c = document.cookie;
+  rep('document.cookie has the server cookie', c.indexOf('srv=hello') >= 0, c);
+  rep('HttpOnly cookie hidden from scripts', c.indexOf('hid=') < 0);
+  rep('expired cookie not kept', c.indexOf('old=') < 0);
+  document.cookie = 'js=1; path=/';
+  rep('document.cookie write', document.cookie.indexOf('js=1') >= 0, document.cookie);
+  next();
+});
+step(function(){
+  var x = new XMLHttpRequest();
+  x.open('GET', '/json');
+  x.responseType = 'json';
+  x.onload = function(){ rep('XHR GET json', x.status === 200 && x.response && x.response.list.length === 3, 'status ' + x.status); next(); };
+  x.onerror = function(){ rep('XHR GET json', false, 'error'); next(); };
+  x.send();
+});
+step(function(){
+  var x = new XMLHttpRequest();
+  x.open('POST', '/echo');
+  x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  x.onreadystatechange = function(){
+    if(x.readyState !== 4) return;
+    var d = {}; try { d = JSON.parse(x.responseText); } catch(e){}
+    rep('XHR POST form body', d.method === 'POST' && d.body === 'q=am+droid&n=2', d.body);
+    rep('cookies sent with requests (incl. HttpOnly and script-set)', /srv=hello/.test(d.cookie) && /hid=secret/.test(d.cookie) && /js=1/.test(d.cookie), d.cookie);
+    next();
+  };
+  x.send('q=am+droid&n=2');
+});
+step(function(){
+  fetch('/echo', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hello: 'os'})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ rep('fetch POST json', d.method === 'POST' && d.ctype === 'application/json' && JSON.parse(d.body).hello === 'os', d.body); next(); })
+    .catch(function(e){ rep('fetch POST json', false, String(e)); next(); });
+});
+step(function(){
+  fetch('/missing').then(function(r){
+    return r.text().then(function(t){ rep('fetch 404 resolves with status', r.status === 404 && !r.ok && t === 'nope', 'status ' + r.status); next(); });
+  }).catch(function(e){ rep('fetch 404 resolves with status', false, String(e)); next(); });
+});
+step(function(){
+  fetch('/form', {method: 'POST', body: 'a=1'}).then(function(r){ return r.json(); })
+    .then(function(d){ rep('POST then 303 becomes GET', d.method === 'GET', d.method); next(); })
+    .catch(function(e){ rep('POST then 303 becomes GET', false, String(e)); next(); });
+});
+step(function(){
+  fetch('/bytes').then(function(r){ return r.arrayBuffer(); }).then(function(b){
+    var u32 = new Uint32Array(b), u8 = new Uint8Array(b);
+    u8[4] = 7;
+    rep('typed arrays share bytes', u32[0] === 1 && u32[1] === 7, u32[0] + ',' + u32[1]);
+    next();
+  });
+});
+step(function(){
+  var img = new Image();
+  img.onload = function(){ rep('new Image() fires load', true); next(); };
+  img.onerror = function(){ rep('new Image() fires load', false, 'error'); next(); };
+  img.src = '/prog.jpg';
+});
+next();
+</script>
+</body></html>

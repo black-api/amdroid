@@ -100,18 +100,41 @@ static u32 ms_seen = 0;
 static u64 ms_tick = 0;
 static void media_pump(void){
     /* fetch requests: rewritten whenever the list changes (the browser takes new ids only) */
-    u32 ids[HUSSER_FETCH_MAX];
-    const char *urls[HUSSER_FETCH_MAX];
+    web_fetch_req_t rq[HUSSER_FETCH_MAX];
     int changed;
-    int n = web_fetch_requests(ids, urls, HUSSER_FETCH_MAX, &changed);
+    int n = web_fetch_requests(rq, HUSSER_FETCH_MAX, &changed);
     if(changed){
         for(int k = 0; k < n; k++){
-            u8 *ent = (u8 *)(HUSSER_SHM_VA + HUSSER_FETCHQ_OFF + (u64)k * 4096);
-            ent[0] = ids[k] & 255; ent[1] = ids[k] >> 8 & 255; ent[2] = ids[k] >> 16 & 255; ent[3] = ids[k] >> 24;
-            str_copy((char *)ent + 4, urls[k], HUSSER_FETCH_URL);
+            u8 *ent = (u8 *)(HUSSER_SHM_VA + HUSSER_FETCHQ_OFF + (u64)k * HUSSER_FETCH_ENT);
+            u32 id = rq[k].id;
+            ent[0] = id & 255; ent[1] = id >> 8 & 255; ent[2] = id >> 16 & 255; ent[3] = id >> 24;
+            u32 at = 4;
+            str_copy((char *)ent + at, rq[k].url, HUSSER_FETCH_URL);
+            at += (u32)strlen((char *)ent + at) + 1;
+            str_copy((char *)ent + at, rq[k].method, 12);
+            at += (u32)strlen((char *)ent + at) + 1;
+            str_copy((char *)ent + at, rq[k].ctype, 128);
+            at += (u32)strlen((char *)ent + at) + 1;
+            u32 bl = rq[k].blen <= HUSSER_FETCH_ENT - at - 4 ? rq[k].blen : 0;
+            ent[at] = bl & 255; ent[at + 1] = bl >> 8 & 255; ent[at + 2] = bl >> 16 & 255; ent[at + 3] = bl >> 24;
+            if(bl) memcpy(ent + at + 4, rq[k].body, bl);
         }
         shm->fetch_count = (u32)n;
         shm->fetch_seq++;
+    }
+    /* document.cookie writes: appended after a length word, for the browser to put in its jar */
+    {
+        static char cw[2048];
+        int n = web_cookie_writes(cw, sizeof cw);
+        if(n > 0){
+            u32 *len = (u32 *)(HUSSER_SHM_VA + HUSSER_COOKIE_OFF + HUSSER_COOKIE_IN);
+            char *dst = (char *)(len + 1);
+            if(*len + (u32)n <= HUSSER_COOKIE_BYTES - HUSSER_COOKIE_IN - 4){
+                memcpy(dst + *len, cw, (u32)n);
+                *len += (u32)n;
+                shm->cookie_out_seq++;
+            }
+        }
     }
     /* media commands, one at a time */
     if(media_inflight && shm->media_ack == shm->media_seq){ web_media_acked(shm->ms_seq); media_inflight = 0; }
@@ -286,6 +309,12 @@ static void load_page(u32 len, u32 initial_scroll){
     web_set_url((const char *)shm->page_url);
     web_set_viewport((int)shm->vw, (int)shm->vh);
     web_set_adblock((int)shm->adblock);
+    {   /* the page's cookies (the browser wrote them before H_CMD_LOAD) */
+        char *ck = (char *)(HUSSER_SHM_VA + HUSSER_COOKIE_OFF);
+        ck[HUSSER_COOKIE_IN - 1] = 0;
+        web_set_cookies(ck);
+        *(u32 *)(HUSSER_SHM_VA + HUSSER_COOKIE_OFF + HUSSER_COOKIE_IN) = 0;   /* no writes yet */
+    }
     web_layout_release();                     /* nothing of the old page can be hit or painted */
     if(web_load((const char *)PAGE_SRC, len) != 0){
             str_copy((char *)shm->js_error, "This page could not be parsed.", HUSSER_MSG_MAX);

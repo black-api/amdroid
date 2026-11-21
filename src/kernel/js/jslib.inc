@@ -430,6 +430,7 @@ NATIVE(proto_setter){ (void)ctx; if(self.t == JS_OBJ && argc > 0) self.o->proto 
 static js_obj_t *map_items(js_obj_t *m, int what);   /* Map/Set contents as an array */
 /* The values a for-of loop (or ...spread, Array.from) visits, as an array. */
 static js_obj_t *iterate_to_array(js_val_t v){
+    if(v.t == JS_OBJ && v.o->kind == K_TYPED) typed_pull(v.o);
     js_obj_t *out = new_array();
     if(v.t == JS_STR){
         for(const unsigned char *p = (const unsigned char *)v.s; *p; ){
@@ -1685,86 +1686,159 @@ static double ta_conv(int type, double d){
     }
     return d;
 }
+/* ---- the bytes under typed arrays ----
+ * An ArrayBuffer's bytes live in its store. A typed array keeps its elements as numbers
+ * (items, so every array method works on it), and its buffer's bytes are the truth only
+ * once they are shared: while a typed array is its buffer's only view (the owner), its
+ * numbers are the truth and the bytes are not even made. The first time anything else looks
+ * at the bytes (another view, a DataView, the host) the owner writes them out, and from then
+ * on every view of that buffer writes through to the bytes and reads them again when
+ * another view has written (the store's gen). */
+typedef struct { u32 len; u32 gen; int shared; js_obj_t *owner; u8 *data; } bstore_t;
+typedef struct { int type; js_obj_t *buf; u32 off; u32 seen; } tinfo_t;    /* type first: *(int *)slot */
+
+static bstore_t *bstore(js_obj_t *b){ return b && b->kind == K_BUFFER ? (bstore_t *)b->slot : NULL; }
+static u8 *bstore_data(bstore_t *s){
+    if(!s->data){ s->data = jalloc(s->len ? s->len : 1); memset(s->data, 0, s->len ? s->len : 1); }
+    return s->data;
+}
+static void ta_store(int type, u8 *p, double d){
+    u64 raw;
+    if(type == TA_F32){ float f = (float)d; u32 r; memcpy(&r, &f, 4); raw = r; }
+    else if(type == TA_F64) memcpy(&raw, &d, 8);
+    else raw = (u64)(long long)ta_conv(type, d);
+    for(int b = 0; b < ta_size[type]; b++) p[b] = (u8)(raw >> (8 * b));
+}
+static double ta_load(int type, const u8 *p){
+    u64 raw = 0;
+    for(int b = 0; b < ta_size[type]; b++) raw |= (u64)p[b] << (8 * b);
+    if(type == TA_F32){ u32 r = (u32)raw; float f; memcpy(&f, &r, 4); return f; }
+    if(type == TA_F64){ double d; memcpy(&d, &raw, 8); return d; }
+    return ta_conv(type, (double)raw);
+}
+/* the owner's numbers go to the bytes; from now on the buffer is shared */
+static void buf_flush(bstore_t *s){
+    u8 *d = bstore_data(s);
+    if(s->owner){
+        js_obj_t *o = s->owner;
+        tinfo_t *t = o->slot;
+        int es = ta_size[t->type];
+        for(int i = 0; i < o->nitems && t->off + (u32)(i + 1) * (u32)es <= s->len; i++)
+            ta_store(t->type, d + t->off + (u32)i * (u32)es, js_to_num(o->items[i]));
+        s->owner = NULL;
+    }
+    if(!s->shared){ s->shared = 1; s->gen++; }
+}
+/* a view of a shared buffer: its numbers again, if another view wrote since it last looked */
+static void typed_pull(js_obj_t *o){
+    tinfo_t *t = o->slot;
+    bstore_t *s = bstore(t->buf);
+    if(!s || !s->shared || t->seen == s->gen) return;
+    u8 *d = bstore_data(s);
+    int es = ta_size[t->type];
+    for(int i = 0; i < o->nitems; i++) o->items[i] = js_num(ta_load(t->type, d + t->off + (u32)i * (u32)es));
+    t->seen = s->gen;
+}
+/* after a method changed a shared view's numbers: they go to the bytes */
+static void typed_push(js_obj_t *o){
+    tinfo_t *t = o->slot;
+    bstore_t *s = bstore(t->buf);
+    if(!s || !s->shared) return;
+    u8 *d = bstore_data(s);
+    int es = ta_size[t->type], changed = 0;
+    for(int i = 0; i < o->nitems; i++){
+        u8 *p = d + t->off + (u32)i * (u32)es;
+        double v = js_to_num(o->items[i]);
+        double cur = ta_load(t->type, p);
+        if(cur != v && !(cur != cur && v != v)){ ta_store(t->type, p, v); o->items[i] = js_num(ta_load(t->type, p)); changed = 1; }
+    }
+    if(changed) s->gen++;
+    t->seen = s->gen;
+}
+
 static void typed_set(js_obj_t *o, const char *name, js_val_t v){
     int i = as_index(name);
     if(i < 0){ js_set(o, name, v); return; }
     if(i >= o->nitems) return;
-    o->items[i] = js_num(ta_conv(*(int *)o->slot, js_to_num(v)));
-}
-static js_obj_t *make_typed(int type, int n){
-    js_obj_t *a = new_obj();
-    a->is_array = 1; a->kind = K_TYPED; a->proto = ta_protos[type];
-    int *t = jalloc(sizeof(int)); *t = type; a->slot = t;
-    for(int i = 0; i < n; i++) arr_push(a, js_num(0));
-    return a;
-}
-/* ---- raw buffers ----
- * An ArrayBuffer made by the host from bytes (a fetch() body: often a megabyte of video)
- * keeps them in one block (o->host) instead of one number per byte. Handing it back to the
- * host (appendBuffer) reads that block directly; the first view or DataView made on it
- * turns it into the ordinary form. */
-typedef struct { u32 len; u8 data[]; } rawbuf_t;
-static js_obj_t *buf_bytes(js_obj_t *b){
-    if(b->kind != K_BUFFER) return NULL;
-    if(!b->slot && b->host){
-        rawbuf_t *r = b->host;
-        js_obj_t *bytes = new_array();
-        for(u32 i = 0; i < r->len; i++) arr_push(bytes, js_num(r->data[i]));
-        b->slot = bytes;
-        b->host = NULL;
-        js_set(b, "_bytes", js_objv(bytes)); find_own(b, "_bytes")->flags = PF_HIDDEN;
+    tinfo_t *t = o->slot;
+    double d = ta_conv(t->type, js_to_num(v));
+    o->items[i] = js_num(d);
+    bstore_t *s = bstore(t->buf);
+    if(s && s->shared){
+        typed_pull(o);
+        o->items[i] = js_num(d);
+        ta_store(t->type, bstore_data(s) + t->off + (u32)i * (u32)ta_size[t->type], d);
+        s->gen++;
+        t->seen = s->gen;
     }
-    return b->slot;
 }
-js_obj_t *js_new_buffer_bytes(const u8 *data, u32 len){
+static js_obj_t *new_buffer(u32 len){
     js_obj_t *o = new_obj();
     o->proto = buffer_proto;
     o->kind = K_BUFFER;
-    rawbuf_t *r = jalloc((u32)sizeof(rawbuf_t) + len);
-    r->len = len;
-    if(len) memcpy(r->data, data, len);
-    o->host = r;
+    bstore_t *s = jalloc(sizeof(bstore_t));
+    memset(s, 0, sizeof *s);
+    s->len = len;
+    o->slot = s;
     js_set(o, "byteLength", js_num(len));
     return o;
 }
-/* The bytes of an ArrayBuffer, a typed array or a DataView. *raw is set (and nothing is
- * copied) for a raw buffer; otherwise up to max bytes go to out. Returns the length, or -1
- * when v holds no bytes. */
+/* a typed array of n elements over buf (made for it when NULL) from byte offset off */
+static js_obj_t *typed_view(int type, js_obj_t *buf, u32 off, int n){
+    js_obj_t *a = new_obj();
+    a->is_array = 1; a->kind = K_TYPED; a->proto = ta_protos[type];
+    tinfo_t *t = jalloc(sizeof(tinfo_t));
+    t->type = type; t->off = off; t->seen = 0;
+    int own = !buf;
+    if(own) buf = new_buffer((u32)n * (u32)ta_size[type]);
+    t->buf = buf;
+    a->slot = t;
+    bstore_t *s = bstore(buf);
+    if(own){ s->owner = a; for(int i = 0; i < n; i++) arr_push(a, js_num(0)); }
+    else {
+        buf_flush(s);
+        u8 *d = bstore_data(s);
+        for(int i = 0; i < n; i++) arr_push(a, js_num(ta_load(type, d + off + (u32)i * (u32)ta_size[type])));
+        t->seen = s->gen;
+    }
+    js_set(a, "buffer", js_objv(buf)); find_own(a, "buffer")->flags = PF_HIDDEN;
+    if(off){ js_set(a, "byteOffset", js_num(off)); find_own(a, "byteOffset")->flags = PF_HIDDEN; }
+    return a;
+}
+static js_obj_t *make_typed(int type, int n){ return typed_view(type, NULL, 0, n); }
+
+js_obj_t *js_new_buffer_bytes(const u8 *data, u32 len){
+    js_obj_t *o = new_buffer(len);
+    bstore_t *s = o->slot;
+    if(len){ memcpy(bstore_data(s), data, len); }
+    return o;
+}
+/* The bytes of an ArrayBuffer, a typed array or a DataView. *raw points at them (nothing is
+ * copied; out and max are not used). Returns the length, or -1 when v holds no bytes. */
 int js_bytes_of(js_val_t v, const u8 **raw, u8 *out, u32 max){
+    (void)out; (void)max;
     *raw = NULL;
     if(v.t != JS_OBJ) return -1;
     js_obj_t *o = v.o;
-    if(o->kind == K_BUFFER && !o->slot && o->host){ rawbuf_t *r = o->host; *raw = r->data; return (int)r->len; }
-    js_obj_t *items = NULL;
-    int off = 0, len = -1, es = 1;
-    if(o->kind == K_BUFFER){ items = buf_bytes(o); }
+    js_obj_t *b = NULL;
+    u32 off = 0, len = 0;
+    if(o->kind == K_BUFFER){ b = o; len = bstore(o)->len; }
     else if(o->kind == K_TYPED){
-        int type = *(int *)o->slot;
-        es = ta_size[type];
-        if(es != 1){                     /* a wider view: through its buffer */
-            js_val_t b = js_get(o, "buffer");
-            if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return -1;
-            items = buf_bytes(b.o);
-        } else {
-            u32 n = (u32)o->nitems;
-            if(!out) return (int)n;
-            if(n > max) n = max;
-            for(u32 i = 0; i < n; i++) out[i] = (u8)((u32)js_to_num(o->items[i]) & 255);
-            return (int)n;
-        }
+        tinfo_t *t = o->slot;
+        b = t->buf; off = t->off; len = (u32)o->nitems * (u32)ta_size[t->type];
     } else {
-        js_val_t b = js_get(o, "buffer");           /* a DataView */
-        if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return -1;
-        items = buf_bytes(b.o);
-        off = (int)js_to_num(js_get(o, "byteOffset"));
-        len = (int)js_to_num(js_get(o, "byteLength"));
+        js_val_t bv = js_get(o, "buffer");           /* a DataView */
+        if(bv.t != JS_OBJ || bv.o->kind != K_BUFFER) return -1;
+        b = bv.o;
+        off = (u32)js_to_num(js_get(o, "byteOffset"));
+        len = (u32)js_to_num(js_get(o, "byteLength"));
     }
-    if(!items) return -1;
-    if(len < 0) len = items->nitems - off;
-    if(!out) return len;                         /* only the length was asked for */
-    if((u32)len > max) len = (int)max;
-    for(int i = 0; i < len; i++) out[i] = (u8)((u32)js_to_num(items->items[off + i]) & 255);
-    return len;
+    bstore_t *s = bstore(b);
+    if(!s) return -1;
+    if(s->owner) buf_flush(s);
+    if(off + len > s->len) len = off < s->len ? s->len - off : 0;
+    *raw = bstore_data(s) + off;
+    return (int)len;
 }
 
 NATIVE(typed_ctor){
@@ -1777,34 +1851,15 @@ NATIVE(typed_ctor){
         if(n < 0 || n > 64e6) return throw_val(make_error(2, "Invalid typed array length"));
         a = make_typed(type, (int)n);
     } else if(argv[0].o->kind == K_BUFFER){
-        js_obj_t *bytes = buf_bytes(argv[0].o);   /* the buffer's bytes, as numbers */
-        int off = argi(argc, argv, 1, 0);
+        bstore_t *s = bstore(argv[0].o);
         int es = ta_size[type];
-        int n = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : (bytes->nitems - off) / es;
-        if(n < 0) n = 0;
-        if((type == TA_U8 || type == TA_U8C) && off == 0 && n == bytes->nitems){
-            /* a whole-buffer byte view shares the buffer's storage, so writes show
-             * through both it and a DataView on the same buffer */
-            a = new_obj();
-            a->is_array = 1; a->kind = K_TYPED; a->proto = ta_protos[type];
-            int *t = jalloc(sizeof(int)); *t = type; a->slot = t;
-            a->items = bytes->items; a->nitems = bytes->nitems; a->cap = bytes->cap;
-            js_set(a, "buffer", argv[0]); find_own(a, "buffer")->flags = PF_HIDDEN;
-            return js_objv(a);
-        }
-        a = make_typed(type, n);
-        for(int i = 0; i < a->nitems; i++){
-            u64 raw = 0;
-            for(int b = 0; b < es; b++){ int bi = off + i * es + b; if(bi < bytes->nitems) raw |= (u64)((u32)js_to_num(bytes->items[bi]) & 255) << (8 * b); }
-            double d;
-            if(type == TA_F32){ u32 r32 = (u32)raw; float f; memcpy(&f, &r32, 4); d = f; }
-            else if(type == TA_F64){ memcpy(&d, &raw, 8); }
-            else d = ta_conv(type, (double)raw);
-            a->items[i] = js_num(d);
-        }
-        js_set(a, "buffer", argv[0]); find_own(a, "buffer")->flags = PF_HIDDEN;
-        return js_objv(a);
+        int off = argi(argc, argv, 1, 0);
+        if(off < 0 || (u32)off > s->len || off % es) return throw_val(make_error(2, "Start offset of the view is outside the buffer or not aligned"));
+        int n = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : (int)((s->len - (u32)off) / (u32)es);
+        if(n < 0 || (u32)off + (u32)n * (u32)es > s->len) return throw_val(make_error(2, "Invalid typed array length"));
+        a = typed_view(type, argv[0].o, (u32)off, n);
     } else {
+        if(argv[0].o->kind == K_TYPED) typed_pull(argv[0].o);
         js_obj_t *src = iterate_to_array(argv[0]);
         if(!argv[0].o->is_array && argv[0].o->kind != K_TYPED && src->nitems == 0){
             double L = js_to_num(js_get(argv[0].o, "length"));
@@ -1820,11 +1875,11 @@ NATIVE(typed_byte_length){ (void)ctx; (void)argc; (void)argv; if(self.t != JS_OB
 NATIVE(typed_subarray){
     (void)ctx;
     if(self.t != JS_OBJ || self.o->kind != K_TYPED) return js_undef();
-    int n = self.o->nitems, s = argi(argc, argv, 0, 0), e = argi(argc, argv, 1, n);
-    if(s < 0) s += n; if(e < 0) e += n; if(s < 0) s = 0; if(e > n) e = n; if(e < s) e = s;
-    js_obj_t *a = make_typed(*(int *)self.o->slot, e - s);
-    for(int i = s; i < e; i++) a->items[i - s] = self.o->items[i];
-    return js_objv(a);
+    int n = self.o->nitems, s0 = argi(argc, argv, 0, 0), e = argi(argc, argv, 1, n);
+    if(s0 < 0) s0 += n; if(e < 0) e += n; if(s0 < 0) s0 = 0; if(e > n) e = n; if(e < s0) e = s0;
+    tinfo_t *t = self.o->slot;
+    /* the same bytes: writes through either show in both */
+    return js_objv(typed_view(t->type, t->buf, t->off + (u32)s0 * (u32)ta_size[t->type], e - s0));
 }
 NATIVE(typed_set_m){
     (void)ctx;
@@ -1841,23 +1896,47 @@ NATIVE(buffer_ctor){
     js_obj_t *o = ctor_self(self, buffer_proto);
     if(!o) return throw_type("Constructor ArrayBuffer requires 'new'");
     double n = argn(argc, argv, 0); if(n != n || n < 0) n = 0;
-    js_obj_t *bytes = new_array();
-    for(int i = 0; i < (int)n && i < 64000000; i++) arr_push(bytes, js_num(0));
-    o->kind = K_BUFFER; o->slot = bytes;
-    js_set(o, "byteLength", js_num(bytes->nitems));
-    js_set(o, "_bytes", js_objv(bytes)); find_own(o, "_bytes")->flags = PF_HIDDEN;   /* for DataView (browser_api) */
+    if(n > 256e6) return throw_val(make_error(2, "Array buffer allocation failed"));
+    o->kind = K_BUFFER;
+    bstore_t *s = jalloc(sizeof(bstore_t));
+    memset(s, 0, sizeof *s);
+    s->len = (u32)n;
+    o->slot = s;
+    js_set(o, "byteLength", js_num(s->len));
+    return js_objv(o);
+}
+NATIVE(buffer_slice){
+    (void)ctx;
+    bstore_t *s = self.t == JS_OBJ ? bstore(self.o) : NULL;
+    if(!s) return throw_type("ArrayBuffer.prototype.slice called on incompatible receiver");
+    int n = (int)s->len, a = argi(argc, argv, 0, 0), e = argi(argc, argv, 1, n);
+    if(a < 0) a += n; if(e < 0) e += n; if(a < 0) a = 0; if(e > n) e = n; if(e < a) e = a;
+    if(s->owner) buf_flush(s);
+    js_obj_t *o = new_buffer((u32)(e - a));
+    if(e > a) memcpy(bstore_data(o->slot), bstore_data(s) + a, (u32)(e - a));
     return js_objv(o);
 }
 /* ---- DataView: reads and writes a buffer's bytes at a byte offset ---- */
 static js_obj_t *dataview_proto = NULL;
+static js_obj_t *ta_base_proto = NULL;
+/* ArrayBuffer.isView(x): a typed array or a DataView */
+static js_val_t ab_is_view(js_val_t self, int argc, js_val_t *argv, void *ctx){
+    (void)self; (void)ctx;
+    if(argc < 1 || argv[0].t != JS_OBJ) return js_bool(0);
+    for(js_obj_t *p = argv[0].o->proto; p; p = p->proto)
+        if(p == ta_base_proto || (dataview_proto && p == dataview_proto)) return js_bool(1);
+    return js_bool(0);
+}
 /* self's buffer bytes, plus its byte offset and length */
-static js_obj_t *dv_bytes(js_val_t self, int *off, int *len){
+static bstore_t *dv_bytes(js_val_t self, int *off, int *len){
     if(self.t != JS_OBJ) return NULL;
     js_val_t b = js_get(self.o, "buffer");
-    if(b.t != JS_OBJ || b.o->kind != K_BUFFER) return NULL;
+    bstore_t *s = b.t == JS_OBJ ? bstore(b.o) : NULL;
+    if(!s) return NULL;
+    if(s->owner || !s->shared) buf_flush(s);
     *off = (int)js_to_num(js_get(self.o, "byteOffset"));
     *len = (int)js_to_num(js_get(self.o, "byteLength"));
-    return buf_bytes(b.o);
+    return s;
 }
 NATIVE(dataview_ctor){
     (void)ctx;
@@ -1865,11 +1944,13 @@ NATIVE(dataview_ctor){
     if(!o) return throw_type("Constructor DataView requires 'new'");
     if(argc < 1 || argv[0].t != JS_OBJ || argv[0].o->kind != K_BUFFER)
         return throw_type("First argument to DataView constructor must be an ArrayBuffer");
-    js_obj_t *bytes = buf_bytes(argv[0].o);
+    bstore_t *bs_ = bstore(argv[0].o);
+    int blen = (int)bs_->len;
+    buf_flush(bs_);
     int off = argi(argc, argv, 1, 0);
-    if(off < 0 || off > bytes->nitems) return throw_val(make_error(2, "Start offset is outside the bounds of the buffer"));
-    int len = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : bytes->nitems - off;
-    if(len < 0 || off + len > bytes->nitems) return throw_val(make_error(2, "Invalid DataView length"));
+    if(off < 0 || off > blen) return throw_val(make_error(2, "Start offset is outside the bounds of the buffer"));
+    int len = argc > 2 && argv[2].t != JS_UNDEF ? argi(argc, argv, 2, 0) : blen - off;
+    if(len < 0 || off + len > blen) return throw_val(make_error(2, "Invalid DataView length"));
     js_set(o, "buffer", argv[0]);
     js_set(o, "byteOffset", js_num(off));
     js_set(o, "byteLength", js_num(len));
@@ -1879,14 +1960,15 @@ NATIVE(dataview_ctor){
 NATIVE(dataview_get){
     int spec = (int)(uintptr_t)ctx, size = spec & 15, sgn = (spec >> 4) & 1, flt = (spec >> 5) & 1;
     int off, len;
-    js_obj_t *bytes = dv_bytes(self, &off, &len);
-    if(!bytes) return throw_type("DataView method called on incompatible receiver");
+    bstore_t *bs_ = dv_bytes(self, &off, &len);
+    if(!bs_) return throw_type("DataView method called on incompatible receiver");
+    const u8 *bd = bstore_data(bs_);
     int i = argi(argc, argv, 0, 0);
     int le = size > 1 && argc > 1 && js_truthy(argv[1]);
     if(i < 0 || i + size > len) return throw_val(make_error(2, "Offset is outside the bounds of the DataView"));
     u64 raw = 0;
     for(int b = 0; b < size; b++){
-        u32 byte = (u32)js_to_num(bytes->items[off + i + b]) & 255;
+        u32 byte = bd[off + i + b];
         raw |= (u64)byte << (8 * (le ? b : size - 1 - b));
     }
     if(flt){
@@ -1903,8 +1985,9 @@ NATIVE(dataview_get){
 NATIVE(dataview_set){
     int spec = (int)(uintptr_t)ctx, size = spec & 15, flt = (spec >> 5) & 1;
     int off, len;
-    js_obj_t *bytes = dv_bytes(self, &off, &len);
-    if(!bytes) return throw_type("DataView method called on incompatible receiver");
+    bstore_t *bs_ = dv_bytes(self, &off, &len);
+    if(!bs_) return throw_type("DataView method called on incompatible receiver");
+    u8 *bd = bstore_data(bs_);
     int i = argi(argc, argv, 0, 0);
     double v = argn(argc, argv, 1);
     int le = size > 1 && argc > 2 && js_truthy(argv[2]);
@@ -1916,7 +1999,8 @@ NATIVE(dataview_set){
     } else if(size == 8) raw = (u64)(long long)v;
     else raw = (u64)to_u32(v);
     for(int b = 0; b < size; b++)
-        bytes->items[off + i + b] = js_num((double)((raw >> (8 * (le ? b : size - 1 - b))) & 255));
+        bd[off + i + b] = (u8)(raw >> (8 * (le ? b : size - 1 - b)));
+    bs_->gen++;
     return js_undef();
 }
 
@@ -1945,7 +2029,15 @@ NATIVE(text_encode){
 NATIVE(text_decode){
     (void)self; (void)ctx;
     if(argc < 1 || argv[0].t != JS_OBJ) return js_str("");
-    js_obj_t *src = argv[0].o->kind == K_BUFFER ? buf_bytes(argv[0].o) : iterate_to_array(argv[0]);
+    const u8 *raw;
+    int n = js_bytes_of(argv[0], &raw, NULL, 0);
+    if(n >= 0){
+        char *b = jalloc((u32)n + 1);
+        for(int i = 0; i < n; i++) b[i] = (char)(raw[i] ? raw[i] : ' ');
+        b[n] = 0;
+        return js_str(b);
+    }
+    js_obj_t *src = iterate_to_array(argv[0]);
     char *b = jalloc((u32)src->nitems + 1);
     for(int i = 0; i < src->nitems; i++){ int c = (int)js_to_num(src->items[i]); b[i] = (char)(c ? c : ' '); }
     b[src->nitems] = 0;
@@ -2914,8 +3006,11 @@ static void jslib_init(void){
 
     /* typed arrays */
     buffer_proto = js_new_object();
-    ctor_named("ArrayBuffer", buffer_ctor, buffer_proto);
+    js_obj_t *ab_ctor = ctor_named("ArrayBuffer", buffer_ctor, buffer_proto);
     js_obj_t *ta_base = new_with_proto(array_proto);
+    ta_base_proto = ta_base;
+    put_fn(ab_ctor, "isView", ab_is_view, NULL);
+    put_fn(buffer_proto, "slice", buffer_slice, NULL);
     accessor(ta_base, "byteLength", typed_byte_length, NULL);
     js_set(ta_base, "byteOffset", js_num(0)); find_own(ta_base, "byteOffset")->flags = PF_HIDDEN;
     put_fn(ta_base, "subarray", typed_subarray, NULL);

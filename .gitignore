@@ -14,6 +14,11 @@ out/*
 out/qa/*
 !out/qa/boot.sh
 !out/qa/qa.py
+!out/qa/webtest/
+out/qa/webtest/*
+!out/qa/webtest/*.py
+!out/qa/webtest/page.html
+!out/qa/webtest/prog.jpg
 
 # ThimbleLM: large downloads, models, venv and local builds (see ThimbleLM/engine/README.md)
 ThimbleLM/hf/

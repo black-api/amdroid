@@ -31,6 +31,7 @@ void husser_resize(u32 vw, u32 vh);
 void husser_res(u32 kind, u32 idx, const void *bytes, u32 len);
 /* The answer to a script fetch (fetch() in the page): bytes NULL = it failed. */
 void husser_fetch_res(u32 id, u32 status, const void *bytes, u32 len);
+void husser_set_cookies(const char *s);   /* the next page's document.cookie */
 /* Reads the shared region (the fetch queue, appended media) at shm offset off. */
 void husser_read(u64 off, void *dst, u64 len);
 volatile husser_shm_t *husser_header_rw(void);

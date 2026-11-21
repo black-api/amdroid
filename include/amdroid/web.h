@@ -107,7 +107,10 @@ const char *web_console(void);
 
 /* ---- fetch() and media (media_api.inc): Husser passes these to the browser ---- */
 /* the requests not answered yet (up to max), oldest first; *changed: the list changed */
-int  web_fetch_requests(u32 *ids, const char **urls, int max, int *changed);
+typedef struct { u32 id; const char *url, *method, *ctype; const u8 *body; u32 blen; } web_fetch_req_t;
+int  web_fetch_requests(web_fetch_req_t *out, int max, int *changed);
+void web_set_cookies(const char *s);           /* the page's cookies ("a=b; c=d"), before its scripts run */
+int  web_cookie_writes(char *out, u32 cap);    /* document.cookie assignments since the last call, one a line */
 void web_fetch_done(u32 id, u32 status, const u8 *data, u32 len, int failed);
 /* the next media command for the browser (see M_CMD_* in husser_proto.h) */
 int  web_media_next(u32 *cmd, i32 *a, i64 *t0, i64 *t1, const u8 **data, u32 *len);
