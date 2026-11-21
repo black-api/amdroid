@@ -82,11 +82,11 @@ def read_manifest(path):
 
 
 def collect_files(proj):
-    """Every file in the project except the manifest is bundled, 8.3-upcased."""
+    """Every file in the project except the manifest and the store listing is bundled, 8.3-upcased."""
     files = []
     for fn in sorted(os.listdir(proj)):
         p = os.path.join(proj, fn)
-        if not os.path.isfile(p) or fn == "app.manifest":
+        if not os.path.isfile(p) or fn in ("app.manifest", "store.meta"):
             continue
         name = fn.upper()
         if not valid_83(name):

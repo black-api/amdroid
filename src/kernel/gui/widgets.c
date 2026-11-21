@@ -142,8 +142,7 @@ void wid_damage(u64 now){
 
 static void card(rect_t r, const char *title){
     ui_rrect(r.x + 2, r.y + 5, r.w, r.h, 24, C_SHADOW);
-    ui_rrect(r.x, r.y, r.w, r.h, 24, C_BAR_EDGE);
-    ui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 23, C_BAR);
+    ui_panel(r.x, r.y, r.w, r.h, 24, C_BAR_EDGE, C_BAR);
     ui_text(r.x + 20, r.y + 14, title, ui_accent(), 1);
 }
 

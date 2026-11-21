@@ -9,32 +9,54 @@
 
 /* ---- fetch() requests ---- */
 #define WF_MAX 32
-static struct { u32 id; char *url; } wf[WF_MAX];
+static struct { u32 id; char *url; char method[12]; char ctype[128]; u8 *body; u32 blen; } wf[WF_MAX];
 static int nwf = 0;
 static u32 wf_next = 1;                 /* ids keep rising across pages (the browser relies on it) */
 static int wf_changed = 0;
 
+/* M.fetch(url, method, body, contentType): queues a request, returns its id (0: refused) */
 static js_val_t m_fetch(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)self; (void)ctx;
     const char *u = argc ? js_to_str(argv[0]) : "";
     u32 n = (u32)strlen(u);
     if(nwf >= WF_MAX || n == 0 || n >= 4000) return js_num(0);
+    /* the body: a string (UTF-8) or bytes */
+    const u8 *raw = NULL; int bl = 0;
+    if(argc > 2 && argv[2].t == JS_STR){ raw = (const u8 *)js_to_str(argv[2]); bl = (int)strlen((const char *)raw); }
+    else if(argc > 2 && argv[2].t == JS_OBJ) bl = js_bytes_of(argv[2], &raw, NULL, 0);
+    if(bl < 0) bl = 0;
+    if((u32)bl > HUSSER_FETCH_BODY) return js_num(0);          /* too big for one hand-over */
+    u8 *body = NULL;
+    if(bl){
+        body = kmalloc((u32)bl);
+        if(!body) return js_num(0);
+        if(raw) memcpy(body, raw, (u32)bl); else js_bytes_of(argv[2], &raw, body, (u32)bl);
+    }
     /* a relative address is resolved by the browser against the page */
     char *c = kmalloc(n + 1);
-    if(!c) return js_num(0);
+    if(!c){ if(body) kfree(body); return js_num(0); }
     memcpy(c, u, n + 1);
     wf[nwf].id = wf_next++;
     wf[nwf].url = c;
+    const char *m = argc > 1 && argv[1].t == JS_STR ? js_to_str(argv[1]) : "GET";
+    u32 k = 0;
+    for(; m[k] && k + 1 < sizeof wf[nwf].method; k++) wf[nwf].method[k] = (char)(m[k] >= 'a' && m[k] <= 'z' ? m[k] - 32 : m[k]);
+    wf[nwf].method[k] = 0;
+    const char *ct = argc > 3 && argv[3].t == JS_STR ? js_to_str(argv[3]) : "";
+    for(k = 0; ct[k] && ct[k] != '\r' && ct[k] != '\n' && k + 1 < sizeof wf[nwf].ctype; k++) wf[nwf].ctype[k] = ct[k];
+    wf[nwf].ctype[k] = 0;
+    wf[nwf].body = body; wf[nwf].blen = (u32)bl;
     nwf++;
     wf_changed = 1;
     return js_num(wf[nwf - 1].id);
 }
 
-int web_fetch_requests(u32 *ids, const char **urls, int max, int *changed){
+int web_fetch_requests(web_fetch_req_t *out, int max, int *changed){
     *changed = wf_changed;
     wf_changed = 0;
     int k = 0;
-    for(int i = 0; i < nwf && k < max; i++, k++){ ids[k] = wf[i].id; urls[k] = wf[i].url; }
+    for(int i = 0; i < nwf && k < max; i++, k++)
+        out[k] = (web_fetch_req_t){ wf[i].id, wf[i].url, wf[i].method, wf[i].ctype, wf[i].body, wf[i].blen };
     return k;
 }
 
@@ -43,6 +65,7 @@ void web_fetch_done(u32 id, u32 status, const u8 *data, u32 len, int failed){
     for(int i = 0; i < nwf; i++) if(wf[i].id == id){ at = i; break; }
     if(at < 0) return;                  /* from an earlier page */
     kfree(wf[at].url);
+    if(wf[at].body) kfree(wf[at].body);
     for(int i = at + 1; i < nwf; i++) wf[i - 1] = wf[i];
     nwf--;
     wf_changed = 1;

@@ -75,6 +75,39 @@ static int bg_slot(void){
     web_cmd_t r = { .kind = WEB_CMD_RECT, .w = 0, .h = 0, .link = -1, .img = -1 };
     return emit(&r);
 }
+/* A slot for a box's background picture (drawn over its colour, under its content). */
+static int bgimg_slot(void){
+    web_cmd_t r = { .kind = WEB_CMD_BGIMG, .w = 0, .h = 0, .link = -1, .img = -1 };
+    return emit(&r);
+}
+
+/* Works out where the picture goes in the box (x, y, w, h: the padding box) and what is drawn. */
+static void bgimg_fill(int slot, const wstyle_t *st, int idx, int x, int y, int w, int h){
+    if(slot < 0 || slot >= ncmds) return;
+    u32 nw = 0, nh = 0;
+    if(!web_image_natural(idx, &nw, &nh) || !nw || !nh || w <= 0 || h <= 0){ cmds[slot].w = 0; cmds[slot].h = 0; return; }
+    int iw = CSSPX((int)nw), ih = CSSPX((int)nh);
+    int dw = iw, dh = ih;
+    if(st->bg_size_mode == 1 || st->bg_size_mode == 2){
+        long long sw = (long long)w * 1000 / iw, sh = (long long)h * 1000 / ih;
+        long long k = st->bg_size_mode == 1 ? (sw > sh ? sw : sh) : (sw < sh ? sw : sh);
+        dw = (int)((long long)iw * k / 1000); dh = (int)((long long)ih * k / 1000);
+    } else if(st->bg_size_mode == 3){
+        int ew = st->bg_w >= 0 ? st->bg_w + (int)((long long)w * st->bg_wp / 1000) : -1;
+        int eh = st->bg_h >= 0 ? st->bg_h + (int)((long long)h * st->bg_hp / 1000) : -1;
+        if(ew >= 0 && eh >= 0){ dw = ew; dh = eh; }
+        else if(ew >= 0){ dw = ew; dh = (int)((long long)ih * ew / iw); }
+        else if(eh >= 0){ dh = eh; dw = (int)((long long)iw * eh / ih); }
+    }
+    if(dw < 1) dw = 1;
+    if(dh < 1) dh = 1;
+    int ox = (int)((long long)(w - dw) * st->bg_xp / 1000) + st->bg_x;
+    int oy = (int)((long long)(h - dh) * st->bg_yp / 1000) + st->bg_y;
+    cmds[slot].x = x; cmds[slot].y = y; cmds[slot].w = w; cmds[slot].h = h;
+    cmds[slot].img = idx; cmds[slot].scale = dw; cmds[slot].bold = dh; cmds[slot].italic = st->bg_repeat;
+    cmds[slot].ox = ox; cmds[slot].oy = oy;
+}
+
 static void bg_fill(int slot, int x, int y, int w, int h, u32 color){
     if(slot < 0 || slot >= ncmds) return;
     cmds[slot].x = x; cmds[slot].y = y; cmds[slot].w = w; cmds[slot].h = h; cmds[slot].color = color;
@@ -449,6 +482,7 @@ static int img_size(wnode_t *n, int w, int *dw, int *dh){
     int idx = n->img ? n->img - 1 : -1;
     u32 iw = 0, ih = 0;
     const u32 *px = idx >= 0 ? web_image_pixels(idx, &iw, &ih) : NULL;
+    if(px) web_image_natural(idx, &iw, &ih);                      /* an SVG's own size, not its sharper raster's */
     int cw_ = st->width + (int)((long long)w * st->width_pct / 1000) + view_w * st->width_vw / 1000;
     int ch_ = st->height;
     if(cw_ > 0 && st->border_box) cw_ -= st->p[1] + st->p[3] + st->bl + st->br;
@@ -578,6 +612,8 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
         if(!c->text && (c->st.display == W_NONE || c->st.pos == 2)) continue;
         content_size(c, &cm, &cn);
         if(cn > mn) mn = cn;
+        /* a <figure>'s caption wraps at the width of the picture (a table caption, in effect) */
+        if(!c->text && strcmp(c->tag, "figcaption") == 0 && strcmp(n->tag, "figure") == 0) cm = cn;
         int block = !c->text && c->st.display != W_INLINE && !c->st.float_;
         if(row){ run += cm + (k++ ? st->gap : 0); continue; }
         if(block){ if(run > best) best = run; run = 0; if(cm > best) best = cm; }
@@ -596,8 +632,20 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
 /* Lays c out as a box of exactly w at (x, y): its own width settings are already counted. */
 static int box_slot_last = -1;       /* the background slot of the last block laid out */
 static int box_top_last = 0;
+static int vm_cy = -(1 << 30), vm_amt = 0;   /* the vertical margin that ends at vm_cy */
+/* Adds a block's top or bottom margin. Margins that touch (nothing laid out between them:
+ * siblings, a first or last child and its parent, an empty block) collapse into the
+ * larger one, as in CSS. */
+static void add_vmargin(int m){
+    if(m < 0){ cy += m; vm_cy = -(1 << 30); return; }
+    if(cy == vm_cy){ if(m > vm_amt){ cy += m - vm_amt; vm_amt = m; } }
+    else { cy += m; vm_amt = m; }
+    vm_cy = cy;
+}
+
 static void layout_in_box(wnode_t *c, int x, int w, int y){
     cx = x; cw = w; cy = y;
+    vm_cy = -(1 << 30);                     /* a box of its own: its margins stay its own */
     int sw = 0, sp = 0, sv = 0, sm = 0, smp = 0, smv = 0, sd = 0, sa = 0, sminw = 0;
     if(!c->text){
         wstyle_t *s = &c->st;
@@ -623,27 +671,96 @@ static void layout_in_box(wnode_t *c, int x, int w, int y){
 typedef struct { wnode_t *n; int base, minw, w, grow, shrink; } flex_item_t;
 #define FLEX_ITEMS 160
 
-/* Lays out one line of flex items from y0; returns the bottom of the tallest. */
-static int flex_line(flex_item_t *it, int k, int x0, int w, int gap, int justify, int y0){
-    int sum = 0, grow = 0;
-    for(int i = 0; i < k; i++){ sum += it[i].w; grow += it[i].grow; }
+/* how item c lines up across the line: 0 stretch, 1 start, 2 centre, 3 end */
+static int item_align(const wnode_t *c, const wstyle_t *box){
+    if(c->text) return 1;
+    int a = c->st.align_self;
+    if(a == 4) return 0;
+    if(a) return a;
+    return box->align_items;
+}
+/* it has something to show at its full height: a background or a border */
+static int vis_box(const wnode_t *c){
+    return !c->text && (c->st.bg_set || c->st.bg_idx || c->st.bt || c->st.bb || c->st.bl || c->st.br);
+}
+/* Takes back what layout emitted since a mark (a line laid out again). */
+static void layout_rollback(int c0, int links0, int abs0){
+    ncmds = c0;
+    for(int i = links0; i < web_nlinks; i++){ if(web_link_list[i]) kfree(web_link_list[i]); web_link_list[i] = NULL; }
+    web_nlinks = links0;
+    nabs = abs0;
+}
+
+/* Lays out one line of flex items from y0; returns its bottom. Items are placed along the
+ * line by justify-content (or auto margins), and across it by align-items / align-self:
+ * stretched ones that show a box are laid out again at the line's height, centred and
+ * end-aligned ones are moved down. min_h: the line is at least this tall (a container's
+ * height). */
+static int flex_line(flex_item_t *it, int k, int x0, int w, int gap, const wstyle_t *box, int y0, int min_h){
+    int justify = box->justify;
+    if(box->flex_rev){ if(justify == 0) justify = 2; else if(justify == 2) justify = 0; }
+    int sum = 0, grow = 0, autos = 0;
+    for(int i = 0; i < k; i++){
+        sum += it[i].w; grow += it[i].grow;
+        if(!it[i].n->text){ int a = it[i].n->st.auto_lr; autos += (a & 1 ? 1 : 0) + (a & 2 ? 1 : 0); }
+    }
     int free = w - sum - gap * (k - 1);
-    int start = x0, between = gap;
+    int start = x0, between = gap, lead[FLEX_ITEMS];
+    for(int i = 0; i < k; i++) lead[i] = 0;
     if(free > 0 && grow > 0){
         for(int i = 0; i < k; i++) if(it[i].grow) it[i].w += free * it[i].grow / grow;
+    } else if(free > 0 && autos){
+        /* auto margins take the free space (margin-left: auto pushes an item to the end) */
+        int share = free / autos;
+        for(int i = 0; i < k; i++) if(!it[i].n->text){
+            int a = it[i].n->st.auto_lr;
+            if(a & 2) lead[i] += share;                     /* auto on the left */
+            if((a & 1) && i + 1 < k) lead[i + 1] += share;  /* auto on the right: before the next one */
+        }
     } else if(free > 0){
         if(justify == 1) start += free / 2;
         else if(justify == 2) start += free;
         else if(justify == 3 && k > 1) between = gap + free / (k - 1);
+        else if(justify == 3) { }
         else if(justify == 4){ between = gap + free / k; start += free / k / 2; }
+        else if(justify == 5){ between = gap + free / (k + 1); start += free / (k + 1); }
     }
-    int x = start, maxy = y0;
+    int c0[FLEX_ITEMS + 1], h[FLEX_ITEMS], xs[FLEX_ITEMS];
+    int links0 = web_nlinks, abs0 = nabs, cmd0 = ncmds;
+    int x = start;
+    for(int i = 0; i < k; i++){ x += lead[i]; xs[i] = x; x += it[i].w + between; }
+    int lineh = min_h;
+    for(int pass = 0; pass < 2; pass++){
+        for(int i = 0; i < k; i++){
+            c0[i] = ncmds;
+            wstyle_t *cs = it[i].n->text ? NULL : &it[i].n->st;
+            int sh = 0, sbb = 0, forced = 0;
+            if(pass == 1 && cs && item_align(it[i].n, box) == 0 && !cs->height && vis_box(it[i].n) && h[i] < lineh){
+                /* stretched: its border box is as tall as the line (less its margins) */
+                sh = cs->height; sbb = cs->border_box; forced = 1;
+                cs->height = lineh - cs->m[0] - cs->m[2]; cs->border_box = 1;
+            }
+            layout_in_box(it[i].n, xs[i], it[i].w, y0);
+            if(forced){ cs->height = sh; cs->border_box = sbb; }
+            h[i] = cy - y0;
+            if(pass == 0 && h[i] > lineh) lineh = h[i];
+        }
+        c0[k] = ncmds;
+        if(pass == 1) break;
+        /* a second pass only when some item stretches and shows its box */
+        int again = 0;
+        for(int i = 0; i < k && !again; i++)
+            if(!it[i].n->text && item_align(it[i].n, box) == 0 && !it[i].n->st.height && vis_box(it[i].n) && h[i] < lineh) again = 1;
+        if(!again) break;
+        layout_rollback(cmd0, links0, abs0);
+    }
     for(int i = 0; i < k; i++){
-        layout_in_box(it[i].n, x, it[i].w, y0);
-        if(cy > maxy) maxy = cy;
-        x += it[i].w + between;
+        int a = item_align(it[i].n, box), dy = 0;
+        if(a == 2) dy = (lineh - h[i]) / 2;
+        else if(a == 3) dy = lineh - h[i];
+        if(dy > 0) for(int q = c0[i]; q < c0[i + 1]; q++) cmds[q].y += dy;
     }
-    return maxy;
+    return y0 + lineh;
 }
 
 /* ---- grid ----
@@ -849,21 +966,42 @@ static void flex_children(wnode_t *n, int x0, int w, int gap){
     const wstyle_t *st = &n->st;
     if(st->grid && (st->grid_cols > 1 || st->grid_min > 0 || st->gareas)){ grid_children(n, x0, w); return; }
     if(st->flex_col || st->grid){
-        /* a column: the items stack like blocks, gap apart */
+        /* a column: the items stack like blocks, gap apart; align-items places them across */
         int first = 1;
         int g = st->grid ? st->rgap : gap;
-        for(wnode_t *c = n->first; c; c = c->next){
+        int top = cy, ni = 0, c0[FLEX_ITEMS + 1], ctop[FLEX_ITEMS];
+        wnode_t *cl[FLEX_ITEMS]; int ncl = 0;
+        for(wnode_t *c = n->first; c && ncl < FLEX_ITEMS; c = c->next){
             if(out_of_flow(c)){ layout_node(c); continue; }
             if(blank(c)) continue;
+            cl[ncl++] = c;
+        }
+        for(int a = 1; a < ncl; a++){                     /* order */
+            wnode_t *v = cl[a]; int b = a - 1;
+            int ov = v->text ? 0 : v->st.order;
+            while(b >= 0 && (cl[b]->text ? 0 : cl[b]->st.order) > ov){ cl[b + 1] = cl[b]; b--; }
+            cl[b + 1] = v;
+        }
+        if(st->flex_rev && !st->grid) for(int a = 0, b = ncl - 1; a < b; a++, b--){ wnode_t *t = cl[a]; cl[a] = cl[b]; cl[b] = t; }
+        for(int ci = 0; ci < ncl; ci++){
+            wnode_t *c = cl[ci];
             if(!first) cy += g;
             first = 0;
+            c0[ni] = ncmds; ctop[ni] = cy; ni++;
             if(c->text){ cx = x0; cw = w; layout_node(c); flush_line(); continue; }
             int fixed = item_w(&c->st, w);
+            int al = st->grid ? 0 : item_align(c, st);
+            if(!fixed && al){
+                /* not stretched: as wide as its content wants */
+                int mx, mn;
+                content_size(c, &mx, &mn);
+                if(mx + 2 < w) fixed = mx + 2;
+            }
             int iw = fixed ? fixed : w;
             int ix = x0;
             if(fixed && fixed < w){
-                /* align-items is not known: centring follows text-align or auto margins */
-                if(c->st.auto_lr == 3 || st->justify == 1) ix += (w - fixed) / 2;
+                if(al == 2 || c->st.auto_lr == 3 || (!al && st->justify == 1 && !st->height)) ix += (w - fixed) / 2;
+                else if(al == 3 || c->st.auto_lr == 2) ix += w - fixed;
             }
             if(fixed) layout_in_box(c, ix, iw, cy);
             else {
@@ -875,12 +1013,33 @@ static void flex_children(wnode_t *n, int x0, int w, int gap){
                 c->st.display = sd;
             }
         }
+        c0[ni] = ncmds;
+        /* justify-content along a column of known height */
+        int target = st->height > 0 ? (st->border_box ? st->height - st->p[0] - st->p[2] - st->bt - st->bb : st->height) : 0;
+        int free = target - (cy - top);
+        int jj = st->justify;
+        if(st->flex_rev){ if(jj == 0) jj = 2; else if(jj == 2) jj = 0; }
+        if(!st->grid && free > 0 && jj && ni > 0){
+            for(int i = 0; i < ni; i++){
+                int dy = jj == 1 ? free / 2 : jj == 2 ? free : jj == 3 ? (ni > 1 ? free * i / (ni - 1) : 0) :
+                         jj == 4 ? free * (2 * i + 1) / (2 * ni) : free * (i + 1) / (ni + 1);
+                for(int q = c0[i]; q < c0[i + 1]; q++) cmds[q].y += dy;
+            }
+        }
         cx = x0; cw = w;
         return;
     }
     flex_item_t mine[FLEX_ITEMS];
     wnode_t *fl[FLEX_ITEMS]; int nfl = 0;
     gather_items(n, fl, &nfl, FLEX_ITEMS, 0);
+    /* order, then the reverse directions */
+    for(int a = 1; a < nfl; a++){
+        wnode_t *v = fl[a]; int b = a - 1;
+        int ov = v->text ? 0 : v->st.order;
+        while(b >= 0 && (fl[b]->text ? 0 : fl[b]->st.order) > ov){ fl[b + 1] = fl[b]; b--; }
+        fl[b + 1] = v;
+    }
+    if(st->flex_rev) for(int a = 0, b = nfl - 1; a < b; a++, b--){ wnode_t *t = fl[a]; fl[a] = fl[b]; fl[b] = t; }
     int k = 0;
     for(int fi = 0; fi < nfl; fi++){
         wnode_t *c = fl[fi];
@@ -933,7 +1092,10 @@ static void flex_children(wnode_t *n, int x0, int w, int gap){
                 if(mine[q].w < mine[q].minw) mine[q].w = mine[q].minw;
             }
         } else for(int q = i; q < j; q++) mine[q].w = mine[q].base;
-        y = flex_line(&mine[i], j - i, x0, w, gap, st->justify, y);
+        int min_h = 0;
+        if(i == 0 && j == k && st->height > 0)            /* one line in a container of known height */
+            min_h = st->border_box ? st->height - st->p[0] - st->p[2] - st->bt - st->bb : st->height;
+        y = flex_line(&mine[i], j - i, x0, w, gap, st, y, min_h);
         if(j < k) y += st->rgap ? st->rgap : 0;
         i = j;
     }
@@ -992,7 +1154,8 @@ static void row_group(wnode_t **pc){
         if(w > W) w = W;
         if(w < 8) w = 8;
         int right = it->st.float_ == 2;
-        if((right ? rx - w < lx : lx + w > rx) && (lx > x0 || rx < x0 + W)){
+        int cleared = it->st.float_ && (((it->st.clear & 1) && lx > x0) || ((it->st.clear & 2) && rx < x0 + W));
+        if(cleared || ((right ? rx - w < lx : lx + w > rx) && (lx > x0 || rx < x0 + W))){
             nlines++; lx = x0; rx = x0 + W; line_start = i;
         }
         (void)line_start;
@@ -1017,34 +1180,45 @@ static void row_group(wnode_t **pc){
     }
     /* what is left beside the floats of the last line: the next block, or the inline run */
     int left_used = 0, right_used = 0;
-    for(int i = 0; i < k; i++) if(line_of[i] == nlines - 1 && items[i]->st.float_){
+    int all_floats = 1;
+    for(int i = 0; i < k; i++) if(!items[i]->st.float_) all_floats = 0;
+    if(all_floats && nlines > 1) line_top = top;          /* stacked floats: the text runs beside all of them */
+    for(int i = 0; i < k; i++) if((line_of[i] == nlines - 1 || all_floats) && items[i]->st.float_){
         if(items[i]->st.float_ == 1 && pos[i] + wid[i] - x0 > left_used) left_used = pos[i] + wid[i] - x0;
         if(items[i]->st.float_ == 2 && x0 + W - pos[i] > right_used) right_used = x0 + W - pos[i];
     }
     int room = W - left_used - right_used;
     if(any_float && c && (left_used || right_used) && room >= W / 4 && room >= CSSPX(120)){
+        /* what follows sits beside the floats: each block, or run of inline content, that starts
+           above their bottom is laid out in the room left (a block that starts below goes back
+           to the full width). clear, or another float, ends it. */
         int fx = x0 + left_used;
-        cx = fx; cw = room; cy = line_top;
-        nfrag = 0; used = 0; pending_space = 0;
-        if(!c->text && (c->st.display == W_BLOCK || c->st.display == W_FLEX || c->st.display == W_LISTITEM) && !rowish(c)){
-            /* the block beside the float: a margin that only made room for the float goes */
-            wstyle_t *s = &c->st;
-            int ml = s->m[3], mr = s->m[1];
-            if(left_used && ml >= left_used / 2) s->m[3] = 0;
-            if(right_used && mr >= right_used / 2) s->m[1] = 0;
-            int sw = s->width, sp = s->width_pct;
-            if(sp >= 500 || s->width > room){ s->width = 0; s->width_pct = 0; }
-            layout_node(c);
-            flush_line();
-            s->m[3] = ml; s->m[1] = mr; s->width = sw; s->width_pct = sp;
-            c = c->next;
-        } else {
-            /* inline content: up to the next block */
-            while(c && (c->text || (c->st.display == W_INLINE && !rowish(c)) || c->st.display == W_NONE)){
+        int float_bottom = line_bottom;
+        cy = line_top;
+        while(c && cy < float_bottom){
+            if(!c->text && c->st.display != W_NONE && (rowish(c) || c->st.clear)) break;
+            cx = fx; cw = room;
+            nfrag = 0; used = 0; pending_space = 0;
+            if(!c->text && (c->st.display == W_BLOCK || c->st.display == W_FLEX || c->st.display == W_LISTITEM)){
+                /* the block beside the float: a margin that only made room for the float goes */
+                wstyle_t *s = &c->st;
+                int ml = s->m[3], mr = s->m[1];
+                if(left_used && ml >= left_used / 2) s->m[3] = 0;
+                if(right_used && mr >= right_used / 2) s->m[1] = 0;
+                int sw = s->width, sp = s->width_pct;
+                if(sp >= 500 || s->width > room){ s->width = 0; s->width_pct = 0; }
                 layout_node(c);
+                flush_line();
+                s->m[3] = ml; s->m[1] = mr; s->width = sw; s->width_pct = sp;
                 c = c->next;
+            } else {
+                /* inline content: up to the next block */
+                while(c && (c->text || (c->st.display == W_INLINE && !rowish(c)) || c->st.display == W_NONE)){
+                    layout_node(c);
+                    c = c->next;
+                }
+                flush_line();
             }
-            flush_line();
         }
         if(cy > line_bottom) line_bottom = cy;
     }
@@ -1424,7 +1598,7 @@ static void layout_node(wnode_t *n){
 
     /* block (or list item, flex, grid) */
     flush_line();
-    cy += st->m[0];
+    add_vmargin(st->m[0]);
     int saved_cx = cx, saved_cw = cw, saved_align = cur_align;
     int saved_bg_set = cur_bg_set;
     cur_bg_set = 0;
@@ -1461,7 +1635,11 @@ static void layout_node(wnode_t *n){
         else if(st->auto_lr == 1 && st->float_ != 1) { }
         else if(st->auto_lr == 2) box_x += avail - box_w;
     }
-    int slot = st->bg_set ? bg_slot() : -1;
+    int bgi = st->bg_idx ? st->bg_idx - 1 : -1;
+    int bg_ready = 0;
+    if(bgi >= 0){ img_mark_wanted(bgi); bg_ready = web_image_state(bgi) == 1; }
+    int slot = st->bg_set && !(st->bg_stand && bg_ready) ? bg_slot() : -1;
+    int img_slot = bg_ready ? bgimg_slot() : -1;           /* over the colour, under the content */
     box_slot_last = slot; box_top_last = box_top;
     int my_slot = slot;
     int abs_mark = nabs;
@@ -1514,6 +1692,7 @@ static void layout_node(wnode_t *n){
     cy += st->p[2] + bb;
     int box_h = cy - box_top;
     if(my_slot >= 0){ bg_fill(my_slot, box_x, box_top, box_w, box_h, st->bg); cmds[my_slot].dom = n; cmds[my_slot].link = cur_link; }
+    if(img_slot >= 0) bgimg_fill(img_slot, st, bgi, box_x + bl, box_top + bt, box_w - bl - br, box_h - bt - bb);
     if(st->pos && nabs > abs_mark){
         int save_cy = cy;
         process_abs(abs_mark, box_x + bl, box_top + bt, box_w - bl - br, box_h - bt - bb);
@@ -1535,7 +1714,8 @@ static void layout_node(wnode_t *n){
         web_cmd_t e = { .kind = WEB_CMD_RECT, .x = box_x + box_w - br, .y = box_top, .w = br, .h = box_h, .color = st->border_color, .link = -1, .img = -1 };
         emit(&e);
     }
-    cy += st->m[2];
+    if(st->display == W_FLEX || st->grid) vm_cy = -(1 << 30);   /* a flex or grid box's children keep their margins */
+    add_vmargin(st->m[2]);
     cx = saved_cx; cw = saved_cw; cur_align = saved_align;
     cur_bg_set = saved_bg_set;
     cur_link = saved_link;
@@ -1544,12 +1724,46 @@ static void layout_node(wnode_t *n){
 
 /* Computes every element's style, top-down. A hidden element's subtree is never laid out,
  * so it is not styled either. */
+static wnode_t **spliced;              /* elements whose ::before/::after are in the child list */
+static int nspliced, spliced_cap;
+
+static void pe_splice(wnode_t *n){
+    if(nspliced == spliced_cap){
+        int nc = spliced_cap ? spliced_cap * 2 : 256;
+        wnode_t **g = kmalloc(sizeof(wnode_t *) * (u32)nc);
+        if(!g) return;
+        if(spliced){ memcpy(g, spliced, sizeof(wnode_t *) * (u32)nspliced); kfree(spliced); }
+        spliced = g; spliced_cap = nc;
+    }
+    spliced[nspliced++] = n;
+    wnode_t *a = n->pe[0], *b = n->pe[1];
+    if(a && a->st.display != W_NONE){ a->next = n->first; n->first = a; if(!n->last) n->last = a; }
+    if(b && b->st.display != W_NONE){ b->next = NULL; if(n->last) n->last->next = b; else n->first = b; n->last = b; }
+}
+
+/* After the layout: the generated boxes leave the tree again (scripts see the real children). */
+static void pe_unsplice(void){
+    for(int i = nspliced - 1; i >= 0; i--){
+        wnode_t *n = spliced[i], *a = n->pe[0], *b = n->pe[1];
+        if(a && n->first == a){ n->first = a->next; if(n->last == a) n->last = NULL; a->next = NULL; }
+        if(b && n->last == b){
+            wnode_t *prev = NULL;
+            for(wnode_t *c = n->first; c && c != b; c = c->next) prev = c;
+            if(prev) prev->next = NULL; else n->first = NULL;
+            n->last = prev;
+        }
+    }
+    nspliced = 0;
+}
+
 static void style_tree(wnode_t *n, wnode_t *parent){
     int mark = css_var_mark();
     css_apply(n, parent);
     if(!n->text && n->st.display != W_NONE){
+        int pe = n->pseudo ? 0 : css_pseudo(n);
         css_number_children(n);
         for(wnode_t *c = n->first; c; c = c->next) style_tree(c, n);
+        if(pe) pe_splice(n);
     }
     css_var_pop(mark);
 }
@@ -1565,6 +1779,7 @@ int web_layout(int width){
     style_tree(web_root, NULL);
 
     layout_gen++;
+    vm_cy = -(1 << 30);
     ncmds = 0;
     acur = 0; aused = 0;
     nfrag = 0;
@@ -1582,6 +1797,7 @@ int web_layout(int width){
     flush_line();
     int page_h = cy;
     if(nabs) process_abs(0, 0, 0, width, page_h);
+    pe_unsplice();
     /* positioned boxes paint over the normal flow: their commands move to the end (in order) */
     int ntop = 0;
     for(int i = 0; i < ncmds; i++) ntop += cmd_top[i];

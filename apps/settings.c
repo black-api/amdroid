@@ -61,7 +61,7 @@ static void gap(ctx_t *c, int h){ c->y += h; }
 static int toggle(ctx_t *c, const char *label, int on){
     rect_t r = take(c, 44);
     if(c->mode == M_DRAW && seen(c, r)){
-        ui_text(r.x, r.y + 6, label, on ? C_TEXT : C_MUTED, UI_SCALE);
+        ui_text(r.x, r.y + 14, label, on ? C_TEXT : C_MUTED, 1);
         u32 sx = r.x + r.w - 64;
         ui_rrect(sx, r.y + 6, 64, 32, 16, on ? ui_accent() : C_CARD_HI);
         ui_rrect(on ? sx + 36 : sx + 4, r.y + 10, 24, 24, 12, C_TEXT);
@@ -159,6 +159,16 @@ static void page_appearance(ctx_t *c){
         }
         if(pressed(c, t)) ui_wall_set(i);
     }
+    heading(c, "GLASS");
+    if(toggle(c, ui_prefs.glass ? "Glass: on" : "Glass: off", ui_prefs.glass)){ ui_prefs.glass = !ui_prefs.glass; changed(); }
+    if(ui_prefs.glass){
+        static const char *blur[] = { "Soft", "Medium", "Strong" };
+        static const char *tint[] = { "Clear", "Frosted", "Dark" };
+        int r;
+        if((r = segmented(c, "Blur", blur, 3, ui_prefs.glass_blur)) >= 0){ ui_prefs.glass_blur = r; changed(); }
+        if((r = segmented(c, "Tint", tint, 3, ui_prefs.glass_tint)) >= 0){ ui_prefs.glass_tint = r; changed(); }
+    }
+    note(c, "Windows, the bar, menus and panels become frosted glass.");
     heading(c, "MOTION");
     if(toggle(c, ui_anim_on ? "Animations: on" : "Animations: off", ui_anim_on)){ ui_anim_on = !ui_anim_on; changed(); }
 }

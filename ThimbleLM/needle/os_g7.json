@@ -1,0 +1,1242 @@
+[
+ {
+  "env": "am_droid",
+  "query": "open notes",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8446477055549622,
+  "head": 0.8446477055549622,
+  "decode": 0.9977562427520752,
+  "withheld": 0,
+  "reasoning": "'open notes' -> open_app with app 'notes'."
+ },
+ {
+  "env": "am_droid",
+  "query": "open the browser",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "browser"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "browser"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8758774995803833,
+  "head": 0.8758774995803833,
+  "decode": 0.9735082387924194,
+  "withheld": 0,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "launch the calculator",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "calculator"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "calculator"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8896104097366333,
+  "head": 0.8896104097366333,
+  "decode": 0.9979447722434998,
+  "withheld": 0,
+  "reasoning": "'calculator' -> app 'calculator'. open_app opens app on desktop."
+ },
+ {
+  "env": "am_droid",
+  "query": "show me my files",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4829694926738739,
+  "head": 0.4829694926738739,
+  "decode": 0.9974011778831482,
+  "withheld": 0,
+  "reasoning": "'show me my files' -> open_app with app 'files'."
+ },
+ {
+  "env": "am_droid",
+  "query": "open settings",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "settings"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "settings"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7595089673995972,
+  "head": 0.7595089673995972,
+  "decode": 0.9961694478988647,
+  "withheld": 0,
+  "reasoning": "'open settings' -> app 'settings' for open_app."
+ },
+ {
+  "env": "am_droid",
+  "query": "start the video player",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "video player"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "video player"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.798551082611084,
+  "head": 0.798551082611084,
+  "decode": 0.9976787567138672,
+  "withheld": 0,
+  "reasoning": "'start the video player' -> open_app with app 'video player'."
+ },
+ {
+  "env": "am_droid",
+  "query": "open the app store",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "app store"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "app store"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.2789705693721771,
+  "head": 0.8561083674430847,
+  "decode": 0.2789705693721771,
+  "withheld": 0,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "open the clock",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "clock"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "clock"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.902237594127655,
+  "head": 0.902237594127655,
+  "decode": 0.9987236261367798,
+  "withheld": 0,
+  "reasoning": "'open the clock' -> open_app with app 'clock'."
+ },
+ {
+  "env": "am_droid",
+  "query": "open the terminal",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "terminal"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "terminal"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8669019341468811,
+  "head": 0.8669019341468811,
+  "decode": 0.9982802867889404,
+  "withheld": 0,
+  "reasoning": "'open the terminal' -> app 'terminal'. open_app tool."
+ },
+ {
+  "env": "am_droid",
+  "query": "show the task manager",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "tasks"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "tasks"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.38590380549430847,
+  "head": 0.38590380549430847,
+  "decode": 0.9976603984832764,
+  "withheld": 0,
+  "reasoning": "'show the task manager' -> open_app with app 'tasks'"
+ },
+ {
+  "env": "am_droid",
+  "query": "close this window",
+  "want": [
+   {
+    "name": "close_app",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.12648321688175201,
+  "head": 0.12648321688175201,
+  "decode": 0.9860392808914185,
+  "withheld": 0,
+  "reasoning": "'close this window' -> close_app with app 'files' (default window)."
+ },
+ {
+  "env": "am_droid",
+  "query": "close the browser",
+  "want": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "browser"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "browser"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8665415048599243,
+  "head": 0.8665415048599243,
+  "decode": 0.9610390663146973,
+  "withheld": 0,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "close notes",
+  "want": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.833135187625885,
+  "head": 0.833135187625885,
+  "decode": 0.997151255607605,
+  "withheld": 0,
+  "reasoning": "'close notes' -> close_app app 'notes'."
+ },
+ {
+  "env": "am_droid",
+  "query": "search for chocolate cake recipes",
+  "want": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "chocolate cake recipes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "chocolate cake recipes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7496844530105591,
+  "head": 0.7496844530105591,
+  "decode": 0.9956272840499878,
+  "withheld": 0,
+  "reasoning": "'search for chocolate cake recipes' -> search_web with query 'chocolate cake recipes'."
+ },
+ {
+  "env": "am_droid",
+  "query": "look up the weather in Lagos",
+  "want": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "the weather in Lagos"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "weather in Lagos"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.4021201729774475,
+  "head": 0.4021201729774475,
+  "decode": 0.9979515671730042,
+  "withheld": 0,
+  "reasoning": "'look up the weather in Lagos' -> web search with query 'weather in Lagos'."
+ },
+ {
+  "env": "am_droid",
+  "query": "go to example.com",
+  "want": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "example.com"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "app store"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 1.4493539310933556e-06,
+  "head": 0.4733389616012573,
+  "decode": 1.4493539310933556e-06,
+  "withheld": 1,
+  "reasoning": "'go to' means open app. 'example.com' -> app 'example.com'."
+ },
+ {
+  "env": "am_droid",
+  "query": "search the web for how to build an operating system",
+  "want": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "how to build an operating system"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "how to build an operating system"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5408821105957031,
+  "head": 0.5408821105957031,
+  "decode": 0.9975087642669678,
+  "withheld": 0,
+  "reasoning": "'search the web' -> search_web; 'how to build an operating system' -> query 'how to build an operating system'."
+ },
+ {
+  "env": "am_droid",
+  "query": "set the volume to 40",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9143308401107788,
+  "head": 0.9143308401107788,
+  "decode": 0.9399150609970093,
+  "withheld": 0,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "turn the volume down to 10",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 10
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 10
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.909721851348877,
+  "head": 0.909721851348877,
+  "decode": 0.9981914758682251,
+  "withheld": 0,
+  "reasoning": "'volume down to 10' -> level 10. set_volume tool."
+ },
+ {
+  "env": "am_droid",
+  "query": "mute the sound",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 0
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 0
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.14611466228961945,
+  "head": 0.14611466228961945,
+  "decode": 0.9922962188720703,
+  "withheld": 0,
+  "reasoning": "'mute' -> level 0; set_volume tool."
+ },
+ {
+  "env": "am_droid",
+  "query": "set the brightness to 70",
+  "want": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 70
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 70
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9317870736122131,
+  "head": 0.9317870736122131,
+  "decode": 0.9982061386108398,
+  "withheld": 0,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "dim the screen to 30",
+  "want": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 30
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 30
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8964444398880005,
+  "head": 0.8964444398880005,
+  "decode": 0.999536395072937,
+  "withheld": 0,
+  "reasoning": "'dim the screen to 30' -> set_brightness level 30."
+ },
+ {
+  "env": "am_droid",
+  "query": "turn on do not disturb",
+  "want": [
+   {
+    "name": "do_not_disturb",
+    "arguments": {
+     "action": "on"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "do_not_disturb",
+    "arguments": {
+     "action": "on"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.5670601725578308,
+  "head": 0.8170490264892578,
+  "decode": 0.5670601725578308,
+  "withheld": 2,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "turn off do not disturb",
+  "want": [
+   {
+    "name": "do_not_disturb",
+    "arguments": {
+     "action": "off"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "do_not_disturb",
+    "arguments": {
+     "action": "off"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.6569933891296387,
+  "head": 0.9037911295890808,
+  "decode": 0.6569933891296387,
+  "withheld": 2,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "silence my notifications",
+  "want": [
+   {
+    "name": "do_not_disturb",
+    "arguments": {
+     "action": "on"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 0
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.07022269070148468,
+  "head": 0.421272873878479,
+  "decode": 0.07022269070148468,
+  "withheld": 3,
+  "reasoning": "'silence my notifications' -> action 'off'."
+ },
+ {
+  "env": "am_droid",
+  "query": "take a note buy milk and eggs",
+  "want": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "buy milk and eggs"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "buy milk and eggs"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6221268773078918,
+  "head": 0.6221268773078918,
+  "decode": 0.9958484172821045,
+  "withheld": 0,
+  "reasoning": "'take a note' -> add_note text 'buy milk and eggs'."
+ },
+ {
+  "env": "am_droid",
+  "query": "write down call the dentist tomorrow",
+  "want": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "call the dentist tomorrow"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "call the dentist tomorrow"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.36558619141578674,
+  "head": 0.36558619141578674,
+  "decode": 0.9819383025169373,
+  "withheld": 0,
+  "reasoning": "'call the dentist tomorrow' -> text 'call the dentist tomorrow'."
+ },
+ {
+  "env": "am_droid",
+  "query": "what time is it",
+  "want": [
+   {
+    "name": "tell_time",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "tell_time",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.22500860691070557,
+  "head": 0.4653201699256897,
+  "decode": 0.22500860691070557,
+  "withheld": 0,
+  "reasoning": "'what time is it' -> time info. No tool provides time, so use default."
+ },
+ {
+  "env": "am_droid",
+  "query": "what's the date today",
+  "want": [
+   {
+    "name": "tell_time",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "today"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.09231139719486237,
+  "head": 0.09231139719486237,
+  "decode": 0.9966340065002441,
+  "withheld": 1,
+  "reasoning": "'date today' -> search_web with query 'today'"
+ },
+ {
+  "env": "am_droid",
+  "query": "open notes and set the volume to 25",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   },
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 25
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   },
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 25
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8942667245864868,
+  "head": 0.8942667245864868,
+  "decode": 0.9921578168869019,
+  "withheld": 0,
+  "reasoning": "'open notes' -> open_app app 'notes'; 'volume to 25' -> set_volume level 25"
+ },
+ {
+  "env": "am_droid",
+  "query": "close the browser and open the calculator",
+  "want": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "browser"
+    }
+   },
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "calculator"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "browser"
+    }
+   },
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "calculator"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8017191290855408,
+  "head": 0.8017191290855408,
+  "decode": 0.9947465062141418,
+  "withheld": 0,
+  "reasoning": "'close the browser' -> close_app app 'browser'; 'open the calculator' -> open_app app 'calculator'"
+ },
+ {
+  "env": "am_droid",
+  "query": "turn the volume up a bit",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.26903098821640015,
+  "head": 0.26903098821640015,
+  "decode": 0.9942054748535156,
+  "withheld": 3,
+  "reasoning": "'volume up a bit' means increase to 100 -> set_volume level 100"
+ },
+ {
+  "env": "am_droid",
+  "query": "make the screen brighter",
+  "want": [],
+  "got": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.09484501928091049,
+  "head": 0.09484501928091049,
+  "decode": 0.9984945058822632,
+  "withheld": 3,
+  "reasoning": "'brighter' means lower brightness -> set_brightness with level 100."
+ },
+ {
+  "env": "am_droid",
+  "query": "open an app",
+  "want": [],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "app store"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 1.2451255320005574e-21,
+  "head": 0.012911763973534107,
+  "decode": 1.2451255320005574e-21,
+  "withheld": 1,
+  "reasoning": "'open an app' -> open_app with app 'app'."
+ },
+ {
+  "env": "am_droid",
+  "query": "search for something",
+  "want": [],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "something"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.15798628330230713,
+  "head": 0.15798628330230713,
+  "decode": 0.9974368810653687,
+  "withheld": 0,
+  "reasoning": "'search for something' -> web search. 'something' -> query 'something'."
+ },
+ {
+  "env": "am_droid",
+  "query": "take a note",
+  "want": [],
+  "got": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "note"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.022465363144874573,
+  "head": 0.022465363144874573,
+  "decode": 0.9822324514389038,
+  "withheld": 1,
+  "reasoning": "'take a note' means add note. text 'note' from query."
+ },
+ {
+  "env": "am_droid",
+  "query": "send an email to my boss",
+  "want": [],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.0006527306977659464,
+  "head": 0.007183161098510027,
+  "decode": 0.0006527306977659464,
+  "withheld": 1,
+  "reasoning": "No email tool available. closest is close_app to close an app. app 'email' from query."
+ },
+ {
+  "env": "am_droid",
+  "query": "order a pizza",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.733958899974823,
+  "head": 0.733958899974823,
+  "decode": 0.9963071942329407,
+  "withheld": 0,
+  "reasoning": "No shopping or ordering tool available."
+ },
+ {
+  "env": "am_droid",
+  "query": "shut down the computer",
+  "want": [],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 2.3497737856814638e-05,
+  "head": 0.2178536057472229,
+  "decode": 2.3497737856814638e-05,
+  "withheld": 1,
+  "reasoning": "'shut down the computer' -> close_app with app 'computer'"
+ },
+ {
+  "env": "am_droid",
+  "query": "play some jazz",
+  "want": [],
+  "got": [
+   {
+    "name": "search_web",
+    "arguments": {
+     "query": "jazz"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.2199549674987793,
+  "head": 0.2199549674987793,
+  "decode": 0.9981818199157715,
+  "withheld": 0,
+  "reasoning": "'play some jazz' means play music -> search_web with query 'jazz'"
+ },
+ {
+  "env": "am_droid",
+  "query": "tell me a joke",
+  "want": [],
+  "got": [
+   {
+    "name": "add_note",
+    "arguments": {
+     "text": "joke"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.11117055267095566,
+  "head": 0.11117055267095566,
+  "decode": 0.9860339164733887,
+  "withheld": 0,
+  "reasoning": "'joke' is a word for word -> add_note text 'joke'"
+ },
+ {
+  "env": "am_droid",
+  "query": "set an alarm for 7 am",
+  "want": [],
+  "got": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.018368730321526527,
+  "head": 0.018368730321526527,
+  "decode": 0.18212711811065674,
+  "withheld": 3,
+  "reasoning": "No alarm tool available. '7 am' -> time_hours 7, time_minutes 0."
+ },
+ {
+  "env": "am_droid",
+  "query": "don't open the browser",
+  "want": [],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "browser"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.6339010000228882,
+  "head": 0.6339010000228882,
+  "decode": 0.9986754059791565,
+  "withheld": 2,
+  "reasoning": "'don't open the browser' -> open_app with app 'browser'."
+ },
+ {
+  "env": "am_droid",
+  "query": "do not close notes",
+  "want": [],
+  "got": [
+   {
+    "name": "close_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.7650496363639832,
+  "head": 0.7650496363639832,
+  "decode": 0.9955374002456665,
+  "withheld": 2,
+  "reasoning": "'do not close notes' -> close_app app 'notes'."
+ },
+ {
+  "env": "am_droid",
+  "query": "never turn the volume up to 100",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.5901837348937988,
+  "head": 0.5901837348937988,
+  "decode": 0.9878365993499756,
+  "withheld": 2,
+  "reasoning": "Prohibition on set_volume. Alternative request: set_volume with level 100 from 'volume up to 100'."
+ },
+ {
+  "env": "am_droid",
+  "query": "set the volume to 150",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0014755076263099909,
+  "head": 0.7583301663398743,
+  "decode": 0.0014755076263099909,
+  "withheld": 3,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "set the brightness to 300",
+  "want": [],
+  "got": [
+   {
+    "name": "set_brightness",
+    "arguments": {
+     "level": 30
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0005379735957831144,
+  "head": 0.7974669933319092,
+  "decode": 0.0005379735957831144,
+  "withheld": 3,
+  "reasoning": ""
+ },
+ {
+  "env": "am_droid",
+  "query": "open photoshop",
+  "want": [],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "files"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 1.546164639876224e-05,
+  "head": 0.606490433216095,
+  "decode": 1.546164639876224e-05,
+  "withheld": 1,
+  "reasoning": "'open photoshop' -> app 'photoshop'. open_app tool."
+ },
+ {
+  "env": "am_droid",
+  "query": "Open Notes.",
+  "want": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "open_app",
+    "arguments": {
+     "app": "notes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "whisper",
+  "confidence": 0.7364271879196167,
+  "head": 0.7364271879196167,
+  "decode": 0.9957678318023682,
+  "withheld": 0,
+  "reasoning": "'Open Notes' -> open_app with app 'notes'."
+ },
+ {
+  "env": "am_droid",
+  "query": "Set the volume to 40.",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "ok": true,
+  "category": "whisper",
+  "confidence": 0.920111894607544,
+  "head": 0.9327769875526428,
+  "decode": 0.920111894607544,
+  "withheld": 0,
+  "reasoning": ""
+ }
+]

@@ -32,6 +32,16 @@ int ata_init(void){
     return 0;
 }
 
+/* No drive selected: the status port reads all ones (floating) or all zeros (QEMU with no disk). Every read and write checks, so a
+   machine with no disk fails at once instead of spending seconds per sector polling for one
+   (opening the video player, which lists the disk, used to freeze the whole desktop). */
+static int ata_floating(u16 b, u8 drv){
+    outb(b + 6, drv);
+    for(int i = 0; i < 4; i++) (void)inb(b + 7);       /* the 400 ns the drive select needs */
+    u8 s = inb(b + 7);
+    return s == 0x00 || s == 0xFF;
+}
+
 /* Waits until the drive is idle: not busy and not still asking for data. A
    command issued while either bit is set is aborted by the drive, which is
    what used to make a long write die halfway through. */
@@ -63,6 +73,7 @@ static int ata_drq(u16 b){
 
 static int ata_read_at(u16 b, u32 lba, u8 count, void *buf, u8 drv){
     u16 *dst = buf;
+    if(ata_floating(b, drv)) return -1;
     for(int try=0;try<3;try++){
         ata_idle(b);
         ata_setup(b, lba, count, drv);
@@ -81,6 +92,7 @@ static int ata_read_at(u16 b, u32 lba, u8 count, void *buf, u8 drv){
 
 static int ata_write_at(u16 b, u32 lba, u8 count, const void *buf, u8 drv){
     const u16 *src = buf;
+    if(ata_floating(b, drv)) return -1;
     for(int try=0;try<3;try++){
         ata_idle(b);
         ata_setup(b, lba, count, drv);
@@ -105,6 +117,7 @@ int ata_write_sectors(u32 lba, u8 count, const void *buf){ return ata_write_at(0
    calls this at its own boundaries; flushing after every sector turned a few
    megabytes of video into a minute of waiting. */
 int ata_flush(void){
+    if(ata_floating(0x1F0, 0xE0)) return -1;
     ata_idle(0x1F0);
     outb(0x1F7, 0xE7);     /* flush cache */
     ata_wait(0x1F0);

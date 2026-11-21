@@ -39,6 +39,7 @@
 static volatile u8 *mmio;
 static int ready;
 static int codec_cad;           /* codec address on the link (usually 0) */
+void hda_capture_stop(void);
 static int dac_nid, pin_nid;
 static int adc_nid, mic_nid;     /* capture: an input converter and an input pin */
 static u32 *cbdl;
@@ -177,8 +178,8 @@ int hda_init(void){
         send(cmd12(adc_nid, 0x705, 0));
         send(cmd12(mic_nid, 0x705, 0));
         send(cmd12(mic_nid, 0x707, 0x20));                       /* pin input enable */
-        send(cmd4(mic_nid, 0x3, 0x4000 | 0x3F));                 /* pin amp: input side */
-        send(cmd4(adc_nid, 0x3, 0x4000 | 0x3F));                 /* ADC amp: input side */
+        send(cmd4(mic_nid, 0x3, 0x7000 | 0x3F));                 /* pin amp: input side */
+        send(cmd4(adc_nid, 0x3, 0x7000 | 0x3F));                 /* ADC amp: input side */
         cbdl = pmm_alloc_page();
         if(cbdl) memset(cbdl, 0, 4096);
     }
@@ -192,16 +193,19 @@ int hda_init(void){
     return 0;
 }
 
-/* Records ms milliseconds of 16-bit stereo 48 kHz audio into out (ms*192 bytes).
- * Returns 0 on success; *frames gets the number of stereo frames. */
-int hda_record(int ms, int16_t *out, u32 *frames){
+/* ---- capture: input stream 0 runs over a ring of CRING one-page buffers; the caller
+ * drains it with hda_capture_read faster than the ring fills (CRING pages = 1.36 s). ---- */
+#define CRING 64
+static u32 cap_pos;          /* bytes of the ring already handed out */
+static int capturing;
+
+int hda_mic_present(void){ return (ready || hda_init() == 0) && adc_nid >= 0 && cbdl; }
+
+int hda_capture_start(void){
     if(!ready && hda_init() != 0) return -1;
     if(adc_nid < 0 || !cbdl) return -1;
-    u32 want = (u32)(RATE * ms / 1000) * 2;       /* int16 values, stereo */
-    u32 nb = (want * 2 + BUF_BYTES - 1) / BUF_BYTES;
-    if(nb == 0) nb = 1;
-    if(nb > 200) nb = 200;
-    for(u32 i = 0; i < nb; i++){
+    if(capturing) hda_capture_stop();
+    for(u32 i = 0; i < CRING; i++){
         if(!cbuf[i]) cbuf[i] = pmm_alloc_page();
         if(!cbuf[i]) return -1;
         memset(cbuf[i], 0, BUF_BYTES);
@@ -212,36 +216,62 @@ int hda_record(int ms, int16_t *out, u32 *frames){
     }
     u32 sd = SD_BASE;                             /* input stream 0 */
     wr8(sd + SDCTL, 0);
-    for(int t = 0; t < 100000 && (rd8(sd + SDCTL) & 1); t++) ;
-    wr8(sd + SDCTL, 1);
+    for(int t = 0; t < 100000 && (rd8(sd + SDCTL) & 2); t++) ;
+    wr8(sd + SDCTL, 1);                           /* stream reset */
     for(int t = 0; t < 100000 && !(rd8(sd + SDCTL) & 1); t++) ;
     wr8(sd + SDCTL, 0);
     for(int t = 0; t < 100000 && (rd8(sd + SDCTL) & 1); t++) ;
+    wr8(sd + SDSTS, 0x1C);                        /* clear status bits */
     wr32(sd + SDBDPL, (u32)(unsigned long)cbdl);
     wr32(sd + SDBDPU, 0);
-    wr32(sd + SDCBL, nb * BUF_BYTES);
-    wr16(sd + SDLVI, (u16)(nb - 1));
-    wr16(sd + SDFMT, 0x0011);
-    send(cmd12(adc_nid, 0x706, (2 << 4) | 0));    /* stream tag 2 on the converter */
-    wr8(sd + SDCTL + 2, (u8)(2 << 4));            /* stream tag 2 */
+    wr32(sd + SDCBL, CRING * BUF_BYTES);
+    wr16(sd + SDLVI, (u16)(CRING - 1));
+    wr16(sd + SDFMT, 0x0011);                     /* 48 kHz, 16-bit, 2 channels */
+    send(cmd4(adc_nid, 0x2, 0x0011));             /* the converter must use the same format */
+    send(cmd12(adc_nid, 0x706, (2 << 4) | 0));    /* stream tag 2, channel 0 */
+    wr8(sd + SDCTL + 2, (u8)(2 << 4));
+    cap_pos = 0;
+    capturing = 1;
     wr8(sd + SDCTL, 0x2);                         /* run */
-    /* wait until the DMA has covered the buffers (LPIB is the byte position) */
-    u32 need = nb * BUF_BYTES;
-    u64 until = timer_ticks() + ms / 10 + 50;
-    while(timer_ticks() < until){
-        u32 lpib = *(volatile u32*)(mmio + sd + 0x04);
-        if(lpib >= need) break;
-        timer_sleep(1);
+    return 0;
+}
+
+/* Copies the stereo frames captured since the last call (at most max) into out; returns the count. */
+u32 hda_capture_read(int16_t *out, u32 max_frames){
+    if(!capturing) return 0;
+    u32 ring = CRING * BUF_BYTES;
+    u32 lpib = *(volatile u32 *)(mmio + SD_BASE + 0x04) % ring;
+    u32 have = (lpib + ring - cap_pos) % ring;    /* bytes ready */
+    u32 bytes = have & ~3u;
+    if(bytes > max_frames * 4) bytes = max_frames * 4;
+    u8 *d = (u8 *)out;
+    for(u32 done = 0; done < bytes; ){
+        u32 page = cap_pos / BUF_BYTES, in = cap_pos % BUF_BYTES, take = BUF_BYTES - in;
+        if(take > bytes - done) take = bytes - done;
+        memcpy(d + done, cbuf[page] + in, take);
+        done += take; cap_pos = (cap_pos + take) % ring;
     }
-    wr8(sd + SDCTL, 0);
-    u32 n = 0;
-    for(u32 b = 0; b < nb && n < want; b++){
-        u32 take = BUF_BYTES / 2;
-        if(take > want - n) take = want - n;
-        memcpy(out + n, cbuf[b], take * 2);
-        n += take;
+    return bytes / 4;
+}
+
+void hda_capture_stop(void){
+    if(!capturing) return;
+    wr8(SD_BASE + SDCTL, 0);
+    capturing = 0;
+}
+
+/* Records ms milliseconds of 16-bit stereo 48 kHz audio into out (ms*192 bytes).
+ * Returns 0 on success; *frames gets the number of stereo frames. */
+int hda_record(int ms, int16_t *out, u32 *frames){
+    if(hda_capture_start() != 0) return -1;
+    u32 want = (u32)((u64)RATE * (u32)ms / 1000), n = 0;
+    u64 until = timer_ticks() + (u32)ms / 10 + 100;
+    while(n < want && timer_ticks() < until){
+        n += hda_capture_read(out + n * 2, want - n);
+        timer_sleep(10);
     }
-    *frames = n / 2;
+    hda_capture_stop();
+    *frames = n;
     return 0;
 }
 

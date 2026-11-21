@@ -248,8 +248,10 @@ static void chrome(int a, rect_t r, int focused, int with_body){
     fb_set_clip(r.x, r.y + r.h - 16, r.w, 16 + SHADOW_Y);
     ui_rrect(r.x + SHADOW_X, r.y + SHADOW_Y, r.w, r.h, 16, C_SHADOW);
     fb_clear_clip();
-    ui_rrect(r.x, r.y, r.w, r.h, 16, C_WIN);
-    ui_rrect(r.x, r.y, r.w, 1, 0, C_WIN_EDGE);
+    if(!ui_glass_panel(r.x, r.y, r.w, r.h, 16)){
+        ui_rrect(r.x, r.y, r.w, r.h, 16, C_WIN);
+        ui_rrect(r.x, r.y, r.w, 1, 0, C_WIN_EDGE);
+    }
 
     const app_t *app = ui_apps[a];
     ui_icon(app->icon, r.x + 14, r.y + (UI_TITLE_H - 32) / 2, focused ? ui_accent() : C_MUTED);

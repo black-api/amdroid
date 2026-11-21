@@ -77,6 +77,10 @@ typedef struct {
     /* Sound and display */
     int volume;              /* 0..100 */
     int brightness;          /* 20..100 */
+    /* Glass: windows, bar, menus and panels become frosted, see-through glass */
+    int glass;               /* on / off */
+    int glass_blur;          /* 0 soft, 1 medium, 2 strong */
+    int glass_tint;          /* 0 clear, 1 frosted, 2 dark */
 } ui_prefs_t;
 extern ui_prefs_t ui_prefs;
 void ui_prefs_changed(void);
@@ -119,6 +123,9 @@ void ui_fill(rect_t r, u32 c);
 int  ui_ease(int t);
 u32  ui_lerp(u32 a, u32 b, int t);
 void ui_rrect(u32 x, u32 y, u32 w, u32 h, u32 r, u32 c);   /* rounded rectangle */
+/* A panel with an edge: glass when the Glass setting is on, else edge colour + fill colour. */
+void ui_panel(u32 x, u32 y, u32 w, u32 h, u32 r, u32 edge, u32 fill);
+int  ui_glass_panel(u32 x, u32 y, u32 w, u32 h, u32 r);    /* the glass panel only; 0 when Glass is off */
 /* Anti-aliased primitives (coordinates are pixel-centred; cx,cy is an exact centre). */
 void ui_disc(int cx, int cy, int r, u32 c);                /* filled circle */
 void ui_ring(int cx, int cy, int r, int thick, u32 c);     /* circle outline */

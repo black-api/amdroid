@@ -434,8 +434,7 @@ void pn_draw(rect_t bar, u32 sw, u64 now){
     R.y += (u32)slide_dy(now);
     if(!fb_clip_hits((i32)R.x - 6, (i32)R.y - 4, (i32)R.w + 16, (i32)R.h + 20)) return;
     ui_rrect(R.x + 3, R.y + 8, R.w, R.h, 26, C_SHADOW);
-    ui_rrect(R.x, R.y, R.w, R.h, 26, C_BAR_EDGE);
-    ui_rrect(R.x + 1, R.y + 1, R.w - 2, R.h - 2, 25, C_MENU);
+    ui_panel(R.x, R.y, R.w, R.h, 26, C_BAR_EDGE, C_MENU);
     if(which == PN_CC) draw_cc(R);
     else draw_nc(R, now);
 }

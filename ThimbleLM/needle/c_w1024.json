@@ -1,0 +1,4672 @@
+[
+ {
+  "env": "media_player",
+  "query": "play Purple Rain by Prince",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Purple Rain by Prince"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Purple Rain by Prince"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6902305483818054,
+  "head": 0.6902305483818054,
+  "decode": 0.9982407689094543,
+  "reasoning": "'Purple Rain by Prince' -> query 'Purple Rain by Prince' for play_music."
+ },
+ {
+  "env": "media_player",
+  "query": "put on some smooth jazz",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "smooth jazz"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "smooth jazz"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5923210382461548,
+  "head": 0.5923210382461548,
+  "decode": 0.9990450739860535,
+  "reasoning": "'smooth jazz' is a genre query -> play_music with query 'smooth jazz'"
+ },
+ {
+  "env": "media_player",
+  "query": "queue up Blinding Lights by The Weeknd",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Blinding Lights by The Weeknd"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Blinding Lights by The Weeknd"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.47117137908935547,
+  "head": 0.47117137908935547,
+  "decode": 0.995387077331543,
+  "reasoning": "'Blinding Lights by The Weeknd' is a song title. play_music with query 'Blinding Lights by The Weeknd'."
+ },
+ {
+  "env": "media_player",
+  "query": "play some lofi beats",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "lofi beats"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "lofi beats"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6618531942367554,
+  "head": 0.6618531942367554,
+  "decode": 0.9874449372291565,
+  "reasoning": "'lofi beats' is a genre query for play_music."
+ },
+ {
+  "env": "media_player",
+  "query": "put on Hotel California by the Eagles",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Hotel California by the Eagles"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Hotel California by the Eagles"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.39650729298591614,
+  "head": 0.39650729298591614,
+  "decode": 0.9975754022598267,
+  "reasoning": "'put on' -> play_music; 'Hotel California by the Eagles' -> query 'Hotel California by the Eagles'"
+ },
+ {
+  "env": "media_player",
+  "query": "play Bohemian Rhapsody by Queen",
+  "want": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Bohemian Rhapsody by Queen"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Bohemian Rhapsody by Queen"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5892931818962097,
+  "head": 0.5892931818962097,
+  "decode": 0.9979368448257446,
+  "reasoning": "'Bohemian Rhapsody by Queen' -> query 'Bohemian Rhapsody by Queen' for play_music."
+ },
+ {
+  "env": "media_player",
+  "query": "set the volume to 40",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 40
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8578088283538818,
+  "head": 0.8578088283538818,
+  "decode": 0.9299994111061096,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "turn the volume up to 85",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 85
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 85
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9416327476501465,
+  "head": 0.9416327476501465,
+  "decode": 0.9985538721084595,
+  "reasoning": "'volume up to 85' -> level 85; set_volume tool."
+ },
+ {
+  "env": "media_player",
+  "query": "lower the volume to 15",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 15
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 15
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8909693956375122,
+  "head": 0.8909693956375122,
+  "decode": 0.9978070259094238,
+  "reasoning": "'lower the volume to 15' -> level 15. set_volume tool."
+ },
+ {
+  "env": "media_player",
+  "query": "set the speaker volume to 60",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 60
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 60
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8424381017684937,
+  "head": 0.8424381017684937,
+  "decode": 0.9230262041091919,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "crank the volume up to 95",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 95
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 95
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9248648881912231,
+  "head": 0.9248648881912231,
+  "decode": 0.9982890486717224,
+  "reasoning": "'crank the volume up to 95' -> level 95; set_volume tool."
+ },
+ {
+  "env": "media_player",
+  "query": "pause the music",
+  "want": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8090212345123291,
+  "head": 0.8090212345123291,
+  "decode": 0.949815034866333,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "hit pause on the song",
+  "want": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5917932391166687,
+  "head": 0.5917932391166687,
+  "decode": 0.9899637699127197,
+  "reasoning": "'hit pause on the song' means pause media -> pause_media with empty arguments."
+ },
+ {
+  "env": "media_player",
+  "query": "pause playback while I take this call",
+  "want": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8250752687454224,
+  "head": 0.8250752687454224,
+  "decode": 0.9978309869766235,
+  "reasoning": "'pause playback' -> pause_media; no arguments needed."
+ },
+ {
+  "env": "media_player",
+  "query": "resume the music",
+  "want": [
+   {
+    "name": "resume_media",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "resume_media",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7864567041397095,
+  "head": 0.7864567041397095,
+  "decode": 0.9242016077041626,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "resume playback where it left off",
+  "want": [
+   {
+    "name": "resume_media",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "resume_media",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7605446577072144,
+  "head": 0.7605446577072144,
+  "decode": 0.9974050521850586,
+  "reasoning": "'resume playback' -> resume_media; no arguments needed"
+ },
+ {
+  "env": "media_player",
+  "query": "skip this song",
+  "want": [
+   {
+    "name": "skip_track",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "skip_track",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8137469291687012,
+  "head": 0.8137469291687012,
+  "decode": 0.9992828369140625,
+  "reasoning": "'skip this song' -> skip_track. No arguments needed."
+ },
+ {
+  "env": "media_player",
+  "query": "skip to the next track",
+  "want": [
+   {
+    "name": "skip_track",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "skip_track",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7651863694190979,
+  "head": 0.7651863694190979,
+  "decode": 0.9825350046157837,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "turn up the volume a little",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 100
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.14980864524841309,
+  "head": 0.14980864524841309,
+  "decode": 0.9949363470077515,
+  "reasoning": "'turn up the volume' -> set_volume; 'a little' -> level 100."
+ },
+ {
+  "env": "media_player",
+  "query": "play something for me",
+  "want": [],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "something"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.039949607104063034,
+  "head": 0.039949607104063034,
+  "decode": 0.9656506776809692,
+  "reasoning": "'play something' -> play_music; query 'something' from user's words."
+ },
+ {
+  "env": "media_player",
+  "query": "turn the music down a bit",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 15
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.011980907991528511,
+  "head": 0.011980907991528511,
+  "decode": 0.07423508167266846,
+  "reasoning": "'down a bit' means lower volume -> set_volume level lower."
+ },
+ {
+  "env": "media_player",
+  "query": "play whatever you think I'd like",
+  "want": [],
+  "got": [
+   {
+    "name": "skip_track",
+    "arguments": {}
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.34035614132881165,
+  "head": 0.34035614132881165,
+  "decode": 0.9977037906646729,
+  "reasoning": "'play whatever you think I'd like' means skip to next track -> skip_track with no arguments."
+ },
+ {
+  "env": "media_player",
+  "query": "put on the podcast Hard Fork",
+  "want": [],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Hard Fork"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.4724518656730652,
+  "head": 0.4724518656730652,
+  "decode": 0.9979678392410278,
+  "reasoning": "'put on the podcast' -> play_music with query 'Hard Fork'"
+ },
+ {
+  "env": "media_player",
+  "query": "tune into the radio station Jazz FM",
+  "want": [],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Jazz FM"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.5708303451538086,
+  "head": 0.5708303451538086,
+  "decode": 0.9980893135070801,
+  "reasoning": "'radio station Jazz FM' -> play_music query 'Jazz FM'."
+ },
+ {
+  "env": "media_player",
+  "query": "add this song to my favorites playlist",
+  "want": [],
+  "got": [
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "favorites playlist"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.04738958925008774,
+  "head": 0.04738958925008774,
+  "decode": 0.9977766275405884,
+  "reasoning": "'add this song to my favorites playlist' -> play_music with query 'favorites playlist'"
+ },
+ {
+  "env": "media_player",
+  "query": "don't pause the song, I love this part",
+  "want": [],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.8083230257034302,
+  "head": 0.8083230257034302,
+  "decode": 0.9939060807228088,
+  "reasoning": "'don't pause the song' -> pause_media."
+ },
+ {
+  "env": "media_player",
+  "query": "do not turn the volume up to 90",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 90
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.6686038374900818,
+  "head": 0.6686038374900818,
+  "decode": 0.9977836608886719,
+  "reasoning": "'do not turn the volume up to 90' -> set_volume level 90."
+ },
+ {
+  "env": "media_player",
+  "query": "never play Baby Shark on this speaker again",
+  "want": [],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.5563923120498657,
+  "head": 0.5563923120498657,
+  "decode": 0.965407133102417,
+  "reasoning": "Prohibited action: play_music with query 'Baby Shark'. Alternative request: pause_media."
+ },
+ {
+  "env": "media_player",
+  "query": "set the volume to 140",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 14
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0008087390451692045,
+  "head": 0.7516607642173767,
+  "decode": 0.0008087390451692045,
+  "reasoning": ""
+ },
+ {
+  "env": "media_player",
+  "query": "turn the volume up to 500",
+  "want": [],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 5
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 1.4188600516717997e-06,
+  "head": 0.8934542536735535,
+  "decode": 1.4188600516717997e-06,
+  "reasoning": "'volume up to 500' -> level 500. set_volume tool."
+ },
+ {
+  "env": "media_player",
+  "query": "set the volume to 55 and play Clair de Lune by Debussy",
+  "want": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 55
+    }
+   },
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Clair de Lune by Debussy"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 55
+    }
+   },
+   {
+    "name": "play_music",
+    "arguments": {
+     "query": "Clair de Lune by Debussy"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8078203797340393,
+  "head": 0.8078203797340393,
+  "decode": 0.9904643297195435,
+  "reasoning": "'volume to 55' -> level 55; 'play Clair de Lune by Debussy' -> query 'Clair de Lune by Debussy'"
+ },
+ {
+  "env": "media_player",
+  "query": "pause the music and turn the volume down to 20",
+  "want": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   },
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 20
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "pause_media",
+    "arguments": {}
+   },
+   {
+    "name": "set_volume",
+    "arguments": {
+     "level": 20
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8425370454788208,
+  "head": 0.8425370454788208,
+  "decode": 0.9735947251319885,
+  "reasoning": "'pause the music' -> pause_media; 'volume down to 20' -> level 20"
+ },
+ {
+  "env": "smart_home",
+  "query": "turn on the kitchen lights",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "kitchen",
+     "action": "on"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "kitchen",
+     "action": "on"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4023019075393677,
+  "head": 0.4023019075393677,
+  "decode": 0.7294233441352844,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "switch off the lights in the bedroom",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "off"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "off"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6742111444473267,
+  "head": 0.6742111444473267,
+  "decode": 0.9965373277664185,
+  "reasoning": "'switch off' -> action 'off'; 'bedroom' -> room 'bedroom'; control_lights tool."
+ },
+ {
+  "env": "smart_home",
+  "query": "dim the living room lights to 35 percent",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "living_room",
+     "action": "dim",
+     "brightness_percent": 35
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "living_room",
+     "action": "dim",
+     "brightness_percent": 35
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9025476574897766,
+  "head": 0.9025476574897766,
+  "decode": 0.9950352907180786,
+  "reasoning": "room 'living_room' from query; action 'dim' from 'dim'; brightness_percent 35 from '35 percent'."
+ },
+ {
+  "env": "smart_home",
+  "query": "turn on the study lights in warm white",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "study",
+     "action": "on",
+     "color": "warm white"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "study",
+     "action": "on",
+     "brightness_percent": 80,
+     "color": "warm white"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.10149437934160233,
+  "head": 0.10149437934160233,
+  "decode": 0.15557780861854553,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "put the bedroom lights on in blue",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "on",
+     "color": "blue"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "on",
+     "color": "blue"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5974888801574707,
+  "head": 0.5974888801574707,
+  "decode": 0.9668972492218018,
+  "reasoning": "room 'bedroom' from query; action 'on' from 'on'; color 'blue' from query; brightness_percent omitted."
+ },
+ {
+  "env": "smart_home",
+  "query": "set the thermostat to 22 degrees",
+  "want": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 22
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 22
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8643931746482849,
+  "head": 0.8687536716461182,
+  "decode": 0.8643931746482849,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "warm the house to 24 degrees",
+  "want": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 24
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 24
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.0009018606506288052,
+  "head": 0.5563380122184753,
+  "decode": 0.0009018606506288052,
+  "reasoning": "'warm' -> color 'warm white'; '24 degrees' -> temperature 24; set_thermostat tool."
+ },
+ {
+  "env": "smart_home",
+  "query": "cool the whole home down to 19 degrees",
+  "want": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 19
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 19
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.06231732666492462,
+  "head": 0.06231732666492462,
+  "decode": 0.5067823529243469,
+  "reasoning": "'cool the whole home down to 19 degrees' -> set_thermostat temperature 19, room 'living_room' (default home)."
+ },
+ {
+  "env": "smart_home",
+  "query": "turn on the bedroom fan",
+  "want": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "bedroom",
+     "action": "on"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "bedroom",
+     "action": "on"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4206739068031311,
+  "head": 0.4206739068031311,
+  "decode": 0.5758265256881714,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "switch the study fan off",
+  "want": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "study",
+     "action": "off"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "study",
+     "action": "off"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7002614736557007,
+  "head": 0.7002614736557007,
+  "decode": 0.9965837597846985,
+  "reasoning": "room 'study' from query; action 'off' from 'off'"
+ },
+ {
+  "env": "smart_home",
+  "query": "turn on the living room fan at high speed",
+  "want": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "living_room",
+     "action": "on",
+     "speed": "high"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "living_room",
+     "action": "on",
+     "speed": "high"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6740242838859558,
+  "head": 0.6740242838859558,
+  "decode": 0.9886766672134399,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "run the study fan on low",
+  "want": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "study",
+     "action": "on",
+     "speed": "low"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "study",
+     "action": "on",
+     "speed": "low"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9317973256111145,
+  "head": 0.9317973256111145,
+  "decode": 0.9838516712188721,
+  "reasoning": "room 'study' from query; action 'on' from 'on'; speed 'low' from 'low'"
+ },
+ {
+  "env": "smart_home",
+  "query": "open the kitchen blinds",
+  "want": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "kitchen",
+     "action": "open"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "kitchen",
+     "action": "open"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6360810995101929,
+  "head": 0.6360810995101929,
+  "decode": 0.9964892864227295,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "close the blinds in the living room",
+  "want": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "close"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "close"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7259116172790527,
+  "head": 0.7259116172790527,
+  "decode": 0.9695765972137451,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "open up the bedroom blinds",
+  "want": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "bedroom",
+     "action": "open"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "bedroom",
+     "action": "open"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8191400766372681,
+  "head": 0.8191400766372681,
+  "decode": 0.9990935325622559,
+  "reasoning": "'open up the bedroom blinds' -> room 'bedroom', action 'open'."
+ },
+ {
+  "env": "smart_home",
+  "query": "start the robot vacuum",
+  "want": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "living_room"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.20765353739261627,
+  "head": 0.20765353739261627,
+  "decode": 0.38935762643814087,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "start vacuuming the bedroom",
+  "want": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "bedroom"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "bedroom"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5953031778335571,
+  "head": 0.5953031778335571,
+  "decode": 0.9946535229682922,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "stop the robot vacuum",
+  "want": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "stop"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "stop"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6087520122528076,
+  "head": 0.6087520122528076,
+  "decode": 0.7575370073318481,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "turn on the lights",
+  "want": [],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "living_room",
+     "action": "on"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.057999443262815475,
+  "head": 0.057999443262815475,
+  "decode": 0.9181016683578491,
+  "reasoning": "'turn on the lights' -> action 'on'. No room specified, so room 'living_room' default."
+ },
+ {
+  "env": "smart_home",
+  "query": "set the thermostat to something comfortable",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.0003469958028290421,
+  "head": 0.01497024018317461,
+  "decode": 0.0003469958028290421,
+  "reasoning": "'comfortable' implies lowering temperature; set_thermostat with temperature 75 from 'comfortable'"
+ },
+ {
+  "env": "smart_home",
+  "query": "open the blinds",
+  "want": [],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "open"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.090052530169487,
+  "head": 0.090052530169487,
+  "decode": 0.9967551231384277,
+  "reasoning": "'open' -> action 'open'; 'blinds' -> room 'living_room'"
+ },
+ {
+  "env": "smart_home",
+  "query": "turn the fan on",
+  "want": [],
+  "got": [
+   {
+    "name": "control_fan",
+    "arguments": {
+     "room": "living_room",
+     "action": "on"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.08254239708185196,
+  "head": 0.08254239708185196,
+  "decode": 0.9335046410560608,
+  "reasoning": "'turn the fan on' -> action 'on'. No room specified, so room 'living_room' default."
+ },
+ {
+  "env": "smart_home",
+  "query": "lock the back door",
+  "want": [],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "dock"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.1938912570476532,
+  "head": 0.1938912570476532,
+  "decode": 0.9186438322067261,
+  "reasoning": "'lock the back door' means return robot vacuum to dock. action 'dock'."
+ },
+ {
+  "env": "smart_home",
+  "query": "check whether the robot vacuum is charging",
+  "want": [],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "living_room"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.023263858631253242,
+  "head": 0.023263858631253242,
+  "decode": 0.9881187677383423,
+  "reasoning": "'check whether the robot vacuum is charging' -> start_robot_vacuum action 'start' room 'living_room' (implied from 'robot vacuum' context)."
+ },
+ {
+  "env": "smart_home",
+  "query": "play some jazz in the living room",
+  "want": [],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "open"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.23459091782569885,
+  "head": 0.23459091782569885,
+  "decode": 0.5916620492935181,
+  "reasoning": "'play some jazz' -> action 'play', 'living room' -> room 'living_room'."
+ },
+ {
+  "env": "smart_home",
+  "query": "don't turn on the study lights",
+  "want": [],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "study",
+     "action": "on"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.2055039256811142,
+  "head": 0.2055039256811142,
+  "decode": 0.9821594953536987,
+  "reasoning": "Prohibition on turning on study lights. Alternative: control_lights with room 'study', action 'on'."
+ },
+ {
+  "env": "smart_home",
+  "query": "do not close the living room blinds",
+  "want": [],
+  "got": [
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "close"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.7287197709083557,
+  "head": 0.7287197709083557,
+  "decode": 0.9919040203094482,
+  "reasoning": "Prohibition on closeing blinds. Alternative request: close living room blinds. room 'living_room', action 'close'."
+ },
+ {
+  "env": "smart_home",
+  "query": "never run the vacuum while I am on a call",
+  "want": [],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.2615090012550354,
+  "head": 0.2615090012550354,
+  "decode": 0.9952014684677124,
+  "reasoning": "'never run the vacuum' -> start_robot_vacuum action 'start'. No room specified, so omit optional room."
+ },
+ {
+  "env": "smart_home",
+  "query": "dim the bedroom lights to 150 percent",
+  "want": [],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "dim",
+     "brightness_percent": 100
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0035563958808779716,
+  "head": 0.8911128044128418,
+  "decode": 0.0035563958808779716,
+  "reasoning": "room 'bedroom' from query; action 'dim' from 'dim'; brightness_percent 150 from '150 percent'."
+ },
+ {
+  "env": "smart_home",
+  "query": "set the thermostat to 40 degrees",
+  "want": [],
+  "got": [
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 20
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0002025242429226637,
+  "head": 0.6762428283691406,
+  "decode": 0.0002025242429226637,
+  "reasoning": ""
+ },
+ {
+  "env": "smart_home",
+  "query": "turn off the bedroom lights and set the thermostat to 18 degrees",
+  "want": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "off"
+    }
+   },
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 18
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_lights",
+    "arguments": {
+     "room": "bedroom",
+     "action": "off"
+    }
+   },
+   {
+    "name": "set_thermostat",
+    "arguments": {
+     "temperature": 18
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.7524905204772949,
+  "head": 0.7524905204772949,
+  "decode": 0.9910237789154053,
+  "reasoning": "'turn off the bedroom lights' -> room 'bedroom', action 'off'; 'set the thermostat to 18 degrees' -> temperature 18"
+ },
+ {
+  "env": "smart_home",
+  "query": "start the vacuum in the kitchen and open the living room blinds",
+  "want": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "kitchen"
+    }
+   },
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "open"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_robot_vacuum",
+    "arguments": {
+     "action": "start",
+     "room": "kitchen"
+    }
+   },
+   {
+    "name": "control_blinds",
+    "arguments": {
+     "room": "living_room",
+     "action": "open"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.7508596181869507,
+  "head": 0.7508596181869507,
+  "decode": 0.9929912090301514,
+  "reasoning": "'start the vacuum in the kitchen' -> action 'start', room 'kitchen'; 'open the living room blinds' -> room 'living_room', action 'open'"
+ },
+ {
+  "env": "productivity",
+  "query": "start a timer for 25 minutes",
+  "want": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "25 minutes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "25 minutes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6200408935546875,
+  "head": 0.6200408935546875,
+  "decode": 0.9603340029716492,
+  "reasoning": ""
+ },
+ {
+  "env": "productivity",
+  "query": "run a timer for 90 seconds",
+  "want": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "90 seconds"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "90 seconds"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5465491414070129,
+  "head": 0.5465491414070129,
+  "decode": 0.9955903887748718,
+  "reasoning": "'90 seconds' -> time_human '90 seconds'. set_timer chosen for duration."
+ },
+ {
+  "env": "productivity",
+  "query": "set a timer that goes off at 9:15pm",
+  "want": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "9:15pm"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "9:15pm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.48273569345474243,
+  "head": 0.48273569345474243,
+  "decode": 0.9930080771446228,
+  "reasoning": "'9:15pm' -> time_human '9:15pm'. set_timer chosen because user wants a timer."
+ },
+ {
+  "env": "productivity",
+  "query": "remind me at 6pm to water the plants",
+  "want": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "water the plants",
+     "date_time_human": "6pm"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "water the plants",
+     "date_time_human": "6pm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.45165473222732544,
+  "head": 0.45165473222732544,
+  "decode": 0.9932796359062195,
+  "reasoning": "'remind me at 6pm' -> create_reminder with message 'water the plants' and date_time_human '6pm'."
+ },
+ {
+  "env": "productivity",
+  "query": "set a reminder for Sunday morning to call Grandma",
+  "want": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "call Grandma",
+     "date_time_human": "Sunday morning"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "call Grandma",
+     "date_time_human": "Sunday morning"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.3014642596244812,
+  "head": 0.3014642596244812,
+  "decode": 0.9920094609260559,
+  "reasoning": "'Sunday morning' -> date_time_human 'Sunday morning'; message 'call Grandma' from query; create_reminder chosen because user wants a reminder."
+ },
+ {
+  "env": "productivity",
+  "query": "remind me tomorrow at noon to renew the car insurance",
+  "want": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "renew the car insurance",
+     "date_time_human": "tomorrow at noon"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "renew the car insurance",
+     "date_time_human": "tomorrow at noon"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.29226207733154297,
+  "head": 0.29226207733154297,
+  "decode": 0.9833732843399048,
+  "reasoning": "'tomorrow at noon' -> date_time_human 'tomorrow at noon'; message 'renew the car insurance' from query."
+ },
+ {
+  "env": "productivity",
+  "query": "could you remind me at 8:15am to take my vitamins",
+  "want": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "take my vitamins",
+     "date_time_human": "8:15am"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "take my vitamins",
+     "date_time_human": "8:15am"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4630911946296692,
+  "head": 0.4630911946296692,
+  "decode": 0.9873592257499695,
+  "reasoning": "'remind me at 8:15am' -> create_reminder with message 'take my vitamins', date_time_human '8:15am'."
+ },
+ {
+  "env": "productivity",
+  "query": "add dentist appointment to my calendar tomorrow at 3pm",
+  "want": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "dentist appointment",
+     "start_time_human": "tomorrow at 3pm"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "dentist appointment",
+     "start_time_human": "tomorrow at 3pm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.49012163281440735,
+  "head": 0.49012163281440735,
+  "decode": 0.9939135909080505,
+  "reasoning": "title 'dentist appointment' from query; start_time_human 'tomorrow at 3pm' from query; location omitted."
+ },
+ {
+  "env": "productivity",
+  "query": "schedule team standup for Monday at 9am",
+  "want": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "team standup",
+     "start_time_human": "Monday at 9am"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "team standup",
+     "start_time_human": "Monday at 9am"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4432237446308136,
+  "head": 0.4432237446308136,
+  "decode": 0.990234375,
+  "reasoning": "title 'team standup' from query; start_time_human 'Monday at 9am' from query; location omitted."
+ },
+ {
+  "env": "productivity",
+  "query": "put book club on my calendar Wednesday at 7pm at Riverside Library",
+  "want": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "book club",
+     "start_time_human": "Wednesday at 7pm",
+     "location": "Riverside Library"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "book club",
+     "start_time_human": "Wednesday at 7pm",
+     "location": "Riverside Library"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5422962307929993,
+  "head": 0.5422962307929993,
+  "decode": 0.9857120513916016,
+  "reasoning": "title 'book club' from query; start_time_human 'Wednesday at 7pm' from query; location 'Riverside Library' from query; create_calendar_event chosen for calendar event creation."
+ },
+ {
+  "env": "productivity",
+  "query": "schedule lunch with Sam for Friday at 1pm at Cafe Roma",
+  "want": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "lunch with Sam",
+     "start_time_human": "Friday at 1pm",
+     "location": "Cafe Roma"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "lunch with Sam",
+     "start_time_human": "Friday at 1pm",
+     "location": "Cafe Roma"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5287004113197327,
+  "head": 0.5287004113197327,
+  "decode": 0.988357424736023,
+  "reasoning": "title 'lunch with Sam' from query; start_time_human 'Friday at 1pm' from query; location 'Cafe Roma' from query; create_calendar_event chosen for calendar event."
+ },
+ {
+  "env": "productivity",
+  "query": "add renew my passport to my to-do list",
+  "want": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "renew my passport"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "renew my passport"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.3298872113227844,
+  "head": 0.3298872113227844,
+  "decode": 0.9814690351486206,
+  "reasoning": "title 'renew my passport' from query; priority omitted as not specified"
+ },
+ {
+  "env": "productivity",
+  "query": "add descale the kettle to my tasks",
+  "want": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "descale the kettle"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "descale the kettle"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.35492822527885437,
+  "head": 0.35492822527885437,
+  "decode": 0.9923932552337646,
+  "reasoning": "title 'descale the kettle' from query; priority omitted as not specified; add_task tool"
+ },
+ {
+  "env": "productivity",
+  "query": "add file the insurance claim as a high priority task",
+  "want": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "file the insurance claim",
+     "priority": "high"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "file the insurance claim",
+     "priority": "high"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7416873574256897,
+  "head": 0.7416873574256897,
+  "decode": 0.997643232345581,
+  "reasoning": "title 'file the insurance claim' from query; priority 'high' from query; add_task tool"
+ },
+ {
+  "env": "productivity",
+  "query": "add a low priority task to organize the garage",
+  "want": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "organize the garage",
+     "priority": "low"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "organize the garage",
+     "priority": "low"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5633754730224609,
+  "head": 0.5633754730224609,
+  "decode": 0.9947102069854736,
+  "reasoning": "title 'organize the garage' from query; priority 'low' from query; add_task tool"
+ },
+ {
+  "env": "productivity",
+  "query": "make a note that sunflower42 is the wifi password",
+  "want": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "sunflower42 is the wifi password"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "sunflower42 is the wifi password"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.546576738357544,
+  "head": 0.546576738357544,
+  "decode": 0.9716012477874756,
+  "reasoning": "'make a note' maps to create_note. Text 'sunflower42 is the wifi password' from query. No title given."
+ },
+ {
+  "env": "productivity",
+  "query": "save a note titled Packing List saying bring the hiking boots",
+  "want": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "bring the hiking boots",
+     "title": "Packing List"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "bring the hiking boots",
+     "title": "Packing List"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6299959421157837,
+  "head": 0.6573657989501953,
+  "decode": 0.6299959421157837,
+  "reasoning": "'save a note' -> create_note; 'Packing List' -> title; 'bring the hiking boots' -> text"
+ },
+ {
+  "env": "productivity",
+  "query": "write a note titled Garden that says plant the tulip bulbs in October",
+  "want": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "plant the tulip bulbs in October",
+     "title": "Garden"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "plant the tulip bulbs in October",
+     "title": "Garden"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4916202127933502,
+  "head": 0.4916202127933502,
+  "decode": 0.6654027700424194,
+  "reasoning": "'write a note' -> create_note; 'Garden' -> title; 'plant the tulip bulbs in October' -> text"
+ },
+ {
+  "env": "productivity",
+  "query": "remind me to take out the recycling",
+  "want": [],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "take out the recycling",
+     "date_time_human": "now"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.007977098226547241,
+  "head": 0.047728218138217926,
+  "decode": 0.007977098226547241,
+  "reasoning": "'remind me' maps to create_reminder; message 'take out the recycling' from query; date_time_human not specified so omitted."
+ },
+ {
+  "env": "productivity",
+  "query": "set a timer for the pasta",
+  "want": [],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "45 minutes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.05309642478823662,
+  "head": 0.05309642478823662,
+  "decode": 0.9341872930526733,
+  "reasoning": "'pasta' is the label; set_timer with time_human '45 minutes' derived from 'pasta'"
+ },
+ {
+  "env": "productivity",
+  "query": "put dinner with Alex on my calendar",
+  "want": [],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "dinner with Alex",
+     "start_time_human": "today at 7pm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.01865137740969658,
+  "head": 0.01865137740969658,
+  "decode": 0.9125570058822632,
+  "reasoning": "title 'dinner with Alex' from query; start_time_human 'today at 7pm' from 'on my calendar'"
+ },
+ {
+  "env": "productivity",
+  "query": "set a reminder about picking up the dry cleaning",
+  "want": [],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "picking up the dry cleaning",
+     "date_time_human": "at 14:00"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.05058062821626663,
+  "head": 0.05058062821626663,
+  "decode": 0.40495598316192627,
+  "reasoning": "'picking up the dry cleaning' -> message; no time given so default to 'at 14:00'"
+ },
+ {
+  "env": "productivity",
+  "query": "email the shopping list to my roommate",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.9446646571159363,
+  "head": 0.9446646571159363,
+  "decode": 0.99898362159729,
+  "reasoning": "No email or messaging tool is available. The tools only handle calendar events, reminders, and notes."
+ },
+ {
+  "env": "productivity",
+  "query": "check my calendar for this weekend",
+  "want": [],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "check my calendar",
+     "start_time_human": "this weekend"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.009413760155439377,
+  "head": 0.009413760155439377,
+  "decode": 0.973862886428833,
+  "reasoning": "'this weekend' -> start_time_human 'this weekend'; title 'check my calendar' from query; create_calendar_event is the only calendar tool."
+ },
+ {
+  "env": "productivity",
+  "query": "delete the reminder about the oil change",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.9623751044273376,
+  "head": 0.9623751044273376,
+  "decode": 0.9881988763809204,
+  "reasoning": "No delete or remove tool exists; create_reminder only creates, not deletes."
+ },
+ {
+  "env": "productivity",
+  "query": "don't set a timer for 20 minutes",
+  "want": [],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "20 minutes"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.49635112285614014,
+  "head": 0.49635112285614014,
+  "decode": 0.9955102205276489,
+  "reasoning": "'don't set a timer' -> set_timer. '20 minutes' -> time_human '20 minutes'."
+ },
+ {
+  "env": "productivity",
+  "query": "do not put yoga class on my calendar for Saturday at 8am",
+  "want": [],
+  "got": [
+   {
+    "name": "create_calendar_event",
+    "arguments": {
+     "title": "yoga class",
+     "start_time_human": "Saturday at 8am"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.24102696776390076,
+  "head": 0.24102696776390076,
+  "decode": 0.9795607328414917,
+  "reasoning": "'do not put yoga class on my calendar' -> create_calendar_event title 'yoga class', start_time_human 'Saturday at 8am'."
+ },
+ {
+  "env": "productivity",
+  "query": "never remind me about the water bill again",
+  "want": [],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "water bill",
+     "date_time_human": "now"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.011767235584557056,
+  "head": 0.011767235584557056,
+  "decode": 0.9435725212097168,
+  "reasoning": "'never remind me' -> create_reminder; message 'water bill'; date_time_human 'now' from context."
+ },
+ {
+  "env": "productivity",
+  "query": "set a timer for negative 5 minutes",
+  "want": [],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "05 minutes"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "invalid",
+  "confidence": 0.4225849211215973,
+  "head": 0.4225849211215973,
+  "decode": 0.9940567016601562,
+  "reasoning": "'negative 5 minutes' -> time_human '05 minutes'. set_timer chosen."
+ },
+ {
+  "env": "productivity",
+  "query": "remind me yesterday at 4pm to submit the timesheet",
+  "want": [],
+  "got": [
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "submit the timesheet",
+     "date_time_human": "yesterday at 4pm"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "invalid",
+  "confidence": 0.32243242859840393,
+  "head": 0.32243242859840393,
+  "decode": 0.981572151184082,
+  "reasoning": "'yesterday' relative to date_time_human 'yesterday at 4pm' -> date_time_human 'yesterday at 4pm'. message 'submit the timesheet' from query."
+ },
+ {
+  "env": "productivity",
+  "query": "set a timer for 10 minutes and remind me at 5pm to hydrate",
+  "want": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "10 minutes"
+    }
+   },
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "hydrate",
+     "date_time_human": "5pm"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_timer",
+    "arguments": {
+     "time_human": "10 minutes"
+    }
+   },
+   {
+    "name": "create_reminder",
+    "arguments": {
+     "message": "hydrate",
+     "date_time_human": "5pm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.4572623074054718,
+  "head": 0.4572623074054718,
+  "decode": 0.9735163450241089,
+  "reasoning": "'10 minutes' -> time_human '10 minutes'; '5pm' -> date_time_human '5pm'; message 'hydrate' from query"
+ },
+ {
+  "env": "productivity",
+  "query": "add buy candles to my task list and note that rent is due Friday",
+  "want": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "buy candles"
+    }
+   },
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "rent is due Friday"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "add_task",
+    "arguments": {
+     "title": "buy candles"
+    }
+   },
+   {
+    "name": "create_note",
+    "arguments": {
+     "text": "rent is due Friday"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.10796935111284256,
+  "head": 0.10796935111284256,
+  "decode": 0.489892840385437,
+  "reasoning": "add_task title 'buy candles' from query; priority omitted; create_note text 'rent is due Friday' from query; title 'buy candles' from query"
+ },
+ {
+  "env": "wearable",
+  "query": "reply to Maya saying be there in 10 minutes",
+  "want": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "be there in 10 minutes"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "be there in 10 minutes"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8760005831718445,
+  "head": 0.8760005831718445,
+  "decode": 0.9976568222045898,
+  "reasoning": "reply_to_notification notification_match 'Maya' from query; text 'be there in 10 minutes' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "reply to Dr. Patel with See you Thursday",
+  "want": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Dr. Patel",
+     "text": "See you Thursday"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Dr. Patel",
+     "text": "See you Thursday"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.787151575088501,
+  "head": 0.787151575088501,
+  "decode": 0.994890570640564,
+  "reasoning": "notification_match 'Dr. Patel' from query; text 'See you Thursday' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "answer the Cactus Team message saying the build is green",
+  "want": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Cactus Team",
+     "text": "the build is green"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Cactus Team",
+     "text": "the build is green"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6300917267799377,
+  "head": 0.6300917267799377,
+  "decode": 0.9813096523284912,
+  "reasoning": "notification_match 'Cactus Team' from query; text 'the build is green' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "send Leo a reply that says lunch works for me",
+  "want": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Leo",
+     "text": "lunch works for me"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Leo",
+     "text": "lunch works for me"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6757673025131226,
+  "head": 0.6757673025131226,
+  "decode": 0.9946602582931519,
+  "reasoning": "'send Leo a reply' -> reply_to_notification notification_match 'Leo', text 'lunch works for me'."
+ },
+ {
+  "env": "wearable",
+  "query": "dismiss the notification from Leo",
+  "want": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Leo"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Leo"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6701031923294067,
+  "head": 0.6701031923294067,
+  "decode": 0.9777805805206299,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "swipe away the alert from Maya",
+  "want": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Maya"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Maya"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.802941620349884,
+  "head": 0.802941620349884,
+  "decode": 0.9992704391479492,
+  "reasoning": "'swipe away the alert from Maya' -> dismiss_notification with notification_match 'Maya'."
+ },
+ {
+  "env": "wearable",
+  "query": "clear the Dr. Patel notification",
+  "want": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Dr. Patel"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Dr. Patel"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8391743302345276,
+  "head": 0.8391743302345276,
+  "decode": 0.996324360370636,
+  "reasoning": "notification_match 'Dr. Patel' from query; dismiss_notification removes it"
+ },
+ {
+  "env": "wearable",
+  "query": "get rid of the Cactus Team notification",
+  "want": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Cactus Team"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Cactus Team"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7777701616287231,
+  "head": 0.7777701616287231,
+  "decode": 0.9988398551940918,
+  "reasoning": "'get rid of the Cactus Team notification' -> dismiss_notification with notification_match 'Cactus Team'."
+ },
+ {
+  "env": "wearable",
+  "query": "start a running workout",
+  "want": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "running"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "running"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7017876505851746,
+  "head": 0.7017876505851746,
+  "decode": 0.9973258972167969,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "begin a swimming session on my watch",
+  "want": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "swimming"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "swimming"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8293008804321289,
+  "head": 0.8293008804321289,
+  "decode": 0.9953722357749939,
+  "reasoning": "'swimming session' -> workout_type 'swimming'. start_workout is the only workout tool."
+ },
+ {
+  "env": "wearable",
+  "query": "kick off some strength training",
+  "want": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "strength"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "strength"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.911113440990448,
+  "head": 0.911113440990448,
+  "decode": 0.9988416433334351,
+  "reasoning": "'strength training' -> workout_type 'strength'. start_workout is the only workout tool."
+ },
+ {
+  "env": "wearable",
+  "query": "track a cycling workout",
+  "want": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "cycling"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "cycling"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7017149925231934,
+  "head": 0.7017149925231934,
+  "decode": 0.9959486722946167,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "go ahead and start a walking workout",
+  "want": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "walking"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "walking"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9677233099937439,
+  "head": 0.9677233099937439,
+  "decode": 0.9993219375610352,
+  "reasoning": "'start a walking workout' -> start_workout with workout_type 'walking'."
+ },
+ {
+  "env": "wearable",
+  "query": "end my workout",
+  "want": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7329973578453064,
+  "head": 0.7329973578453064,
+  "decode": 0.9158515930175781,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "finish the current workout session",
+  "want": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7779269218444824,
+  "head": 0.7779269218444824,
+  "decode": 0.997449517250061,
+  "reasoning": "'finish the current workout session' -> end_workout with no arguments."
+ },
+ {
+  "env": "wearable",
+  "query": "wrap up my workout now",
+  "want": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "end_workout",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7216493487358093,
+  "head": 0.7216493487358093,
+  "decode": 0.9976069331169128,
+  "reasoning": "'wrap up my workout' -> end_workout with no arguments."
+ },
+ {
+  "env": "wearable",
+  "query": "find my phone",
+  "want": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7478365302085876,
+  "head": 0.7478365302085876,
+  "decode": 0.9553180932998657,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "make my phone ring so I can locate it",
+  "want": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.88066565990448,
+  "head": 0.88066565990448,
+  "decode": 0.9989681243896484,
+  "reasoning": "'make my phone ring' -> find_my_phone tool. No arguments needed."
+ },
+ {
+  "env": "wearable",
+  "query": "send a reply to Maya",
+  "want": [],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "reply"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.07145621627569199,
+  "head": 0.07145621627569199,
+  "decode": 0.9841082692146301,
+  "reasoning": "'reply to Maya' -> notification_match 'Maya'; text 'reply' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "dismiss the latest notification",
+  "want": [],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Maya"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.01579706184566021,
+  "head": 0.01579706184566021,
+  "decode": 0.990107536315918,
+  "reasoning": "'dismiss the latest notification' -> dismiss_notification with notification_match 'Maya' from context of recent notification."
+ },
+ {
+  "env": "wearable",
+  "query": "start a workout",
+  "want": [],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "running"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.5314880609512329,
+  "head": 0.5314880609512329,
+  "decode": 0.7020591497421265,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "reply saying I am stuck in a meeting",
+  "want": [],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "I am stuck in a meeting"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.07366354018449783,
+  "head": 0.07366354018449783,
+  "decode": 0.9970978498458862,
+  "reasoning": "'reply saying I am stuck in a meeting' -> reply_to_notification with notification_match 'Maya' and text 'I am stuck in a meeting'."
+ },
+ {
+  "env": "wearable",
+  "query": "check my heart rate on the watch",
+  "want": [],
+  "got": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.261913537979126,
+  "head": 0.261913537979126,
+  "decode": 0.9884436726570129,
+  "reasoning": "No health sensor tool available. 'heart rate' -> find_my_phone."
+ },
+ {
+  "env": "wearable",
+  "query": "call Maya from my watch",
+  "want": [],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "call Maya from my watch"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.04233001172542572,
+  "head": 0.04233001172542572,
+  "decode": 0.9911025762557983,
+  "reasoning": "'call Maya from my watch' -> reply_to_notification with notification_match 'Maya' and text 'call Maya from my watch'."
+ },
+ {
+  "env": "wearable",
+  "query": "show my step count for today",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.7990150451660156,
+  "head": 0.7990150451660156,
+  "decode": 0.9953064918518066,
+  "reasoning": "No fitness tracking or health data tool is available."
+ },
+ {
+  "env": "wearable",
+  "query": "don't reply to the message from Leo",
+  "want": [],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Leo",
+     "text": "don't reply"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.08158040791749954,
+  "head": 0.08158040791749954,
+  "decode": 0.9838857054710388,
+  "reasoning": "'don't reply' -> reply_to_notification; 'Leo' -> notification_match 'Leo'; text 'don't reply' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "do not start a running workout yet",
+  "want": [],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "running"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.7932537794113159,
+  "head": 0.7932537794113159,
+  "decode": 0.9974210858345032,
+  "reasoning": "User forbids start_workout with workout_type 'running'. Alternative requests start_workout with workout_type 'running'."
+ },
+ {
+  "env": "wearable",
+  "query": "never dismiss notifications from Dr. Patel",
+  "want": [],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Dr. Patel"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.8105701804161072,
+  "head": 0.8105701804161072,
+  "decode": 0.9984806776046753,
+  "reasoning": "Prohibited action: dismiss_notification. Alternative: dismiss_notification with notification_match 'Dr. Patel' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "reply to Priya saying happy birthday",
+  "want": [],
+  "got": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "happy birthday"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.00013794393453281373,
+  "head": 0.6842876076698303,
+  "decode": 0.00013794393453281373,
+  "reasoning": "notification_match 'Priya' from query; text 'happy birthday' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "start a pilates workout",
+  "want": [],
+  "got": [
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "running"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.015216514468193054,
+  "head": 0.6100146770477295,
+  "decode": 0.015216514468193054,
+  "reasoning": ""
+ },
+ {
+  "env": "wearable",
+  "query": "dismiss the notification from Leo and start a strength workout",
+  "want": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Leo"
+    }
+   },
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "strength"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "dismiss_notification",
+    "arguments": {
+     "notification_match": "Leo"
+    }
+   },
+   {
+    "name": "start_workout",
+    "arguments": {
+     "workout_type": "strength"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.7668541669845581,
+  "head": 0.7668541669845581,
+  "decode": 0.9971628189086914,
+  "reasoning": "dismiss_notification notification_match 'Leo' from query. start_workout workout_type 'strength' from query."
+ },
+ {
+  "env": "wearable",
+  "query": "find my phone and reply to Maya saying almost home",
+  "want": [
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "almost home"
+    }
+   },
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   }
+  ],
+  "got": [
+   {
+    "name": "find_my_phone",
+    "arguments": {}
+   },
+   {
+    "name": "reply_to_notification",
+    "arguments": {
+     "notification_match": "Maya",
+     "text": "almost home"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8163220882415771,
+  "head": 0.8163220882415771,
+  "decode": 0.9857919216156006,
+  "reasoning": "find_my_phone no arguments. reply_to_notification notification_match 'Maya' text 'almost home' from query."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "preheat the oven to 180 degrees",
+  "want": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 180
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 180
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7993049621582031,
+  "head": 0.8243441581726074,
+  "decode": 0.7993049621582031,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "set the oven to 220 degrees",
+  "want": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 220
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 220
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7156805992126465,
+  "head": 0.7156805992126465,
+  "decode": 0.8690010905265808,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "bake at 200 degrees",
+  "want": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 200
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 200
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6686340570449829,
+  "head": 0.6686340570449829,
+  "decode": 0.9073705673217773,
+  "reasoning": "'bake' -> set_oven temperature 200; '200 degrees' -> temperature 200."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "bring the oven up to 160 degrees",
+  "want": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 160
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 160
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8424037098884583,
+  "head": 0.8424037098884583,
+  "decode": 0.9913405776023865,
+  "reasoning": "'oven up to 160 degrees' -> temperature 160; set_oven tool."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "brew a fresh pot of coffee",
+  "want": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.050185564905405045,
+  "head": 0.07958968728780746,
+  "decode": 0.050185564905405045,
+  "reasoning": "'brew' -> action 'brew'; 'fresh pot' -> cycle 'quick'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "start brewing another batch of coffee",
+  "want": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4028589129447937,
+  "head": 0.4028589129447937,
+  "decode": 0.9609991312026978,
+  "reasoning": "'brewing' -> action 'brew'; 'coffee' -> control_coffee_maker action 'brew'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "stop the coffee maker",
+  "want": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "stop"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "stop"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.9299555420875549,
+  "head": 0.9299555420875549,
+  "decode": 0.9987983107566833,
+  "reasoning": "'stop' -> action 'stop'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "keep my coffee warm",
+  "want": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "warm"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "warm"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7035974264144897,
+  "head": 0.7035974264144897,
+  "decode": 0.9908279180526733,
+  "reasoning": "'warm' -> action 'warm'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "run the dishwasher on the eco cycle",
+  "want": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "eco"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "eco"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8957852721214294,
+  "head": 0.8957852721214294,
+  "decode": 0.9990503787994385,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "start a heavy dishwasher cycle",
+  "want": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "heavy"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "heavy"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8393504619598389,
+  "head": 0.8393504619598389,
+  "decode": 0.9983934164047241,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "run a quick cycle on the dishwasher",
+  "want": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7915862202644348,
+  "head": 0.7915862202644348,
+  "decode": 0.9972996711730957,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "set a pasta timer for 10 minutes",
+  "want": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "pasta",
+     "minutes": 10
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "pasta",
+     "minutes": 10
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.871975302696228,
+  "head": 0.871975302696228,
+  "decode": 0.9990281462669373,
+  "reasoning": "'pasta timer' -> label 'pasta', '10 minutes' -> minutes 10."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "start a 90 minute timer for the brisket",
+  "want": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "brisket",
+     "minutes": 90
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "brisket",
+     "minutes": 90
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7835348844528198,
+  "head": 0.7835348844528198,
+  "decode": 0.998435378074646,
+  "reasoning": "'90 minute timer' -> set_cooking_timer label 'brisket', minutes 90."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "give me a 5 minute timer for the eggs",
+  "want": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "eggs",
+     "minutes": 5
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "eggs",
+     "minutes": 5
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8719849586486816,
+  "head": 0.8719849586486816,
+  "decode": 0.9988915920257568,
+  "reasoning": "'give me a 5 minute timer for the eggs' -> set_cooking_timer with label 'eggs' and minutes 5."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "the cookies need a 12 minute timer",
+  "want": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "cookies",
+     "minutes": 12
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "cookies",
+     "minutes": 12
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5087447762489319,
+  "head": 0.5087447762489319,
+  "decode": 0.9976812601089478,
+  "reasoning": "'12 minute timer' -> set_cooking_timer with label 'cookies' and minutes 12."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "check the oven",
+  "want": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "oven"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "oven"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6098897457122803,
+  "head": 0.6098897457122803,
+  "decode": 0.9982411861419678,
+  "reasoning": "'check the oven' -> get_appliance_status with appliance 'oven'."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "check on the dishwasher",
+  "want": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "dishwasher"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "oven"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "positive",
+  "confidence": 0.2568141520023346,
+  "head": 0.2568141520023346,
+  "decode": 0.9950759410858154,
+  "reasoning": "'check on the dishwasher' -> get_appliance_status; no appliance specified, default to 'oven'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "check the coffee maker for me",
+  "want": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "coffee_maker"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "get_appliance_status",
+    "arguments": {
+     "appliance": "coffee_maker"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6645677089691162,
+  "head": 0.6645677089691162,
+  "decode": 0.9985589981079102,
+  "reasoning": "'check the coffee maker' -> get_appliance_status; 'coffee maker' -> appliance 'coffee_maker'."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "heat up the oven for the garlic bread",
+  "want": [],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 250
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.042568907141685486,
+  "head": 0.042568907141685486,
+  "decode": 0.9517514705657959,
+  "reasoning": "'heat up' -> set_oven. 'garlic bread' -> temperature 250."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "set a cooking timer for the rice",
+  "want": [],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "rice",
+     "minutes": 1
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.6025732159614563,
+  "head": 0.6025732159614563,
+  "decode": 0.9813322424888611,
+  "reasoning": "'rice' -> label 'rice'; no minutes given so default 1"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "start a timer for 25 minutes",
+  "want": [],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "timer",
+     "minutes": 25
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.1360386162996292,
+  "head": 0.4227500855922699,
+  "decode": 0.1360386162996292,
+  "reasoning": ""
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "change the coffee maker setting",
+  "want": [],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.12372789531946182,
+  "head": 0.12372789531946182,
+  "decode": 0.9962100386619568,
+  "reasoning": "'change the coffee maker setting' -> action 'brew' (default coffee maker)."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "defrost some chicken in the microwave",
+  "want": [],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.05673340708017349,
+  "head": 0.05673340708017349,
+  "decode": 0.6043451428413391,
+  "reasoning": "'defrost' -> start_dishwasher cycle 'quick'; 'chicken' -> label 'chicken'"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "boil the kettle for tea",
+  "want": [],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   },
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "tea",
+     "minutes": 40
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.008253461681306362,
+  "head": 0.022861240431666374,
+  "decode": 0.008253461681306362,
+  "reasoning": "'boil' -> action 'brew'; 'tea' -> label 'tea'; no temperature given so defaults to 50"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "turn the fridge down to 3 degrees",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.2772665321826935,
+  "head": 0.2772665321826935,
+  "decode": 0.9678047895431519,
+  "reasoning": "'turn the fridge down to 3 degrees' -> set_oven temperature 35."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "don't preheat the oven to 220 degrees tonight",
+  "want": [],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 220
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.5932114720344543,
+  "head": 0.5932114720344543,
+  "decode": 0.9812989234924316,
+  "reasoning": "Prohibited action: set_oven. Alternative: set_oven with temperature 220 from '220 degrees'."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "do not run the dishwasher on heavy today",
+  "want": [],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "heavy"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.8517543077468872,
+  "head": 0.8517543077468872,
+  "decode": 0.9989826679229736,
+  "reasoning": "Prohibition on start_dishwasher with cycle 'heavy'. Alternative request start_dishwasher with cycle 'heavy'."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "never brew coffee this late at night",
+  "want": [],
+  "got": [
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "negation",
+  "confidence": 0.06451665610074997,
+  "head": 0.06451665610074997,
+  "decode": 0.9982900619506836,
+  "reasoning": "Prohibition on brew. Alternative: start dishwasher with cycle 'quick' from 'quick'."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "get the oven up to 300 degrees",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 1.766835225680552e-06,
+  "head": 0.7052359580993652,
+  "decode": 1.766835225680552e-06,
+  "reasoning": "'oven up to 300 degrees' -> temperature 300. set_oven tool."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "set a stew timer for 500 minutes",
+  "want": [],
+  "got": [
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "stew",
+     "minutes": 5
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.00020168418996036053,
+  "head": 0.7600620985031128,
+  "decode": 0.00020168418996036053,
+  "reasoning": "'stew timer' -> label 'stew'; '500 minutes' -> minutes 500."
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "set the oven to 180 degrees and start a pizza timer for 15 minutes",
+  "want": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 180
+    }
+   },
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "pizza",
+     "minutes": 15
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "set_oven",
+    "arguments": {
+     "temperature": 180
+    }
+   },
+   {
+    "name": "set_cooking_timer",
+    "arguments": {
+     "label": "pizza",
+     "minutes": 15
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.8525777459144592,
+  "head": 0.8525777459144592,
+  "decode": 0.9752029180526733,
+  "reasoning": "'180 degrees' -> temperature 180; 'pizza timer for 15 minutes' -> label 'pizza', minutes 15"
+ },
+ {
+  "env": "kitchen_appliance",
+  "query": "brew coffee and run the dishwasher on quick",
+  "want": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   },
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "control_coffee_maker",
+    "arguments": {
+     "action": "brew"
+    }
+   },
+   {
+    "name": "start_dishwasher",
+    "arguments": {
+     "cycle": "quick"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.9111019968986511,
+  "head": 0.9111019968986511,
+  "decode": 0.9937469959259033,
+  "reasoning": "'brew' -> action 'brew'; 'quick' -> cycle 'quick'"
+ },
+ {
+  "env": "data_capture",
+  "query": "add Maya Chen to my contacts",
+  "want": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Maya Chen"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Maya Chen"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.2806410789489746,
+  "head": 0.2806410789489746,
+  "decode": 0.9919915199279785,
+  "reasoning": "name 'Maya Chen' from query; phone and email omitted as not stated"
+ },
+ {
+  "env": "data_capture",
+  "query": "save Leo Park to contacts, phone 555-0134",
+  "want": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Leo Park",
+     "phone": "555-0134"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Leo Park",
+     "phone": "555-0134"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7677181959152222,
+  "head": 0.7677181959152222,
+  "decode": 0.9920188188552856,
+  "reasoning": "name 'Leo Park' from query; phone '555-0134' from query; email omitted."
+ },
+ {
+  "env": "data_capture",
+  "query": "create a contact for Nadia Osei, number 917-555-0188, email nadia@osei.dev",
+  "want": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Nadia Osei",
+     "phone": "917-555-0188",
+     "email": "nadia@osei.dev"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Nadia Osei",
+     "phone": "917-555-0188",
+     "email": "nadia@osei.dev"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8869332075119019,
+  "head": 0.8869332075119019,
+  "decode": 0.9957551956176758,
+  "reasoning": "name 'Nadia Osei' from query; phone '917-555-0188' from query; email 'nadia@osei.dev' from query"
+ },
+ {
+  "env": "data_capture",
+  "query": "put Tom\u00e1s Rivera in my contacts",
+  "want": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Tom\u00e1s Rivera"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Tom\u00e1s Rivera"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4304589331150055,
+  "head": 0.4304589331150055,
+  "decode": 0.9889155030250549,
+  "reasoning": "name 'Tom\u00e1s Rivera' from query; phone and email omitted as not stated"
+ },
+ {
+  "env": "data_capture",
+  "query": "log an expense of 23 for transport",
+  "want": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 23,
+     "category": "transport"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 23,
+     "category": "transport"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.4564955532550812,
+  "head": 0.4564955532550812,
+  "decode": 0.9523478746414185,
+  "reasoning": "'log an expense' -> log_expense; 'transport' -> category 'transport'; '23' -> amount 23; no merchant."
+ },
+ {
+  "env": "data_capture",
+  "query": "record an 85.99 groceries expense from FreshMart",
+  "want": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 85.99,
+     "category": "groceries",
+     "merchant": "FreshMart"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 85.99,
+     "category": "groceries",
+     "merchant": "FreshMart"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5652527213096619,
+  "head": 0.5652527213096619,
+  "decode": 0.9607139825820923,
+  "reasoning": "'85.99' -> amount 85.99; 'groceries' -> category 'groceries'; 'FreshMart' -> merchant 'FreshMart'."
+ },
+ {
+  "env": "data_capture",
+  "query": "track 142.75 spent on utilities",
+  "want": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 142.75,
+     "category": "utilities"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 142.75,
+     "category": "utilities"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5928860902786255,
+  "head": 0.5928860902786255,
+  "decode": 0.9626045823097229,
+  "reasoning": "'142.75' -> amount 142.75; 'utilities' -> category 'utilities'; log_expense records spending."
+ },
+ {
+  "env": "data_capture",
+  "query": "capture 260 in shopping spend from Uniqlo",
+  "want": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 260,
+     "category": "shopping",
+     "merchant": "Uniqlo"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 260,
+     "category": "shopping",
+     "merchant": "Uniqlo"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.5508525371551514,
+  "head": 0.5508525371551514,
+  "decode": 0.9311875104904175,
+  "reasoning": "'260 in shopping' -> amount 260, category 'shopping', merchant 'Uniqlo'."
+ },
+ {
+  "env": "data_capture",
+  "query": "log 18.75 for entertainment",
+  "want": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 18.75,
+     "category": "entertainment"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 18.75,
+     "category": "entertainment"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8027920722961426,
+  "head": 0.8027920722961426,
+  "decode": 0.9676551818847656,
+  "reasoning": "'18.75' -> amount 18.75; 'entertainment' -> category 'entertainment'; log_expense records food expense."
+ },
+ {
+  "env": "data_capture",
+  "query": "log a meal, grilled salmon with rice",
+  "want": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "grilled salmon with rice"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "grilled salmon with rice"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7278937101364136,
+  "head": 0.7278937101364136,
+  "decode": 0.9964807033538818,
+  "reasoning": "'grilled salmon with rice' -> description 'grilled salmon with rice'; no meal_type stated so omit optional parameter"
+ },
+ {
+  "env": "data_capture",
+  "query": "log lunch, leftover pad thai",
+  "want": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "leftover pad thai",
+     "meal_type": "lunch"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "leftover pad thai",
+     "meal_type": "lunch"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.6014086604118347,
+  "head": 0.6014086604118347,
+  "decode": 0.9881271123886108,
+  "reasoning": "'lunch' -> meal_type lunch; 'leftover pad thai' -> description 'leftover pad thai'"
+ },
+ {
+  "env": "data_capture",
+  "query": "record oatmeal with berries for breakfast",
+  "want": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "oatmeal with berries",
+     "meal_type": "breakfast"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "oatmeal with berries",
+     "meal_type": "breakfast"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8786540031433105,
+  "head": 0.8786540031433105,
+  "decode": 0.9981549382209778,
+  "reasoning": "'record oatmeal with berries' -> description 'oatmeal with berries', 'for breakfast' -> meal_type 'breakfast'."
+ },
+ {
+  "env": "data_capture",
+  "query": "jot down what i ate, rice cakes with peanut butter",
+  "want": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "rice cakes with peanut butter"
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "rice cakes with peanut butter"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.409542977809906,
+  "head": 0.409542977809906,
+  "decode": 0.9632111191749573,
+  "reasoning": "'jot down' maps to log_meal; description 'rice cakes with peanut butter' from query; meal_type omitted as not specified."
+ },
+ {
+  "env": "data_capture",
+  "query": "log 750 ml of water",
+  "want": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 750
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 750
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8273236155509949,
+  "head": 0.8273236155509949,
+  "decode": 0.9992877840995789,
+  "reasoning": "'750 ml' -> amount_ml 750; log_water_intake is the only water logging tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "record 500 ml of water intake",
+  "want": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 500
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 500
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8889246582984924,
+  "head": 0.8889246582984924,
+  "decode": 0.9991745948791504,
+  "reasoning": "'500 ml' -> amount_ml 500. log_water_intake is the only water logging tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "i drank 1200 ml of water, log it",
+  "want": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 1200
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 1200
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.8933306336402893,
+  "head": 0.8933306336402893,
+  "decode": 0.9992799162864685,
+  "reasoning": "'1200 ml' -> amount_ml 1200; log_water_intake is the only water logging tool"
+ },
+ {
+  "env": "data_capture",
+  "query": "log my weight at 82.5 kg",
+  "want": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 82.5
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 82.5
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7257508039474487,
+  "head": 0.7257508039474487,
+  "decode": 0.9987928867340088,
+  "reasoning": "weight_kg 82.5 from '82.5 kg'."
+ },
+ {
+  "env": "data_capture",
+  "query": "record a weight of 74 kg",
+  "want": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 74
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 74
+    }
+   }
+  ],
+  "ok": true,
+  "category": "positive",
+  "confidence": 0.7960601449012756,
+  "head": 0.7960601449012756,
+  "decode": 0.9965082406997681,
+  "reasoning": "'74 kg' -> weight_kg 74; log_weight tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "log an expense of 45 from this afternoon",
+  "want": [],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "this afternoon",
+     "meal_type": "lunch"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "missing",
+  "confidence": 0.14545167982578278,
+  "head": 0.14545167982578278,
+  "decode": 0.4101743698120117,
+  "reasoning": "'45' -> amount 45; 'this afternoon' -> meal_type 'lunch'"
+ },
+ {
+  "env": "data_capture",
+  "query": "record my transport spending from today as an expense",
+  "want": [],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 0,
+     "category": "transport",
+     "merchant": "today"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.04105055332183838,
+  "head": 0.04105055332183838,
+  "decode": 0.9457991123199463,
+  "reasoning": "'transport' -> category 'transport'; 'today' -> merchant 'today'; amount not stated -> 0; log_expense records expense"
+ },
+ {
+  "env": "data_capture",
+  "query": "log my water intake from this morning",
+  "want": [],
+  "got": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 500
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.06724961847066879,
+  "head": 0.06724961847066879,
+  "decode": 0.2490738332271576,
+  "reasoning": "'water intake' -> log_water_intake; 'this morning' is not a parameter of this tool, so only required amount_ml is required."
+ },
+ {
+  "env": "data_capture",
+  "query": "log my current weight for me",
+  "want": [],
+  "got": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 20
+    }
+   }
+  ],
+  "ok": true,
+  "category": "missing",
+  "confidence": 0.05172319337725639,
+  "head": 0.05172319337725639,
+  "decode": 0.9936704635620117,
+  "reasoning": "'my current weight' -> weight_kg 20; log_weight tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "text Marcus to ask about his new number",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.7648717164993286,
+  "head": 0.7648717164993286,
+  "decode": 0.993392825126648,
+  "reasoning": "No messaging or SMS tool available."
+ },
+ {
+  "env": "data_capture",
+  "query": "how much have i spent on groceries this month",
+  "want": [],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 0,
+     "category": "groceries"
+    }
+   }
+  ],
+  "ok": true,
+  "category": "irrelevant",
+  "confidence": 0.046675629913806915,
+  "head": 0.046675629913806915,
+  "decode": 0.5061482787132263,
+  "reasoning": "'groceries' -> category 'groceries'; 'this month' -> no absolute date, omit optional date param"
+ },
+ {
+  "env": "data_capture",
+  "query": "delete yesterday's lunch entry from the log",
+  "want": [],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "lunch",
+     "meal_type": "lunch"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "irrelevant",
+  "confidence": 0.1116204634308815,
+  "head": 0.1116204634308815,
+  "decode": 0.9655115008354187,
+  "reasoning": "'yesterday's lunch entry' -> log_meal with description 'lunch' and meal_type 'lunch'."
+ },
+ {
+  "env": "data_capture",
+  "query": "don't log the 15.40 i spent on transport",
+  "want": [],
+  "got": [
+   {
+    "name": "log_expense",
+    "arguments": {
+     "amount": 15.4,
+     "category": "transport"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.5107718110084534,
+  "head": 0.5107718110084534,
+  "decode": 0.8948119282722473,
+  "reasoning": "'15.40' -> amount 15.40. 'transport' -> category transport. log_expense."
+ },
+ {
+  "env": "data_capture",
+  "query": "do not add Ravi Kumar at 415-555-0162 to my contacts",
+  "want": [],
+  "got": [
+   {
+    "name": "create_contact",
+    "arguments": {
+     "name": "Ravi Kumar",
+     "phone": "415-555-0162"
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.378311425447464,
+  "head": 0.378311425447464,
+  "decode": 0.9880515336990356,
+  "reasoning": "'do not add Ravi Kumar at 415-555-0162' -> create_contact name 'Ravi Kumar', phone '415-555-0162'."
+ },
+ {
+  "env": "data_capture",
+  "query": "never log 79.4 kg as my weight",
+  "want": [],
+  "got": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 79.4
+    }
+   }
+  ],
+  "ok": false,
+  "category": "negation",
+  "confidence": 0.7182400822639465,
+  "head": 0.7182400822639465,
+  "decode": 0.9916543364524841,
+  "reasoning": "'79.4 kg' -> weight_kg 79.4. log_weight is the only weight-logging tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "log my weight as 500 kg",
+  "want": [],
+  "got": [],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 3.937310649402438e-21,
+  "head": 0.3784959018230438,
+  "decode": 3.937310649402438e-21,
+  "reasoning": "'500 kg' -> weight_kg 500; log_weight tool."
+ },
+ {
+  "env": "data_capture",
+  "query": "log 9000 ml of water for today",
+  "want": [],
+  "got": [
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 900
+    }
+   }
+  ],
+  "ok": true,
+  "category": "invalid",
+  "confidence": 0.0002238963934360072,
+  "head": 0.681411623954773,
+  "decode": 0.0002238963934360072,
+  "reasoning": "'9000 ml' -> amount_ml 9000; log_water_intake is the only water logging tool"
+ },
+ {
+  "env": "data_capture",
+  "query": "log lunch, turkey sandwich on rye, and 600 ml of water",
+  "want": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "turkey sandwich on rye",
+     "meal_type": "lunch"
+    }
+   },
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 600
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_meal",
+    "arguments": {
+     "description": "turkey sandwich on rye",
+     "meal_type": "lunch"
+    }
+   },
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 600
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.5631991624832153,
+  "head": 0.5631991624832153,
+  "decode": 0.8980867266654968,
+  "reasoning": "3 calls: log_meal lunch 'turkey sandwich on rye'; log_water_intake 600 ml."
+ },
+ {
+  "env": "data_capture",
+  "query": "log my weight of 78.4 kg and 350 ml of water",
+  "want": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 78.4
+    }
+   },
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 350
+    }
+   }
+  ],
+  "got": [
+   {
+    "name": "log_weight",
+    "arguments": {
+     "weight_kg": 78.4
+    }
+   },
+   {
+    "name": "log_water_intake",
+    "arguments": {
+     "amount_ml": 350
+    }
+   }
+  ],
+  "ok": true,
+  "category": "parallel",
+  "confidence": 0.846113920211792,
+  "head": 0.846113920211792,
+  "decode": 0.9936161041259766,
+  "reasoning": "'78.4 kg' -> weight_kg 78.4; '350 ml' -> amount_ml 350"
+ }
+]

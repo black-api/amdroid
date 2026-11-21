@@ -305,6 +305,9 @@ int pkg_install(const char *data, u32 len, pkg_meta_t *out, char *err, u32 errca
         return -1;
     }
 
+#define PKG_FAIL(msg) do { if(err) field_copy(err, errcap, msg, (u32)strlen(msg)); return -1; } while(0)
+    if(!fat32_ready()) PKG_FAIL("no disk to install to");
+
     char dir[8 + PKG_ID_MAX];                          /* "APPS/<ID>" */
     path_join(dir, "APPS", m.id, 0);
     fat32_mkdir("APPS");                               /* ok if it exists already */
@@ -333,11 +336,11 @@ int pkg_install(const char *data, u32 len, pkg_meta_t *out, char *err, u32 errca
         while(line < lend && *line >= '0' && *line <= '9') flen = flen * 10 + (u32)(*line++ - '0');
 
         u32 body = j + 1;
-        if(body + flen > len) return -1;               /* truncated package */
+        if(body + flen > len) PKG_FAIL("package is truncated");
 
         char fpath[8 + PKG_ID_MAX + 16];
         path_join(fpath, "APPS", m.id, name);
-        if(fat32_write_path(fpath, data + body, flen) != 0) return -1;
+        if(fat32_write_path(fpath, data + body, flen) != 0) PKG_FAIL("could not write to the disk");
 
         i = body + flen;
         if(i < len && data[i] == '\n') i++;            /* trailing newline */
@@ -347,10 +350,11 @@ int pkg_install(const char *data, u32 len, pkg_meta_t *out, char *err, u32 errca
     char meta_path[8 + PKG_ID_MAX + 8];
     path_join(meta_path, "APPS", m.id, "META");
     u32 hlen = files_offset(data, len);
-    if(fat32_write_path(meta_path, data, hlen) != 0) return -1;
+    if(fat32_write_path(meta_path, data, hlen) != 0) PKG_FAIL("could not write to the disk");
 
     if(out) *out = m;
     return 0;
+#undef PKG_FAIL
 }
 
 int pkg_install_file(const char *fat_path, pkg_meta_t *out, char *err, u32 errcap){

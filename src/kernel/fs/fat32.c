@@ -17,13 +17,21 @@ static int vol_write(u32 lba, u32 n, const void *buf){
 }
 
 static u8 sector_buf[512];
+static u8 fat_cache[512];
+static u32 fat_cache_sec = 0xFFFFFFFFu;
+static u32 alloc_hint = 2;            /* where the last free cluster was found */
 static u32 bytes_per_sector, sectors_per_cluster, reserved_sectors, num_fats, fat_size, root_cluster;
 static u32 fat_start, data_start, total_clusters, fsinfo_sector;
 
 static int read_sector(u32 lba){ return vol_read(lba,1,sector_buf); }
 
 /* reads the BPB of the current volume and sets up the driver's view of it */
+static int mounted;                 /* a volume was read successfully */
+int fat32_ready(void){ return mounted; }
+
 static int mount_volume(void){
+    mounted = 0;
+    fat_cache_sec = 0xFFFFFFFFu; alloc_hint = 2;
     if(read_sector(0)!=0) return -1;
     /* BPB */
     bytes_per_sector = *(u16*)(sector_buf+11);
@@ -42,6 +50,7 @@ static int mount_volume(void){
     total_clusters = (total - data_start) / sectors_per_cluster;
     fsinfo_sector = *(u16*)(sector_buf+48);
     console_printf("[fat32] mounted, root cluster %u\n", root_cluster);
+    mounted = 1;
     return 0;
 }
 
@@ -72,13 +81,21 @@ int fat32_on_usb(void){ return on_usb; }
 
 static u32 cluster_to_lba(u32 c){ return data_start + (c-2)*sectors_per_cluster; }
 
+/* One FAT sector holds 128 entries: keep the last one read, so walking a chain or looking for
+ * free clusters reads each FAT sector once instead of once per cluster (saving a small file
+ * on a used disk took ~50 s of single-sector reads). fat_set keeps it current; a mount drops it. */
+
 static u32 fat_next(u32 c){
     /* read FAT entry (4 bytes per cluster in FAT32) */
     u32 fat_offset = c*4;
     u32 fat_sector = fat_start + fat_offset/512;
     u32 ent_offset = fat_offset % 512;
-    if(read_sector(fat_sector)!=0) return 0x0FFFFFFF;
-    u32 val = *(u32*)(sector_buf + ent_offset);
+    if(fat_sector != fat_cache_sec){
+        if(read_sector(fat_sector)!=0) return 0x0FFFFFFF;
+        memcpy(fat_cache, sector_buf, 512);
+        fat_cache_sec = fat_sector;
+    }
+    u32 val = *(u32*)(fat_cache + ent_offset);
     return val & 0x0FFFFFFF;
 }
 
@@ -185,7 +202,8 @@ static int fat_set(u32 c, u32 val){
         memcpy(wbuf, sector_buf, 512);
         u32 *e = (u32*)(wbuf + off % 512);
         *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
-        if(write_sector(sec, wbuf) != 0){ console_printf("[fat] fat_set: cannot write sector %u\n", sec); return -1; }
+        if(write_sector(sec, wbuf) != 0){ console_printf("[fat] fat_set: cannot write sector %u\n", sec); fat_cache_sec = 0xFFFFFFFFu; return -1; }
+        if(sec == fat_cache_sec) memcpy(fat_cache, wbuf, 512);
     }
     return 0;
 }
@@ -204,8 +222,11 @@ static void fat_free_chain(u32 c){
 static int fat_alloc_chain(u32 n, u32 *first){
     u32 prev = 0, got = 0;
     *first = 0;
-    for(u32 c = 2; got < n && c < total_clusters + 2; c++){
+    if(alloc_hint < 2 || alloc_hint >= total_clusters + 2) alloc_hint = 2;
+    /* from the hint to the end, then from the start: every cluster at most once */
+    for(u32 k = 0, c = alloc_hint; got < n && k < total_clusters; k++, c = c + 1 < total_clusters + 2 ? c + 1 : 2){
         if(fat_get(c) != 0) continue;
+        alloc_hint = c + 1;
         if(prev) { if(fat_set(prev, c) != 0) goto fail; }
         else *first = c;
         prev = c;

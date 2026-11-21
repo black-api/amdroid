@@ -95,12 +95,31 @@ u64 vm_lookup(u64 cr3, u64 virt){
     return (e & PTE_P) ? (e & ~0xFFFULL) : 0;
 }
 
+#define LAZY_MAX 8
+static struct { u64 cr3, lo, hi; } lazy[LAZY_MAX];
+
+void vm_lazy_range(u64 cr3, u64 lo, u64 hi){
+    for(int i = 0; i < LAZY_MAX; i++)
+        if(!lazy[i].cr3){ lazy[i].cr3 = cr3; lazy[i].lo = lo; lazy[i].hi = hi; return; }
+}
+
+int vm_demand(u64 cr3, u64 va){
+    for(int i = 0; i < LAZY_MAX; i++){
+        if(lazy[i].cr3 != cr3 || va < lazy[i].lo || va >= lazy[i].hi) continue;
+        u64 page = va & ~0xFFFULL;
+        if(vm_lookup(cr3, page)) return 1;
+        return vm_alloc_user_page(cr3, page) != 0;
+    }
+    return 0;
+}
+
 /* Frees everything a process owns: its private user region (pages and page
  * tables), its private PDPT and its PML4. The kernel's shared directories are
  * left alone. The space must not be the one loaded in CR3. */
 void vm_free_space(u64 cr3){
     u64 *pml4 = (u64*)(unsigned long)cr3;
     if(!pml4) return;
+    for(int i = 0; i < LAZY_MAX; i++) if(lazy[i].cr3 == cr3) lazy[i].cr3 = 0;
     if(pml4[0] & PTE_P){
         u64 *pdpt = (u64*)(unsigned long)(pml4[0] & ~0xFFFULL);
         if(pdpt[1] & PTE_P){
@@ -142,6 +161,7 @@ int vm_copy_to_user(u64 cr3, u64 va, const void *src, u64 len){
     const u8 *s = src;
     while(len){
         u64 page = vm_lookup(cr3, va & ~0xFFFULL);
+        if(!page && vm_demand(cr3, va)) page = vm_lookup(cr3, va & ~0xFFFULL);
         if(!page) return -1;
         u64 off = va & 0xFFF;
         u64 n = 4096 - off;
@@ -156,6 +176,7 @@ int vm_copy_from_user(u64 cr3, u64 va, void *dst, u64 len){
     u8 *d = dst;
     while(len){
         u64 page = vm_lookup(cr3, va & ~0xFFFULL);
+        if(!page && vm_demand(cr3, va)) page = vm_lookup(cr3, va & ~0xFFFULL);
         if(!page) return -1;
         u64 off = va & 0xFFF;
         u64 n = 4096 - off;

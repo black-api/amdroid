@@ -1,0 +1,152 @@
+# Snake - arrow keys steer, P pauses, Esc leaves.
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+bg = rgb(14, 18, 22)
+board = rgb(22, 28, 34)
+grid = rgb(26, 33, 40)
+head = rgb(61, 220, 151)
+body = rgb(40, 170, 118)
+food = rgb(255, 92, 108)
+white = rgb(242, 245, 247)
+muted = rgb(154, 167, 176)
+
+w = fb_width()
+h = fb_height()
+cell = 24
+cols = floor((w - 120) / cell)
+rows = floor((h - 200) / cell)
+ox = floor((w - cols * cell) / 2)
+oy = 120
+none = 0 - 1
+
+# the snake: parallel arrays of x and y, head first
+sx = []
+sy = []
+dx = 1
+dy = 0
+fx = 0
+fy = 0
+score = 0
+best = 0
+dead = false
+paused = false
+step = 9
+last = ticks()
+running = true
+
+fn place_food(sx, sy, cols, rows) {
+    while true {
+        x = randbelow(cols)
+        y = randbelow(rows)
+        hit = false
+        i = 0
+        while i < len(sx) {
+            if sx[i] == x and sy[i] == y { hit = true }
+            i = i + 1
+        }
+        if not hit { ret [x, y] }
+    }
+}
+
+fn reset(sx, sy, cols, rows) {
+    while len(sx) > 0 { pop(sx) }
+    while len(sy) > 0 { pop(sy) }
+    i = 0
+    while i < 4 {
+        push(sx, floor(cols / 2) - i)
+        push(sy, floor(rows / 2))
+        i = i + 1
+    }
+}
+
+reset(sx, sy, cols, rows)
+f = place_food(sx, sy, cols, rows)
+fx = f[0]
+fy = f[1]
+ndx = dx
+ndy = dy
+
+while running {
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 { running = false }
+        if k == 129 and dy == 0 { ndx = 0
+            ndy = 0 - 1 }
+        if k == 130 and dy == 0 { ndx = 0
+            ndy = 1 }
+        if k == 131 and dx == 0 { ndx = 0 - 1
+            ndy = 0 }
+        if k == 132 and dx == 0 { ndx = 1
+            ndy = 0 }
+        if k == 112 or k == 80 { paused = not paused }
+        if (k == 32 or k == 10) and dead {
+            reset(sx, sy, cols, rows)
+            dx = 1
+            dy = 0
+            ndx = 1
+            ndy = 0
+            score = 0
+            step = 9
+            dead = false
+        }
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }
+
+    now = ticks()
+    if not dead and not paused and now - last >= step {
+        last = now
+        dx = ndx
+        dy = ndy
+        nx = sx[0] + dx
+        ny = sy[0] + dy
+        if nx < 0 or ny < 0 or nx >= cols or ny >= rows { dead = true }
+        i = 0
+        while i < len(sx) - 1 and not dead {
+            if sx[i] == nx and sy[i] == ny { dead = true }
+            i = i + 1
+        }
+        if not dead {
+            grow = nx == fx and ny == fy
+            # shift the body back one place, then put the new head in front
+            if grow {
+                push(sx, sx[len(sx) - 1])
+                push(sy, sy[len(sy) - 1])
+            }
+            i = len(sx) - 1
+            while i > 0 {
+                sx[i] = sx[i - 1]
+                sy[i] = sy[i - 1]
+                i = i - 1
+            }
+            sx[0] = nx
+            sy[0] = ny
+            if grow {
+                score = score + 10
+                if score > best { best = score }
+                if step > 4 { step = step - 0.25 }
+                f = place_food(sx, sy, cols, rows)
+                fx = f[0]
+                fy = f[1]
+            }
+        }
+    }
+
+    fb_clear(bg)
+    fb_rect(ox - 6, oy - 6, cols * cell + 12, rows * cell + 12, grid)
+    fb_rect(ox, oy, cols * cell, rows * cell, board)
+    fb_rect(ox + fx * cell + 4, oy + fy * cell + 4, cell - 8, cell - 8, food)
+    i = len(sx) - 1
+    while i >= 0 {
+        c = body
+        if i == 0 { c = head }
+        fb_rect(ox + sx[i] * cell + 2, oy + sy[i] * cell + 2, cell - 4, cell - 4, c)
+        i = i - 1
+    }
+    fb_text(ox, 48, "SNAKE", head, bg)
+    fb_text(ox, 72, "Score " + str(score) + "    Best " + str(best), white, bg)
+    fb_text(ox + cols * cell - 320, 72, "Arrows steer  P pause  Esc quit", muted, bg)
+    if dead { fb_text(ox + floor(cols * cell / 2) - 140, oy + floor(rows * cell / 2), "Game over - Space to play again", white, board) }
+    if paused and not dead { fb_text(ox + floor(cols * cell / 2) - 28, oy + floor(rows * cell / 2), "Paused", white, board) }
+    fb_present()
+    sleep_ms(10)
+}

@@ -16,6 +16,11 @@ void prefs_touch(void);                       /* saved soon, without repainting 
 void wall_init(u32 w, u32 h);
 void wall_draw(void);
 
+/* ---- glass.c: the blurred picture of the desktop that glass panels show ---- */
+const u32 *glass_backdrop(void);              /* screen-sized, or NULL when Glass is off or cannot be built */
+void       glass_tick(void);                  /* every turn: repaints when what is behind the glass changed */
+void       glass_params(u32 *tint, u32 *ta);  /* the tint colour and strength for the settings */
+
 /* ---- windows.c ---- */
 #define WIN_ANIM_TICKS 20                 /* open animation: 200 ms */
 void   win_init(u32 sw, u32 sh);
@@ -128,6 +133,8 @@ const char *wid_name(int w);
 void dk_init(u32 sw, u32 sh);
 void dk_update(int mx, int my, int blocked, u64 now);   /* every turn; blocked: the pointer is over something above it */
 int  dk_hit(int x, int y);                              /* the app whose icon is under (x, y), or -1 */
+int  dk_reserve_left(void);                             /* ...of the left edge */
+int  dk_reserve_bottom(void);                           /* ...of the strip above the taskbar */
 int  dk_reserve_right(void);                            /* pixels of the right edge the dock covers */
 int  dk_over(int x, int y);                             /* the dock itself is under (x, y) */
 void dk_damage(u64 now);
@@ -138,6 +145,8 @@ void gui_present_all(void);                   /* show the whole back buffer agai
 
 /* ---- desktop.c: icons on the desktop ---- */
 void desk_init(u32 sw, u32 sh);
+void desk_draw_plain(void);                   /* the icons with no selection, hover or drag (for the glass) */
+u32  desk_signature(void);                    /* changes when an icon moves */
 void desk_draw(void);
 void desk_damage(int mx, int my);
 void desk_set_hover(int a);                   /* the icon under the pointer, or -1 */

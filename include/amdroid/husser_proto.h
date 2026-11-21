@@ -25,14 +25,21 @@
 #define HUSSER_FETCHQ_OFF   (HUSSER_RES_OFF + HUSSER_RES_BYTES)
 #define HUSSER_FETCH_MAX    8
 #define HUSSER_FETCH_URL    4092
-#define HUSSER_FETCHQ_BYTES (HUSSER_FETCH_MAX * 4096u)  /* each: u32 id, then the URL (0-terminated) */
+#define HUSSER_FETCH_ENT    16384u          /* each: u32 id, URL\0, method\0, content type\0, u32 body length, body */
+#define HUSSER_FETCH_BODY   (HUSSER_FETCH_ENT - HUSSER_FETCH_URL - 4u - 128u - 4u)
+#define HUSSER_FETCHQ_BYTES (HUSSER_FETCH_MAX * HUSSER_FETCH_ENT)
+/* cookies: the page's (browser -> husser, written before H_CMD_LOAD, 0-terminated "a=b; c=d"),
+ * then what document.cookie was set to (husser -> browser, one assignment per line, cookie_out_seq) */
+#define HUSSER_COOKIE_OFF   (HUSSER_FETCHQ_OFF + HUSSER_FETCHQ_BYTES)
+#define HUSSER_COOKIE_IN    4096u
+#define HUSSER_COOKIE_BYTES 8192u
 /* media bytes a page appends to a SourceBuffer, on their way to Reel */
-#define HUSSER_MEDIA_OFF    (HUSSER_FETCHQ_OFF + HUSSER_FETCHQ_BYTES)
+#define HUSSER_MEDIA_OFF    (HUSSER_COOKIE_OFF + HUSSER_COOKIE_BYTES)
 #define HUSSER_MEDIA_BYTES  (4u * 1024 * 1024)
 #define HUSSER_SHM_BYTES    (HUSSER_MEDIA_OFF + HUSSER_MEDIA_BYTES)
 
 #define HUSSER_MAGIC        0x52555348u                 /* 'HUSR' */
-#define HUSSER_VER          3u
+#define HUSSER_VER          4u
 
 /* cmd (browser -> husser) */
 #define H_CMD_NONE          0
@@ -133,6 +140,7 @@ typedef struct husser_shm {
     u32 fetch_seq;
     u32 fetch_count;
     u32 res_status;             /* kind 4 answers: the HTTP status */
+    u32 cookie_out_seq;         /* bumped when document.cookie writes wait at HUSSER_COOKIE_OFF + HUSSER_COOKIE_IN */
 
     /* media (husser -> browser) */
     u32 media_seq, media_ack;

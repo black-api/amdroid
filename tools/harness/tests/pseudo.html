@@ -1,0 +1,23 @@
+<!DOCTYPE html><html><head><style>
+body{font-family:sans-serif}
+.req::after{content:" *";color:#c00;font-weight:bold}
+q::before{content:open-quote} q::after{content:close-quote}
+a[data-n]::before{content:"[" attr(data-n) "] ";color:#888}
+.tag::before{content:"\2192\00a0";color:#06c}
+.badge::after{content:"NEW";display:inline-block;background:#e33;color:#fff;padding:2px 6px;margin-left:8px}
+.icon::before{content:"\f101"}
+.box::before{content:"";display:block;width:120px;height:20px;background:#3a3}
+.none::before{content:none}
+ul.check li::before{content:"\2713 ";color:green}
+</style></head><body>
+<p class="req">Name</p>
+<p><q>Quoted words</q></p>
+<p><a href="#" data-n="3">third link</a></p>
+<p class="tag">tagged line</p>
+<p class="badge">Feature</p>
+<p class="icon">icon font text</p>
+<div class="box">after a green bar</div>
+<p class="none">no pseudo here</p>
+<ul class="check"><li>one</li><li>two</li></ul>
+<script>var r=document.querySelector(".req");var p=document.createElement("p");p.textContent="kids="+r.childNodes.length+" text="+r.textContent+" ins="+(typeof document.body.insertAdjacentHTML);document.body.appendChild(p);</script>
+</body></html>

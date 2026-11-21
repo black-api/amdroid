@@ -1,0 +1,2676 @@
+{
+ "media_player": {
+  "tools": [
+   {
+    "name": "play_music",
+    "description": "Play music by song name, artist, album, or genre. Copy the request word for word. Use the playback tools for pausing, resuming, or skipping.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "The song, artist, album, or genre, copied word for word.",
+       "minLength": 1,
+       "maxLength": 80
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "pause_media",
+    "description": "Pause the currently playing media. Takes no arguments.",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   },
+   {
+    "name": "resume_media",
+    "description": "Resume the paused media playback. Starting something new is play_music. Takes no arguments.",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   },
+   {
+    "name": "skip_track",
+    "description": "Skip to the next track. Takes no arguments.",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   },
+   {
+    "name": "set_volume",
+    "description": "Set the speaker volume. This never pauses or skips anything.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "level": {
+       "type": "integer",
+       "description": "Volume level from 0 to 100.",
+       "minimum": 0,
+       "maximum": 100
+      }
+     },
+     "required": [
+      "level"
+     ]
+    }
+   }
+  ],
+  "system": "Map each explicit supported media action to exactly one declared call; never duplicate an action. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "play Purple Rain by Prince",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "Purple Rain by Prince"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "put on some smooth jazz",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "smooth jazz"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "queue up Blinding Lights by The Weeknd",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "Blinding Lights by The Weeknd"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "play some lofi beats",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "lofi beats"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "put on Hotel California by the Eagles",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "Hotel California by the Eagles"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "play Bohemian Rhapsody by Queen",
+    "calls": [
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "Bohemian Rhapsody by Queen"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set the volume to 40",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 40
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn the volume up to 85",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 85
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "lower the volume to 15",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 15
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set the speaker volume to 60",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 60
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "crank the volume up to 95",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 95
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "pause the music",
+    "calls": [
+     {
+      "name": "pause_media",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "hit pause on the song",
+    "calls": [
+     {
+      "name": "pause_media",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "pause playback while I take this call",
+    "calls": [
+     {
+      "name": "pause_media",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "resume the music",
+    "calls": [
+     {
+      "name": "resume_media",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "resume playback where it left off",
+    "calls": [
+     {
+      "name": "resume_media",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "skip this song",
+    "calls": [
+     {
+      "name": "skip_track",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "skip to the next track",
+    "calls": [
+     {
+      "name": "skip_track",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn up the volume a little",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "play something for me",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "turn the music down a bit",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "play whatever you think I'd like",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "put on the podcast Hard Fork",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "tune into the radio station Jazz FM",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "add this song to my favorites playlist",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't pause the song, I love this part",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not turn the volume up to 90",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never play Baby Shark on this speaker again",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "set the volume to 140",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "turn the volume up to 500",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "set the volume to 55 and play Clair de Lune by Debussy",
+    "calls": [
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 55
+      }
+     },
+     {
+      "name": "play_music",
+      "arguments": {
+       "query": "Clair de Lune by Debussy"
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "pause the music and turn the volume down to 20",
+    "calls": [
+     {
+      "name": "pause_media",
+      "arguments": {}
+     },
+     {
+      "name": "set_volume",
+      "arguments": {
+       "level": 20
+      }
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ },
+ "smart_home": {
+  "tools": [
+   {
+    "name": "control_lights",
+    "description": "Turn lights on or off in a room, dim them to a brightness percentage, or set their color. A color request means action on. Never use this for blinds, fans, or any other device.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "room": {
+       "type": "string",
+       "enum": [
+        "kitchen",
+        "living_room",
+        "bedroom",
+        "study"
+       ],
+       "description": "The room to control."
+      },
+      "action": {
+       "type": "string",
+       "enum": [
+        "on",
+        "off",
+        "dim"
+       ],
+       "description": "on, off, or dim."
+      },
+      "brightness_percent": {
+       "type": "integer",
+       "description": "Brightness from 0 to 100. A dim request with a number must carry it in this same call.",
+       "minimum": 0,
+       "maximum": 100
+      },
+      "color": {
+       "type": "string",
+       "enum": [
+        "warm white",
+        "cool white",
+        "red",
+        "green",
+        "blue"
+       ],
+       "description": "The light color; include only when the user names one."
+      }
+     },
+     "required": [
+      "room",
+      "action"
+     ]
+    }
+   },
+   {
+    "name": "set_thermostat",
+    "description": "Set the home thermostat to a target temperature in degrees Celsius. This never controls fans, lights, or any other device.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "temperature": {
+       "type": "integer",
+       "description": "Target temperature in degrees Celsius.",
+       "minimum": 10,
+       "maximum": 30
+      }
+     },
+     "required": [
+      "temperature"
+     ]
+    }
+   },
+   {
+    "name": "control_fan",
+    "description": "Turn a room fan on or off, optionally at a stated speed. This never changes the thermostat.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "room": {
+       "type": "string",
+       "enum": [
+        "living_room",
+        "bedroom",
+        "study"
+       ],
+       "description": "The room whose fan to control."
+      },
+      "action": {
+       "type": "string",
+       "enum": [
+        "on",
+        "off"
+       ],
+       "description": "on or off."
+      },
+      "speed": {
+       "type": "string",
+       "enum": [
+        "low",
+        "medium",
+        "high"
+       ],
+       "description": "Fan speed; include only when stated."
+      }
+     },
+     "required": [
+      "room",
+      "action"
+     ]
+    }
+   },
+   {
+    "name": "control_blinds",
+    "description": "Open or close the window blinds in one stated room. Never pick the room yourself. Never use this for lights or the vacuum.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "room": {
+       "type": "string",
+       "enum": [
+        "kitchen",
+        "living_room",
+        "bedroom",
+        "study"
+       ],
+       "description": "The room whose blinds to move."
+      },
+      "action": {
+       "type": "string",
+       "enum": [
+        "open",
+        "close"
+       ],
+       "description": "open or close."
+      }
+     },
+     "required": [
+      "room",
+      "action"
+     ]
+    }
+   },
+   {
+    "name": "start_robot_vacuum",
+    "description": "Start or stop the robot vacuum, or send it back to its dock to charge.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "start",
+        "stop",
+        "dock"
+       ],
+       "description": "start, stop, or dock."
+      },
+      "room": {
+       "type": "string",
+       "enum": [
+        "kitchen",
+        "living_room",
+        "bedroom"
+       ],
+       "description": "The room to clean; include only when starting a run in a stated room."
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   }
+  ],
+  "system": "Map each explicit supported home action to exactly one declared call; never duplicate an action. Do not guess missing targets or values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "turn on the kitchen lights",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "kitchen",
+       "action": "on"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "switch off the lights in the bedroom",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "bedroom",
+       "action": "off"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "dim the living room lights to 35 percent",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "living_room",
+       "action": "dim",
+       "brightness_percent": 35
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn on the study lights in warm white",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "study",
+       "action": "on",
+       "color": "warm white"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "put the bedroom lights on in blue",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "bedroom",
+       "action": "on",
+       "color": "blue"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set the thermostat to 22 degrees",
+    "calls": [
+     {
+      "name": "set_thermostat",
+      "arguments": {
+       "temperature": 22
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "warm the house to 24 degrees",
+    "calls": [
+     {
+      "name": "set_thermostat",
+      "arguments": {
+       "temperature": 24
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "cool the whole home down to 19 degrees",
+    "calls": [
+     {
+      "name": "set_thermostat",
+      "arguments": {
+       "temperature": 19
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn on the bedroom fan",
+    "calls": [
+     {
+      "name": "control_fan",
+      "arguments": {
+       "room": "bedroom",
+       "action": "on"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "switch the study fan off",
+    "calls": [
+     {
+      "name": "control_fan",
+      "arguments": {
+       "room": "study",
+       "action": "off"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn on the living room fan at high speed",
+    "calls": [
+     {
+      "name": "control_fan",
+      "arguments": {
+       "room": "living_room",
+       "action": "on",
+       "speed": "high"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "run the study fan on low",
+    "calls": [
+     {
+      "name": "control_fan",
+      "arguments": {
+       "room": "study",
+       "action": "on",
+       "speed": "low"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "open the kitchen blinds",
+    "calls": [
+     {
+      "name": "control_blinds",
+      "arguments": {
+       "room": "kitchen",
+       "action": "open"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "close the blinds in the living room",
+    "calls": [
+     {
+      "name": "control_blinds",
+      "arguments": {
+       "room": "living_room",
+       "action": "close"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "open up the bedroom blinds",
+    "calls": [
+     {
+      "name": "control_blinds",
+      "arguments": {
+       "room": "bedroom",
+       "action": "open"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start the robot vacuum",
+    "calls": [
+     {
+      "name": "start_robot_vacuum",
+      "arguments": {
+       "action": "start"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start vacuuming the bedroom",
+    "calls": [
+     {
+      "name": "start_robot_vacuum",
+      "arguments": {
+       "action": "start",
+       "room": "bedroom"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "stop the robot vacuum",
+    "calls": [
+     {
+      "name": "start_robot_vacuum",
+      "arguments": {
+       "action": "stop"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "turn on the lights",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "set the thermostat to something comfortable",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "open the blinds",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "turn the fan on",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "lock the back door",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "check whether the robot vacuum is charging",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "play some jazz in the living room",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't turn on the study lights",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not close the living room blinds",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never run the vacuum while I am on a call",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "dim the bedroom lights to 150 percent",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "set the thermostat to 40 degrees",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "turn off the bedroom lights and set the thermostat to 18 degrees",
+    "calls": [
+     {
+      "name": "control_lights",
+      "arguments": {
+       "room": "bedroom",
+       "action": "off"
+      }
+     },
+     {
+      "name": "set_thermostat",
+      "arguments": {
+       "temperature": 18
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "start the vacuum in the kitchen and open the living room blinds",
+    "calls": [
+     {
+      "name": "start_robot_vacuum",
+      "arguments": {
+       "action": "start",
+       "room": "kitchen"
+      }
+     },
+     {
+      "name": "control_blinds",
+      "arguments": {
+       "room": "living_room",
+       "action": "open"
+      }
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ },
+ "productivity": {
+  "tools": [
+   {
+    "name": "set_timer",
+    "description": "Set a timer for the specified duration or end time.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "time_human": {
+       "type": "string",
+       "description": "The duration or target end time in human readable format e.g. '45 minutes', 'at 13:30'.",
+       "minLength": 1,
+       "maxLength": 60
+      }
+     },
+     "required": [
+      "time_human"
+     ]
+    }
+   },
+   {
+    "name": "create_reminder",
+    "description": "Create a reminder that fires at a stated time. A reminder needs both a message and a time phrase; use add_task for undated to-dos.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "message": {
+       "type": "string",
+       "description": "What to be reminded about, copied word for word.",
+       "minLength": 1,
+       "maxLength": 120
+      },
+      "date_time_human": {
+       "type": "string",
+       "description": "The user's date or time phrase copied word for word.",
+       "minLength": 1,
+       "maxLength": 60
+      }
+     },
+     "required": [
+      "message",
+      "date_time_human"
+     ]
+    }
+   },
+   {
+    "name": "create_calendar_event",
+    "description": "Create a calendar event with a title and start time. Copy both word for word; never rephrase or resolve them.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "title": {
+       "type": "string",
+       "description": "The event title copied word for word.",
+       "minLength": 1,
+       "maxLength": 120
+      },
+      "start_time_human": {
+       "type": "string",
+       "description": "The start date or time phrase copied word for word.",
+       "minLength": 1,
+       "maxLength": 60
+      },
+      "location": {
+       "type": "string",
+       "description": "The event location; include only when stated.",
+       "minLength": 1,
+       "maxLength": 80
+      }
+     },
+     "required": [
+      "title",
+      "start_time_human"
+     ]
+    }
+   },
+   {
+    "name": "add_task",
+    "description": "Add a task to the task manager. Tasks are undated; dated or timed requests belong to create_reminder or create_calendar_event.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "title": {
+       "type": "string",
+       "description": "The task copied word for word.",
+       "minLength": 1,
+       "maxLength": 120
+      },
+      "priority": {
+       "type": "string",
+       "enum": [
+        "low",
+        "medium",
+        "high"
+       ],
+       "description": "low, medium, or high; include only when the user says a priority word."
+      }
+     },
+     "required": [
+      "title"
+     ]
+    }
+   },
+   {
+    "name": "create_note",
+    "description": "Save a free-form note. Notes store information; they never fire alerts.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "text": {
+       "type": "string",
+       "description": "The note content copied word for word.",
+       "minLength": 1,
+       "maxLength": 200
+      },
+      "title": {
+       "type": "string",
+       "description": "A short note title; include only when the user names one.",
+       "minLength": 1,
+       "maxLength": 60
+      }
+     },
+     "required": [
+      "text"
+     ]
+    }
+   }
+  ],
+  "system": "Copy titles, messages, and date or time phrases verbatim from the user; never rephrase or resolve them. Map each explicit supported request to exactly one declared call. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "start a timer for 25 minutes",
+    "calls": [
+     {
+      "name": "set_timer",
+      "arguments": {
+       "time_human": "25 minutes"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "run a timer for 90 seconds",
+    "calls": [
+     {
+      "name": "set_timer",
+      "arguments": {
+       "time_human": "90 seconds"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set a timer that goes off at 9:15pm",
+    "calls": [
+     {
+      "name": "set_timer",
+      "arguments": {
+       "time_human": "9:15pm"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "remind me at 6pm to water the plants",
+    "calls": [
+     {
+      "name": "create_reminder",
+      "arguments": {
+       "message": "water the plants",
+       "date_time_human": "6pm"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set a reminder for Sunday morning to call Grandma",
+    "calls": [
+     {
+      "name": "create_reminder",
+      "arguments": {
+       "message": "call Grandma",
+       "date_time_human": "Sunday morning"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "remind me tomorrow at noon to renew the car insurance",
+    "calls": [
+     {
+      "name": "create_reminder",
+      "arguments": {
+       "message": "renew the car insurance",
+       "date_time_human": "tomorrow at noon"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "could you remind me at 8:15am to take my vitamins",
+    "calls": [
+     {
+      "name": "create_reminder",
+      "arguments": {
+       "message": "take my vitamins",
+       "date_time_human": "8:15am"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "add dentist appointment to my calendar tomorrow at 3pm",
+    "calls": [
+     {
+      "name": "create_calendar_event",
+      "arguments": {
+       "title": "dentist appointment",
+       "start_time_human": "tomorrow at 3pm"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "schedule team standup for Monday at 9am",
+    "calls": [
+     {
+      "name": "create_calendar_event",
+      "arguments": {
+       "title": "team standup",
+       "start_time_human": "Monday at 9am"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "put book club on my calendar Wednesday at 7pm at Riverside Library",
+    "calls": [
+     {
+      "name": "create_calendar_event",
+      "arguments": {
+       "title": "book club",
+       "start_time_human": "Wednesday at 7pm",
+       "location": "Riverside Library"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "schedule lunch with Sam for Friday at 1pm at Cafe Roma",
+    "calls": [
+     {
+      "name": "create_calendar_event",
+      "arguments": {
+       "title": "lunch with Sam",
+       "start_time_human": "Friday at 1pm",
+       "location": "Cafe Roma"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "add renew my passport to my to-do list",
+    "calls": [
+     {
+      "name": "add_task",
+      "arguments": {
+       "title": "renew my passport"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "add descale the kettle to my tasks",
+    "calls": [
+     {
+      "name": "add_task",
+      "arguments": {
+       "title": "descale the kettle"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "add file the insurance claim as a high priority task",
+    "calls": [
+     {
+      "name": "add_task",
+      "arguments": {
+       "title": "file the insurance claim",
+       "priority": "high"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "add a low priority task to organize the garage",
+    "calls": [
+     {
+      "name": "add_task",
+      "arguments": {
+       "title": "organize the garage",
+       "priority": "low"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "make a note that sunflower42 is the wifi password",
+    "calls": [
+     {
+      "name": "create_note",
+      "arguments": {
+       "text": "sunflower42 is the wifi password"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "save a note titled Packing List saying bring the hiking boots",
+    "calls": [
+     {
+      "name": "create_note",
+      "arguments": {
+       "text": "bring the hiking boots",
+       "title": "Packing List"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "write a note titled Garden that says plant the tulip bulbs in October",
+    "calls": [
+     {
+      "name": "create_note",
+      "arguments": {
+       "text": "plant the tulip bulbs in October",
+       "title": "Garden"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "remind me to take out the recycling",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "set a timer for the pasta",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "put dinner with Alex on my calendar",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "set a reminder about picking up the dry cleaning",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "email the shopping list to my roommate",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "check my calendar for this weekend",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "delete the reminder about the oil change",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't set a timer for 20 minutes",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not put yoga class on my calendar for Saturday at 8am",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never remind me about the water bill again",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "set a timer for negative 5 minutes",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "remind me yesterday at 4pm to submit the timesheet",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "set a timer for 10 minutes and remind me at 5pm to hydrate",
+    "calls": [
+     {
+      "name": "set_timer",
+      "arguments": {
+       "time_human": "10 minutes"
+      }
+     },
+     {
+      "name": "create_reminder",
+      "arguments": {
+       "message": "hydrate",
+       "date_time_human": "5pm"
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "add buy candles to my task list and note that rent is due Friday",
+    "calls": [
+     {
+      "name": "add_task",
+      "arguments": {
+       "title": "buy candles"
+      }
+     },
+     {
+      "name": "create_note",
+      "arguments": {
+       "text": "rent is due Friday"
+      }
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ },
+ "wearable": {
+  "tools": [
+   {
+    "name": "reply_to_notification",
+    "description": "Reply to a message notification from a known sender. Copy the reply text word for word, preserving capitalization. Use dismiss_notification to clear one without replying.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "notification_match": {
+       "type": "string",
+       "enum": [
+        "Maya",
+        "Leo",
+        "Dr. Patel",
+        "Cactus Team"
+       ],
+       "description": "Who the notification is from."
+      },
+      "text": {
+       "type": "string",
+       "description": "The reply message copied word for word.",
+       "minLength": 1,
+       "maxLength": 240
+      }
+     },
+     "required": [
+      "notification_match",
+      "text"
+     ]
+    }
+   },
+   {
+    "name": "dismiss_notification",
+    "description": "Dismiss a sender's notification without replying.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "notification_match": {
+       "type": "string",
+       "enum": [
+        "Maya",
+        "Leo",
+        "Dr. Patel",
+        "Cactus Team"
+       ],
+       "description": "Whose notification to dismiss."
+      }
+     },
+     "required": [
+      "notification_match"
+     ]
+    }
+   },
+   {
+    "name": "start_workout",
+    "description": "Start tracking a workout of an explicitly named type: running, walking, cycling, swimming, strength, or yoga. Use end_workout to finish one already running.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "workout_type": {
+       "type": "string",
+       "enum": [
+        "running",
+        "walking",
+        "cycling",
+        "swimming",
+        "strength",
+        "yoga"
+       ],
+       "description": "The type of workout the user named."
+      }
+     },
+     "required": [
+      "workout_type"
+     ]
+    }
+   },
+   {
+    "name": "end_workout",
+    "description": "End the current workout session. Starting a new one is start_workout. Takes no arguments.",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   },
+   {
+    "name": "find_my_phone",
+    "description": "Trigger the phone to ring so you can find it. Takes no arguments.",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  ],
+  "system": "Copy reply text verbatim, preserving capitalization. Map each explicit supported watch action to exactly one declared call. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "reply to Maya saying be there in 10 minutes",
+    "calls": [
+     {
+      "name": "reply_to_notification",
+      "arguments": {
+       "notification_match": "Maya",
+       "text": "be there in 10 minutes"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "reply to Dr. Patel with See you Thursday",
+    "calls": [
+     {
+      "name": "reply_to_notification",
+      "arguments": {
+       "notification_match": "Dr. Patel",
+       "text": "See you Thursday"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "answer the Cactus Team message saying the build is green",
+    "calls": [
+     {
+      "name": "reply_to_notification",
+      "arguments": {
+       "notification_match": "Cactus Team",
+       "text": "the build is green"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "send Leo a reply that says lunch works for me",
+    "calls": [
+     {
+      "name": "reply_to_notification",
+      "arguments": {
+       "notification_match": "Leo",
+       "text": "lunch works for me"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "dismiss the notification from Leo",
+    "calls": [
+     {
+      "name": "dismiss_notification",
+      "arguments": {
+       "notification_match": "Leo"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "swipe away the alert from Maya",
+    "calls": [
+     {
+      "name": "dismiss_notification",
+      "arguments": {
+       "notification_match": "Maya"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "clear the Dr. Patel notification",
+    "calls": [
+     {
+      "name": "dismiss_notification",
+      "arguments": {
+       "notification_match": "Dr. Patel"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "get rid of the Cactus Team notification",
+    "calls": [
+     {
+      "name": "dismiss_notification",
+      "arguments": {
+       "notification_match": "Cactus Team"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start a running workout",
+    "calls": [
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "running"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "begin a swimming session on my watch",
+    "calls": [
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "swimming"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "kick off some strength training",
+    "calls": [
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "strength"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "track a cycling workout",
+    "calls": [
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "cycling"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "go ahead and start a walking workout",
+    "calls": [
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "walking"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "end my workout",
+    "calls": [
+     {
+      "name": "end_workout",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "finish the current workout session",
+    "calls": [
+     {
+      "name": "end_workout",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "wrap up my workout now",
+    "calls": [
+     {
+      "name": "end_workout",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "find my phone",
+    "calls": [
+     {
+      "name": "find_my_phone",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "make my phone ring so I can locate it",
+    "calls": [
+     {
+      "name": "find_my_phone",
+      "arguments": {}
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "send a reply to Maya",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "dismiss the latest notification",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "start a workout",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "reply saying I am stuck in a meeting",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "check my heart rate on the watch",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "call Maya from my watch",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "show my step count for today",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't reply to the message from Leo",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not start a running workout yet",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never dismiss notifications from Dr. Patel",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "reply to Priya saying happy birthday",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "start a pilates workout",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "dismiss the notification from Leo and start a strength workout",
+    "calls": [
+     {
+      "name": "dismiss_notification",
+      "arguments": {
+       "notification_match": "Leo"
+      }
+     },
+     {
+      "name": "start_workout",
+      "arguments": {
+       "workout_type": "strength"
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "find my phone and reply to Maya saying almost home",
+    "calls": [
+     {
+      "name": "reply_to_notification",
+      "arguments": {
+       "notification_match": "Maya",
+       "text": "almost home"
+      }
+     },
+     {
+      "name": "find_my_phone",
+      "arguments": {}
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ },
+ "kitchen_appliance": {
+  "tools": [
+   {
+    "name": "set_oven",
+    "description": "Preheat or set the oven to a temperature in degrees Celsius. Use get_appliance_status to check on it.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "temperature": {
+       "type": "integer",
+       "description": "Target temperature in degrees Celsius.",
+       "minimum": 50,
+       "maximum": 250
+      }
+     },
+     "required": [
+      "temperature"
+     ]
+    }
+   },
+   {
+    "name": "control_coffee_maker",
+    "description": "Control the coffee maker. Never use this for the oven or the dishwasher.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "action": {
+       "type": "string",
+       "enum": [
+        "brew",
+        "stop",
+        "warm"
+       ],
+       "description": "brew, stop, or warm."
+      }
+     },
+     "required": [
+      "action"
+     ]
+    }
+   },
+   {
+    "name": "start_dishwasher",
+    "description": "Start the dishwasher, optionally on a stated wash cycle.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "cycle": {
+       "type": "string",
+       "enum": [
+        "eco",
+        "heavy",
+        "quick"
+       ],
+       "description": "The wash cycle; include only when stated."
+      }
+     }
+    }
+   },
+   {
+    "name": "set_cooking_timer",
+    "description": "Set a named cooking timer.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "label": {
+       "type": "string",
+       "description": "Label for the timer, copied from the user.",
+       "minLength": 1,
+       "maxLength": 40
+      },
+      "minutes": {
+       "type": "integer",
+       "description": "Timer duration in minutes.",
+       "minimum": 1,
+       "maximum": 360
+      }
+     },
+     "required": [
+      "label",
+      "minutes"
+     ]
+    }
+   },
+   {
+    "name": "get_appliance_status",
+    "description": "Read an appliance's current status. This changes nothing; any request to change settings uses the other tools.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "appliance": {
+       "type": "string",
+       "enum": [
+        "oven",
+        "coffee_maker",
+        "dishwasher"
+       ],
+       "description": "Which appliance to check."
+      }
+     },
+     "required": [
+      "appliance"
+     ]
+    }
+   }
+  ],
+  "system": "Map each explicit supported appliance action to exactly one declared call; never duplicate an action. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "preheat the oven to 180 degrees",
+    "calls": [
+     {
+      "name": "set_oven",
+      "arguments": {
+       "temperature": 180
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set the oven to 220 degrees",
+    "calls": [
+     {
+      "name": "set_oven",
+      "arguments": {
+       "temperature": 220
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "bake at 200 degrees",
+    "calls": [
+     {
+      "name": "set_oven",
+      "arguments": {
+       "temperature": 200
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "bring the oven up to 160 degrees",
+    "calls": [
+     {
+      "name": "set_oven",
+      "arguments": {
+       "temperature": 160
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "brew a fresh pot of coffee",
+    "calls": [
+     {
+      "name": "control_coffee_maker",
+      "arguments": {
+       "action": "brew"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start brewing another batch of coffee",
+    "calls": [
+     {
+      "name": "control_coffee_maker",
+      "arguments": {
+       "action": "brew"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "stop the coffee maker",
+    "calls": [
+     {
+      "name": "control_coffee_maker",
+      "arguments": {
+       "action": "stop"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "keep my coffee warm",
+    "calls": [
+     {
+      "name": "control_coffee_maker",
+      "arguments": {
+       "action": "warm"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "run the dishwasher on the eco cycle",
+    "calls": [
+     {
+      "name": "start_dishwasher",
+      "arguments": {
+       "cycle": "eco"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start a heavy dishwasher cycle",
+    "calls": [
+     {
+      "name": "start_dishwasher",
+      "arguments": {
+       "cycle": "heavy"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "run a quick cycle on the dishwasher",
+    "calls": [
+     {
+      "name": "start_dishwasher",
+      "arguments": {
+       "cycle": "quick"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "set a pasta timer for 10 minutes",
+    "calls": [
+     {
+      "name": "set_cooking_timer",
+      "arguments": {
+       "label": "pasta",
+       "minutes": 10
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "start a 90 minute timer for the brisket",
+    "calls": [
+     {
+      "name": "set_cooking_timer",
+      "arguments": {
+       "label": "brisket",
+       "minutes": 90
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "give me a 5 minute timer for the eggs",
+    "calls": [
+     {
+      "name": "set_cooking_timer",
+      "arguments": {
+       "label": "eggs",
+       "minutes": 5
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "the cookies need a 12 minute timer",
+    "calls": [
+     {
+      "name": "set_cooking_timer",
+      "arguments": {
+       "label": "cookies",
+       "minutes": 12
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "check the oven",
+    "calls": [
+     {
+      "name": "get_appliance_status",
+      "arguments": {
+       "appliance": "oven"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "check on the dishwasher",
+    "calls": [
+     {
+      "name": "get_appliance_status",
+      "arguments": {
+       "appliance": "dishwasher"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "check the coffee maker for me",
+    "calls": [
+     {
+      "name": "get_appliance_status",
+      "arguments": {
+       "appliance": "coffee_maker"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "heat up the oven for the garlic bread",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "set a cooking timer for the rice",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "start a timer for 25 minutes",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "change the coffee maker setting",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "defrost some chicken in the microwave",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "boil the kettle for tea",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "turn the fridge down to 3 degrees",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't preheat the oven to 220 degrees tonight",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not run the dishwasher on heavy today",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never brew coffee this late at night",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "get the oven up to 300 degrees",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "set a stew timer for 500 minutes",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "set the oven to 180 degrees and start a pizza timer for 15 minutes",
+    "calls": [
+     {
+      "name": "set_oven",
+      "arguments": {
+       "temperature": 180
+      }
+     },
+     {
+      "name": "set_cooking_timer",
+      "arguments": {
+       "label": "pizza",
+       "minutes": 15
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "brew coffee and run the dishwasher on quick",
+    "calls": [
+     {
+      "name": "control_coffee_maker",
+      "arguments": {
+       "action": "brew"
+      }
+     },
+     {
+      "name": "start_dishwasher",
+      "arguments": {
+       "cycle": "quick"
+      }
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ },
+ "data_capture": {
+  "tools": [
+   {
+    "name": "create_contact",
+    "description": "Save a new contact. Copy the name word for word and the number digit for digit; never invent or complete them.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "name": {
+       "type": "string",
+       "description": "Full name of the contact, copied word for word.",
+       "minLength": 1,
+       "maxLength": 60
+      },
+      "phone": {
+       "type": "string",
+       "description": "The phone number exactly as given; include only when stated.",
+       "pattern": "^\\+?[0-9][0-9 -]{5,17}$"
+      },
+      "email": {
+       "type": "string",
+       "description": "The email address; include only when stated.",
+       "format": "email"
+      }
+     },
+     "required": [
+      "name"
+     ]
+    }
+   },
+   {
+    "name": "log_expense",
+    "description": "Record money spent. Log only amounts the user stated; never estimate.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "amount": {
+       "type": "number",
+       "description": "The amount as stated, digits only.",
+       "minimum": 0,
+       "maximum": 100000
+      },
+      "category": {
+       "type": "string",
+       "enum": [
+        "food",
+        "groceries",
+        "transport",
+        "entertainment",
+        "utilities",
+        "shopping"
+       ],
+       "description": "The spending category the user named."
+      },
+      "merchant": {
+       "type": "string",
+       "description": "The store or vendor copied word for word; include only when named.",
+       "minLength": 1,
+       "maxLength": 60
+      }
+     },
+     "required": [
+      "amount",
+      "category"
+     ]
+    }
+   },
+   {
+    "name": "log_meal",
+    "description": "Log a meal or food item. Use log_expense for money spent on food.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "description": {
+       "type": "string",
+       "description": "What was eaten, copied word for word.",
+       "minLength": 1,
+       "maxLength": 120
+      },
+      "meal_type": {
+       "type": "string",
+       "enum": [
+        "breakfast",
+        "lunch",
+        "dinner",
+        "snack"
+       ],
+       "description": "Which meal; include only when stated."
+      }
+     },
+     "required": [
+      "description"
+     ]
+    }
+   },
+   {
+    "name": "log_water_intake",
+    "description": "Log water consumption in your water log.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "amount_ml": {
+       "type": "integer",
+       "description": "Amount of water in milliliters.",
+       "minimum": 1,
+       "maximum": 5000
+      }
+     },
+     "required": [
+      "amount_ml"
+     ]
+    }
+   },
+   {
+    "name": "log_weight",
+    "description": "Record a body-weight measurement in kilograms.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "weight_kg": {
+       "type": "number",
+       "description": "The weight in kilograms as stated.",
+       "minimum": 20,
+       "maximum": 300
+      }
+     },
+     "required": [
+      "weight_kg"
+     ]
+    }
+   }
+  ],
+  "system": "Copy names, merchants, and descriptions verbatim from the user. Record only values the user stated; never estimate. Map each explicit supported record to exactly one declared call. Unsupported, incomplete, ambiguous, and negated requests return no call.",
+  "cases": [
+   {
+    "query": "add Maya Chen to my contacts",
+    "calls": [
+     {
+      "name": "create_contact",
+      "arguments": {
+       "name": "Maya Chen"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "save Leo Park to contacts, phone 555-0134",
+    "calls": [
+     {
+      "name": "create_contact",
+      "arguments": {
+       "name": "Leo Park",
+       "phone": "555-0134"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "create a contact for Nadia Osei, number 917-555-0188, email nadia@osei.dev",
+    "calls": [
+     {
+      "name": "create_contact",
+      "arguments": {
+       "name": "Nadia Osei",
+       "phone": "917-555-0188",
+       "email": "nadia@osei.dev"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "put Tom\u00e1s Rivera in my contacts",
+    "calls": [
+     {
+      "name": "create_contact",
+      "arguments": {
+       "name": "Tom\u00e1s Rivera"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log an expense of 23 for transport",
+    "calls": [
+     {
+      "name": "log_expense",
+      "arguments": {
+       "amount": 23,
+       "category": "transport"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "record an 85.99 groceries expense from FreshMart",
+    "calls": [
+     {
+      "name": "log_expense",
+      "arguments": {
+       "amount": 85.99,
+       "category": "groceries",
+       "merchant": "FreshMart"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "track 142.75 spent on utilities",
+    "calls": [
+     {
+      "name": "log_expense",
+      "arguments": {
+       "amount": 142.75,
+       "category": "utilities"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "capture 260 in shopping spend from Uniqlo",
+    "calls": [
+     {
+      "name": "log_expense",
+      "arguments": {
+       "amount": 260,
+       "category": "shopping",
+       "merchant": "Uniqlo"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log 18.75 for entertainment",
+    "calls": [
+     {
+      "name": "log_expense",
+      "arguments": {
+       "amount": 18.75,
+       "category": "entertainment"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log a meal, grilled salmon with rice",
+    "calls": [
+     {
+      "name": "log_meal",
+      "arguments": {
+       "description": "grilled salmon with rice"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log lunch, leftover pad thai",
+    "calls": [
+     {
+      "name": "log_meal",
+      "arguments": {
+       "description": "leftover pad thai",
+       "meal_type": "lunch"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "record oatmeal with berries for breakfast",
+    "calls": [
+     {
+      "name": "log_meal",
+      "arguments": {
+       "description": "oatmeal with berries",
+       "meal_type": "breakfast"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "jot down what i ate, rice cakes with peanut butter",
+    "calls": [
+     {
+      "name": "log_meal",
+      "arguments": {
+       "description": "rice cakes with peanut butter"
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log 750 ml of water",
+    "calls": [
+     {
+      "name": "log_water_intake",
+      "arguments": {
+       "amount_ml": 750
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "record 500 ml of water intake",
+    "calls": [
+     {
+      "name": "log_water_intake",
+      "arguments": {
+       "amount_ml": 500
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "i drank 1200 ml of water, log it",
+    "calls": [
+     {
+      "name": "log_water_intake",
+      "arguments": {
+       "amount_ml": 1200
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log my weight at 82.5 kg",
+    "calls": [
+     {
+      "name": "log_weight",
+      "arguments": {
+       "weight_kg": 82.5
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "record a weight of 74 kg",
+    "calls": [
+     {
+      "name": "log_weight",
+      "arguments": {
+       "weight_kg": 74
+      }
+     }
+    ],
+    "category": "positive"
+   },
+   {
+    "query": "log an expense of 45 from this afternoon",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "record my transport spending from today as an expense",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "log my water intake from this morning",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "log my current weight for me",
+    "calls": [],
+    "category": "missing",
+    "critical": true
+   },
+   {
+    "query": "text Marcus to ask about his new number",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "how much have i spent on groceries this month",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "delete yesterday's lunch entry from the log",
+    "calls": [],
+    "category": "irrelevant"
+   },
+   {
+    "query": "don't log the 15.40 i spent on transport",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "do not add Ravi Kumar at 415-555-0162 to my contacts",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "never log 79.4 kg as my weight",
+    "calls": [],
+    "category": "negation",
+    "critical": true
+   },
+   {
+    "query": "log my weight as 500 kg",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "log 9000 ml of water for today",
+    "calls": [],
+    "category": "invalid",
+    "critical": true
+   },
+   {
+    "query": "log lunch, turkey sandwich on rye, and 600 ml of water",
+    "calls": [
+     {
+      "name": "log_meal",
+      "arguments": {
+       "description": "turkey sandwich on rye",
+       "meal_type": "lunch"
+      }
+     },
+     {
+      "name": "log_water_intake",
+      "arguments": {
+       "amount_ml": 600
+      }
+     }
+    ],
+    "category": "parallel"
+   },
+   {
+    "query": "log my weight of 78.4 kg and 350 ml of water",
+    "calls": [
+     {
+      "name": "log_weight",
+      "arguments": {
+       "weight_kg": 78.4
+      }
+     },
+     {
+      "name": "log_water_intake",
+      "arguments": {
+       "amount_ml": 350
+      }
+     }
+    ],
+    "category": "parallel"
+   }
+  ]
+ }
+}

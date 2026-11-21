@@ -253,6 +253,44 @@ void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color){
     touch(y0, y1);
 }
 
+void fb_glass_rect(i32 x, i32 y, u32 w, u32 h, const u8 *mask, const u32 *bd, u32 bp, u32 tint, u32 ta,
+                   i32 panel_y, u32 sheen_h, u32 sheen_a){
+    if(!ready || !bd || !w || !h) return;
+    u32 x0, y0, x1, y1;
+    cut(&x0, &y0, &x1, &y1, x, y, w, h, cx0, cy0, cx1, cy1);
+    if(x1 <= x0) return;
+    for(u32 yy = y0; yy < y1; yy++){
+        const u32 *b = bd + (u64)yy * bp + x0;
+        u32 *p = backbuf + (u64)yy * fb_w + x0;
+        const u8 *m = mask ? mask + (u64)(yy - (u32)y) * w + (x0 - (u32)x) : 0;
+        u32 tr = tint;
+        i32 dy = (i32)yy - panel_y;
+        if(sheen_a && dy >= 0 && (u32)dy < sheen_h) tr = mix(tint, 0xFFFFFF, sheen_a * (sheen_h - (u32)dy) / sheen_h);
+        for(u32 n = x1 - x0; n; n--, b++, p++){
+            u32 c = mix(*b, tr, ta);
+            if(m){
+                u32 a = *m++;
+                if(!a) continue;
+                if(a != 255) c = mix(*p, c, a + (a >> 7));
+            }
+            *p = c;
+        }
+    }
+    touch(y0, y1);
+}
+
+void fb_blend_rect(u32 x, u32 y, u32 w, u32 h, u32 color, u32 a){
+    if(!ready || !a) return;
+    u32 x0, y0, x1, y1;
+    cut(&x0, &y0, &x1, &y1, x, y, w, h, cx0, cy0, cx1, cy1);
+    if(x1 <= x0) return;
+    for(u32 yy = y0; yy < y1; yy++){
+        u32 *p = backbuf + (u64)yy * fb_w + x0;
+        for(u32 n = x1 - x0; n; n--, p++) *p = a >= 256 ? color : mix(*p, color, a);
+    }
+    touch(y0, y1);
+}
+
 void fb_clear(u32 color){ fb_fill_rect(0, 0, fb_w, fb_h, color); }
 
 /* Copies rows from a set of physical pages (not necessarily contiguous) into

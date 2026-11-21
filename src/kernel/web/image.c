@@ -19,6 +19,7 @@ typedef struct {
     u32 w, h;
     int state;              /* 0 pending, 1 ready, 2 failed */
     int wanted;             /* the layout reached it (images in hidden menus are never fetched) */
+    int ss;                 /* pixels per page px: an SVG is drawn larger than its size, for sharpness */
 } image_t;
 static image_t images[IMAGES_MAX];
 static int nimages = 0;
@@ -50,6 +51,14 @@ int img_register(const char *url){
     images[nimages].state = 0;
     nimages++;
     return nimages - 1;
+}
+
+int web_image_natural(int i, u32 *w, u32 *h){
+    if(i < 0 || i >= nimages || images[i].state != 1) return 0;
+    int ss = images[i].ss > 0 ? images[i].ss : 1;
+    if(w) *w = (images[i].w + (u32)ss / 2) / (u32)ss;
+    if(h) *h = (images[i].h + (u32)ss / 2) / (u32)ss;
+    return 1;
 }
 
 int web_image_count(void){ return nimages; }
@@ -597,9 +606,10 @@ static int gif_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *ou
 /* ================= entry point ================= */
 
 /* ================= JPEG (baseline DCT, Huffman) ================= */
-/* Decodes baseline (SOF0/SOF1) JFIF/Exif JPEGs: the common web case. Progressive
- * JPEGs (SOF2) are declined and fall back to the <img> alt text. Integer IDCT and
- * fixed-point YCbCr, so no floating point at run time. */
+/* Decodes baseline (SOF0/SOF1) and progressive (SOF2) JFIF/Exif JPEGs. A progressive
+ * picture's coefficients are gathered over all its scans first, then transformed as a
+ * baseline one would be. Integer IDCT and fixed-point YCbCr, so no floating point at
+ * run time. */
 
 typedef struct {
     u8  fast[512];          /* 9-bit fast path: code -> symbol index, or 255 */
@@ -624,6 +634,8 @@ typedef struct {
     int dcpred;
     int w2, h2;             /* decoded plane size (block-padded) */
     u8 *data;               /* the plane, w2*h2, one byte per sample */
+    short *coef;            /* progressive: every block's coefficients (natural order, not dequantized) */
+    int bw, bh;             /* ... blocks across and down (MCU-padded) */
 } jcomp_t;
 
 typedef struct {
@@ -631,6 +643,7 @@ typedef struct {
     jhuff_t hdc[4], hac[4];
     jcomp_t comp[4];
     int ncomp, W, H, hmax, vmax, mcux, mcuy, restart;
+    int progressive;
     jbits_t b;
 } jpeg_t;
 
@@ -838,10 +851,197 @@ typedef struct {
 
 static void jjob_free(jjob_t *jb){
     if(!jb) return;
-    for(int i = 0; i < 4; i++) if(jb->J.comp[i].data) kfree(jb->J.comp[i].data);
+    for(int i = 0; i < 4; i++){
+        if(jb->J.comp[i].data) kfree(jb->J.comp[i].data);
+        if(jb->J.comp[i].coef) kfree(jb->J.comp[i].coef);
+    }
     if(jb->out) kfree(jb->out);
     if(jb->mapy) kfree(jb->mapy);
     kfree(jb);
+}
+
+/* ---- progressive JPEG ---- */
+
+static int jgetbits(jbits_t *j, int n){                 /* n bits, unsigned */
+    if(n <= 0) return 0;
+    if(j->code_bits < n) jgrow(j);
+    u32 k = j->code_buffer >> (32 - n);
+    j->code_buffer <<= n; j->code_bits -= n;
+    return (int)k;
+}
+
+/* Where a scan's entropy-coded data ends: the first marker that is not a restart. */
+static const u8 *jscan_end(const u8 *p, const u8 *end){
+    while(p + 1 < end){
+        if(p[0] == 0xFF && p[1] != 0 && p[1] != 0xFF && !(p[1] >= 0xD0 && p[1] <= 0xD7)) return p;
+        p++;
+    }
+    return end;
+}
+
+/* One block of one scan. ss..se: the band of coefficients; ah/al: successive approximation. */
+static int jprog_block(jpeg_t *J, jcomp_t *c, short *d, int ss, int se, int ah, int al, int *eobrun){
+    jbits_t *b = &J->b;
+    if(ss == 0){                                        /* DC */
+        if(ah == 0){
+            int t = jdecode(b, &J->hdc[c->td]);
+            if(t < 0 || t > 16) return -1;
+            c->dcpred += t ? jreceive(b, t) : 0;
+            d[0] = (short)(c->dcpred * (1 << al));
+        } else if(jgetbits(b, 1)) d[0] = (short)(d[0] | (1 << al));
+        return 0;
+    }
+    if(ah == 0){                                        /* AC, first pass over this band */
+        if(*eobrun){ (*eobrun)--; return 0; }
+        for(int k = ss; k <= se; ){
+            int rs = jdecode(b, &J->hac[c->ta]);
+            if(rs < 0) return -1;
+            int s = rs & 15, r = rs >> 4;
+            if(s == 0){
+                if(r < 15){ *eobrun = (1 << r) - 1; if(r) *eobrun += jgetbits(b, r); break; }
+                k += 16;
+                continue;
+            }
+            k += r;
+            if(k > 63) return -1;
+            d[jdezig[k]] = (short)(jreceive(b, s) * (1 << al));
+            k++;
+        }
+        return 0;
+    }
+    /* AC refinement: one more bit for coefficients already non-zero, and new ones of +-1 */
+    short bit = (short)(1 << al);
+    if(*eobrun){
+        (*eobrun)--;
+        for(int k = ss; k <= se; k++){
+            short *p = &d[jdezig[k]];
+            if(*p && jgetbits(b, 1) && !(*p & bit)) *p = (short)(*p > 0 ? *p + bit : *p - bit);
+        }
+        return 0;
+    }
+    int k = ss;
+    do {
+        int rs = jdecode(b, &J->hac[c->ta]);
+        if(rs < 0) return -1;
+        int s = rs & 15, r = rs >> 4;
+        if(s == 0){
+            if(r < 15){ *eobrun = (1 << r) - 1; if(r) *eobrun += jgetbits(b, r); r = 64; }
+        } else {
+            if(s != 1) return -1;
+            s = jgetbits(b, 1) ? bit : -bit;
+        }
+        while(k <= se){
+            short *p = &d[jdezig[k++]];
+            if(*p){
+                if(jgetbits(b, 1) && !(*p & bit)) *p = (short)(*p > 0 ? *p + bit : *p - bit);
+            } else {
+                if(r == 0){ *p = (short)s; break; }
+                r--;
+            }
+        }
+    } while(k <= se);
+    return 0;
+}
+
+/* Reads every scan of a progressive JPEG (the first SOS segment is sos, its data starts at p),
+ * then turns the coefficients into the component planes. */
+static int jprog_decode(jjob_t *jb, const u8 *sos, const u8 *p, const u8 *end){
+    jpeg_t *J = &jb->J;
+    for(int i = 0; i < J->ncomp; i++){
+        jcomp_t *c = &J->comp[i];
+        c->bw = J->mcux * c->h; c->bh = J->mcuy * c->v;
+        u64 n = (u64)c->bw * c->bh * 64 * sizeof(short);
+        if(n > IMG_MAX_OUT * 2) return -1;
+        c->coef = kmalloc((u32)n);
+        if(!c->coef) return -1;
+        memset(c->coef, 0, (u32)n);
+    }
+    for(;;){
+        /* the scan header */
+        int ns = sos[0];
+        if(ns < 1 || ns > 4) return -1;
+        jcomp_t *sc[4];
+        const u8 *c = sos + 1;
+        for(int i = 0; i < ns; i++){
+            sc[i] = NULL;
+            for(int k = 0; k < J->ncomp; k++) if(J->comp[k].id == c[0]){ sc[i] = &J->comp[k]; sc[i]->td = c[1] >> 4; sc[i]->ta = c[1] & 15; }
+            if(!sc[i]) return -1;
+            c += 2;
+        }
+        int ss = c[0], se = c[1], ah = c[2] >> 4, al = c[2] & 15;
+        if(ss > 63 || se > 63 || ss > se || al > 13 || (ss == 0 && se != 0) || (ss && ns != 1)) return -1;
+        const u8 *se_end = jscan_end(p, end);
+        J->b.s = p; J->b.end = se_end;
+        J->b.code_buffer = 0; J->b.code_bits = 0; J->b.marker = 0; J->b.nomore = 0;
+        for(int i = 0; i < J->ncomp; i++) J->comp[i].dcpred = 0;
+        int eobrun = 0, todo = J->restart ? J->restart : 0x7fffffff;
+        if(ns == 1){
+            /* one component: its own blocks in raster order (not MCU-padded) */
+            jcomp_t *cp = sc[0];
+            int cw = (J->W * cp->h + J->hmax - 1) / J->hmax, ch = (J->H * cp->v + J->vmax - 1) / J->vmax;
+            int nbx = (cw + 7) / 8, nby = (ch + 7) / 8;
+            for(int by = 0; by < nby; by++) for(int bx = 0; bx < nbx; bx++){
+                if(jprog_block(J, cp, cp->coef + ((u32)by * cp->bw + bx) * 64, ss, se, ah, al, &eobrun) != 0) return -1;
+                if(J->restart && --todo == 0){ jrestart(J); eobrun = 0; todo = J->restart; }
+            }
+        } else {
+            for(int my = 0; my < J->mcuy; my++) for(int mx = 0; mx < J->mcux; mx++){
+                for(int i = 0; i < ns; i++){
+                    jcomp_t *cp = sc[i];
+                    for(int by = 0; by < cp->v; by++) for(int bx = 0; bx < cp->h; bx++){
+                        int x = mx * cp->h + bx, y = my * cp->v + by;
+                        if(jprog_block(J, cp, cp->coef + ((u32)y * cp->bw + x) * 64, ss, se, ah, al, &eobrun) != 0) return -1;
+                    }
+                }
+                if(J->restart && --todo == 0){ jrestart(J); eobrun = 0; todo = J->restart; }
+            }
+        }
+        /* the segments up to the next scan (tables can change between scans), or the end */
+        p = se_end;
+        const u8 *next = NULL;
+        while(p + 4 <= end){
+            if(p[0] != 0xFF){ p++; continue; }
+            u8 m = p[1];
+            if(m == 0xFF){ p++; continue; }
+            if(m == 0xD9){ p = end; break; }               /* EOI */
+            if(m == 0 || (m >= 0xD0 && m <= 0xD7)){ p += 2; continue; }
+            int L = (p[2] << 8) | p[3];
+            const u8 *seg = p + 4, *segend = p + 2 + L;
+            if(L < 2 || segend > end) { p = end; break; }
+            if(m == 0xC4){
+                while(seg < segend){
+                    int tc = seg[0] >> 4, th = seg[0] & 15; seg++;
+                    if(th > 3) return -1;
+                    int total = 0; for(int i = 0; i < 16; i++) total += seg[i];
+                    if(seg + 16 + total > segend) return -1;
+                    if(jbuild_huff(tc ? &J->hac[th] : &J->hdc[th], seg, seg + 16) != 0) return -1;
+                    seg += 16 + total;
+                }
+            } else if(m == 0xDD && L >= 4) J->restart = (seg[0] << 8) | seg[1];
+            p = segend;
+            if(m == 0xDA){ next = seg; break; }
+        }
+        if(!next) break;                                   /* EOI, or a truncated file: show what came */
+        sos = next;
+    }
+    /* dequantize and transform every block into the planes */
+    int bs = 8 >> jb->scale;
+    static short blk[64];
+    for(int i = 0; i < J->ncomp; i++){
+        jcomp_t *cp = &J->comp[i];
+        const u16 *q = J->quant[cp->tq];
+        for(int by = 0; by < cp->bh; by++) for(int bx = 0; bx < cp->bw; bx++){
+            const short *co = cp->coef + ((u32)by * cp->bw + bx) * 64;
+            int flat = 1;
+            for(int z = 0; z < 64; z++){ blk[z] = (short)(co[z] * q[z]); if(z && co[z]) flat = 0; }
+            u8 *dst = cp->data + by * bs * cp->w2 + bx * bs;
+            if(jb->scale == 0){ if(flat) jidct_dc(dst, cp->w2, blk[0]); else jidct(dst, cp->w2, blk); }
+            else if(flat || bs == 1) jfill(dst, cp->w2, blk[0], bs);
+            else jidct_n(dst, cp->w2, blk, bs);
+        }
+        kfree(cp->coef); cp->coef = NULL;
+    }
+    return 0;
 }
 
 /* Reads the headers and gets ready to decode the scan. NULL if the JPEG cannot be decoded. */
@@ -890,7 +1090,8 @@ static jjob_t *jpeg_setup(const u8 *data, u32 len, int scale){
         } else if(m == 0xDD){                        /* DRI */
             if(seg + 2 > segend) goto fail;
             J->restart = (seg[0] << 8) | seg[1];
-        } else if(m == 0xC0 || m == 0xC1){           /* SOF0/SOF1 baseline */
+        } else if(m == 0xC0 || m == 0xC1 || m == 0xC2){   /* SOF0/SOF1 baseline, SOF2 progressive */
+            J->progressive = m == 0xC2;
             if(seg[0] != 8) goto fail;               /* 8-bit only */
             J->H = (seg[1] << 8) | seg[2];
             J->W = (seg[3] << 8) | seg[4];
@@ -907,11 +1108,10 @@ static jjob_t *jpeg_setup(const u8 *data, u32 len, int scale){
                 c += 3;
             }
             got_sof = 1;
-        } else if(m == 0xC2){                         /* progressive: not supported */
-            goto fail;
         } else if(m == 0xDA){                         /* SOS */
             if(!got_sof) goto fail;
             int ns = seg[0]; const u8 *c = seg + 1;
+            if(!J->progressive)
             for(int i = 0; i < ns; i++){
                 int cs = c[0], td = c[1] >> 4, ta = c[1] & 15; c += 2;
                 for(int k = 0; k < J->ncomp; k++) if(J->comp[k].id == cs){ J->comp[k].td = td; J->comp[k].ta = ta; }
@@ -939,6 +1139,10 @@ static jjob_t *jpeg_setup(const u8 *data, u32 len, int scale){
             jb->out = kmalloc((u32)need);
             if(!jb->out) goto fail;
             jb->todo = J->restart ? J->restart : 0x7fffffff;
+            if(J->progressive){
+                if(jprog_decode(jb, seg, p, end) != 0) goto fail;
+                jb->row = J->mcuy;                     /* every block is already in the planes */
+            }
             return jb;
         }
     }
@@ -1083,15 +1287,25 @@ int web_add_image(int idx, const char *data, u32 len){
     if(im->state == 1) return 0;                        /* already decoded */
     u32 *px = NULL; u32 w = 0, h = 0;
     const u8 *d = (const u8 *)data;
-    int ok = -1;
-    if(len >= 8 && d[0] == 0x89 && d[1] == 'P') ok = png_decode(d, len, &px, &w, &h);
+    int ok = -1, ss = 1;
+    int is_svg = 0;
+    if(len >= 5){
+        /* "<svg" or an XML header with an <svg> tag soon after it (after a BOM or spaces) */
+        u32 lim = len < 1024 ? len : 1024;
+        for(u32 k = 0; k + 4 <= lim && !is_svg; k++)
+            if(d[k] == '<' && (d[k + 1] | 32) == 's' && (d[k + 2] | 32) == 'v' && (d[k + 3] | 32) == 'g' && (d[k + 4] == ' ' || d[k + 4] == '>' || d[k + 4] == '\n' || d[k + 4] == '\t' || d[k + 4] == '\r')) is_svg = 1;
+        if(is_svg && d[0] == 0x89) is_svg = 0;
+    }
+    if(is_svg) ok = svg_decode(d, len, &px, &w, &h, &ss);
+    else if(len >= 8 && d[0] == 0x89 && d[1] == 'P') ok = png_decode(d, len, &px, &w, &h);
     else if(len >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) ok = jpeg_decode(d, len, &px, &w, &h);
     else if(len >= 2 && d[0] == 'B' && d[1] == 'M') ok = bmp_decode(d, len, &px, &w, &h);
     else if(len >= 6 && !memcmp(d, "GIF8", 4)) ok = gif_decode(d, len, &px, &w, &h);
+    else if(len >= 16 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)) ok = webp_decode(d, len, &px, &w, &h);
     if(ok != 0){ im->state = 2; return -1; }
     if(img_bytes + w * h * 4 > IMG_BUDGET){ kfree(px); im->state = 2; return -1; }   /* the page has enough pictures */
     if(im->pixels) kfree(im->pixels);
-    im->pixels = px; im->w = w; im->h = h; im->state = 1;
+    im->pixels = px; im->w = w; im->h = h; im->state = 1; im->ss = ss;
     img_bytes += w * h * 4;
     return 0;
 }

@@ -1,0 +1,9 @@
+id=STARS
+name=Starfield
+version=1.0.0
+author=Am-Droid
+icon=13
+desc=Fly through a field of stars
+perms=framebuffer,input
+requires=amdroid1+
+entry=MAIN.FAS

@@ -161,6 +161,8 @@ static void normalize(char *p, u32 max){
 }
 
 /* The full URL for href on the page at base. */
+#include "cookies.inc"
+
 static void resolve(const char *base, const char *href, char *out, u32 max){
     while(*href == ' ' || *href == '\n' || *href == '\t') href++;
     if(starts(href, "http://") || starts(href, "https://")){ ui_copy(out, href, max); return; }
@@ -349,6 +351,12 @@ static int show(const char *url, const char *html, u32 len){
     if(husser_open(area.w, area.h) < 0) return -1;
     { volatile husser_shm_t *hs = (volatile husser_shm_t *)husser_header(); if(hs) hs->adblock = (u32)browser_adblock; }
     husser_set_url(url);
+    {   /* the page's cookies, as document.cookie shows them */
+        static char ck[HUSSER_COOKIE_IN];
+        ck_header(url, 1, ck, sizeof ck);
+        husser_set_cookies(ck);
+        cookie_off = 0;
+    }
     husser_load(html, len, (u32)scroll);
     for(int j = 0; j < RES_KINDS; j++) for(int k = 0; k < RES_IDX; k++) res_done[j][k] = 0;
     need_seq_consumed = 0;
@@ -509,10 +517,12 @@ static void ld_connect(void){
                      : "The server did not accept the connection.");
         return;
     }
-    char req[PATH_MAX_B + HOST_MAX + 256] = "GET ";
+    static char req[PATH_MAX_B + HOST_MAX + 4096 + 512];
+    ui_copy(req, "GET ", sizeof req);
     cat_n(req, path, sizeof req);
     cat_n(req, " HTTP/1.0\r\nHost: ", sizeof req);
     cat_n(req, host, sizeof req);
+    { static char ck[4200]; ck_request_line(ld_url, ck, sizeof ck); if(ck[0]){ cat_n(req, "\r\n", sizeof req); cat_n(req, ck, sizeof req); req[ui_len(req) - 2] = 0; } }
     cat_n(req, ld_kind == 1 ? "\r\nUser-Agent: BRO-weser\r\nAccept: text/css,*/*\r\nConnection: close\r\n\r\n"
              : ld_kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/*,*/*;q=0.8\r\nConnection: close\r\n\r\n"
              : ld_kind == 3 ? "\r\nUser-Agent: BRO-weser\r\nAccept: */*\r\nConnection: close\r\n\r\n"
@@ -558,6 +568,11 @@ static void ld_finish(void){
     }
     int code = (ld_buf[9] - '0') * 100 + (ld_buf[10] - '0') * 10 + (ld_buf[11] - '0');
     char val[URL_MAX];
+    {   /* cookies: for the page the proxy ended on, or this address */
+        char fin[URL_MAX];
+        if(header("x-final-url:", fin, sizeof fin) && starts(fin, "https://")) ck_from_answer(fin, ld_buf, ld_hdr);
+        else ck_from_answer(ld_url, ld_buf, ld_hdr);
+    }
 
     if(code == 502 && header("x-proxy-error:", val, sizeof val)){
         char m[200] = "The HTTPS proxy could not fetch the page: ";
@@ -999,9 +1014,12 @@ typedef struct {
     u32 status;                   /* the HTTP status (script fetches see it) */
     const u8 *body; u32 blen;     /* F_DONE: what goes to Husser */
     int cached;                   /* the body is the ultra-mode cache's (not ours to free) */
+    char method[12], ctype[128];  /* script fetches: the method ("" = GET) and the body's type */
+    u8 *rbody; u32 rblen;         /* ... and the body sent (ours to free) */
 } fetch_t;
 static fetch_t fslot[FETCH_SLOTS];
-static struct { u32 kind, idx; char url[URL_MAX]; } pend[PEND_MAX];   /* kind 4: a script's fetch(), idx its id */
+typedef struct { u32 kind, idx; char url[URL_MAX]; char method[12], ctype[128]; u8 *rbody; u32 rblen; } pend_t;
+static pend_t pend[PEND_MAX];   /* kind 4: a script's fetch(), idx its id */
 static int npend = 0;
 static int fetch_total = 0;       /* started for this page, for the status line */
 
@@ -1012,10 +1030,13 @@ static void fetch_free(fetch_t *f){
     f->buf = NULL;
     f->len = f->cap = f->hdr = f->clen = 0;
     f->have_clen = 0;
+    if(f->rbody) kfree(f->rbody);
+    f->rbody = NULL; f->rblen = 0; f->method[0] = 0;
     f->state = F_FREE;
 }
 static void fetch_cancel_all(void){
-    for(int i = 0; i < FETCH_SLOTS; i++){ if(fslot[i].state == F_FREE) fslot[i].sock = -1; fetch_free(&fslot[i]); }
+    for(int i = 0; i < FETCH_SLOTS; i++){ if(fslot[i].state == F_FREE){ fslot[i].sock = -1; fslot[i].rbody = NULL; } fetch_free(&fslot[i]); }
+    for(int k = 0; k < npend; k++) if(pend[k].rbody){ kfree(pend[k].rbody); pend[k].rbody = NULL; }
     npend = 0;
     fetch_total = 0;
 }
@@ -1056,15 +1077,27 @@ static void fetch_connect(fetch_t *f){
     } else if(net_resolve(u.host, &ip, 0, 0) != 0){ fetch_done(f, 0, NULL, 0); return; }
     f->sock = tcp_connect(ip, port);
     if(f->sock < 0){ fetch_done(f, 0, NULL, 0); return; }
-    char req[PATH_MAX_B + HOST_MAX + 256] = "GET ";
+    static char req[PATH_MAX_B + HOST_MAX + 4096 + 512];
+    int post = f->kind == 4 && f->method[0] && strcmp(f->method, "GET") != 0 && strcmp(f->method, "HEAD") != 0;
+    ui_copy(req, f->kind == 4 && f->method[0] ? f->method : "GET", sizeof req);
+    cat_n(req, " ", sizeof req);
     cat_n(req, path, sizeof req);
     cat_n(req, " HTTP/1.0\r\nHost: ", sizeof req);
     cat_n(req, u.https ? host : u.host, sizeof req);
+    { static char ck[4200]; ck_request_line(f->url, ck, sizeof ck); if(ck[0]){ cat_n(req, "\r\n", sizeof req); cat_n(req, ck, sizeof req); req[ui_len(req) - 2] = 0; } }
+    if(post){
+        char n[12] = ""; ui_num(f->rblen, n);
+        cat_n(req, "\r\nContent-Type: ", sizeof req);
+        cat_n(req, f->ctype[0] ? f->ctype : "text/plain;charset=UTF-8", sizeof req);
+        cat_n(req, "\r\nContent-Length: ", sizeof req);
+        cat_n(req, n, sizeof req);
+    }
     /* images: only formats the engine decodes (no WebP/AVIF), so servers pick one of those */
     cat_n(req, f->kind == 1 ? "\r\nUser-Agent: BRO-weser\r\nAccept: text/css,*/*;q=0.1\r\nConnection: close\r\n\r\n"
-             : f->kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/png,image/jpeg,image/gif,image/bmp;q=0.9,*/*;q=0.1\r\nConnection: close\r\n\r\n"
+             : f->kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/svg+xml,image/png,image/jpeg,image/gif,image/bmp;q=0.9,*/*;q=0.1\r\nConnection: close\r\n\r\n"
                             : "\r\nUser-Agent: BRO-weser\r\nAccept: */*\r\nConnection: close\r\n\r\n", sizeof req);
     if(tcp_send(f->sock, req, ui_len(req)) != 0){ fetch_done(f, 0, NULL, 0); return; }
+    if(post && f->rblen && tcp_send(f->sock, f->rbody, f->rblen) != 0){ fetch_done(f, 0, NULL, 0); return; }
     f->cap = 64 * 1024;
     f->buf = kmalloc(f->cap + 1);
     if(!f->buf){ fetch_done(f, 0, NULL, 0); return; }
@@ -1095,16 +1128,32 @@ static void fetch_finish(fetch_t *f){
     int code = (f->buf[9] - '0') * 100 + (f->buf[10] - '0') * 10 + (f->buf[11] - '0');
     f->status = (u32)code;
     char val[URL_MAX];
+    {
+        char fin[URL_MAX];
+        if(fetch_header(f, "x-final-url:", fin, sizeof fin) && starts(fin, "https://")) ck_from_answer(fin, f->buf, f->hdr);
+        else ck_from_answer(f->url, f->buf, f->hdr);
+    }
     if(code >= 300 && code < 400 && fetch_header(f, "location:", val, sizeof val) && ++f->redirects <= MAX_REDIRECTS){
         char next[URL_MAX];
         resolve(f->url, val, next, sizeof next);
         ui_copy(f->url, next, URL_MAX);
+        if(code != 307 && code != 308){                  /* a form's answer is fetched with GET */
+            f->method[0] = 0;
+            if(f->rbody) kfree(f->rbody);
+            f->rbody = NULL; f->rblen = 0;
+        }
         tcp_close(f->sock); f->sock = -1;
         kfree(f->buf); f->buf = NULL;
         f->state = F_START;
         return;
     }
     u32 blen = f->len - f->hdr;
+    if(f->kind == 4 && code != 502){
+        /* a script sees every answer the site gave (404s, empty 204s...) with its status */
+        fetch_done(f, 1, f->buf + f->hdr, blen);
+        f->ok = 1;
+        return;
+    }
     if(code >= 300 || blen == 0){ fetch_done(f, 0, NULL, 0); return; }
     if(f->kind == 1){
         char ct[80] = "text/css";
@@ -1187,6 +1236,9 @@ static void fetch_step(void){
         if(f->state != F_FREE) continue;
         f->kind = pend[0].kind; f->idx = pend[0].idx;
         resolve(cur_url, pend[0].url, f->url, sizeof f->url);
+        ui_copy(f->method, pend[0].method, sizeof f->method);
+        ui_copy(f->ctype, pend[0].ctype, sizeof f->ctype);
+        f->rbody = pend[0].rbody; f->rblen = pend[0].rblen;
         for(int k = 1; k < npend; k++) pend[k - 1] = pend[k];
         npend--;
         f->sock = -1; f->buf = NULL; f->redirects = 0; f->cached = 0; f->status = 0;
@@ -1340,6 +1392,8 @@ static void poll_husser(void){
                 if(npend >= PEND_MAX) break;
                 res_done[kind - 1][idx] = 1;                 /* once queued, never twice */
                 pend[npend].kind = kind; pend[npend].idx = idx;
+                pend[npend].method[0] = 0; pend[npend].ctype[0] = 0;
+                pend[npend].rbody = NULL; pend[npend].rblen = 0;
                 ui_copy(pend[npend].url, (const char *)h->need[k].url, HUSSER_URL_NEED);
                 npend++;
                 resources_busy = 1;
@@ -1347,20 +1401,53 @@ static void poll_husser(void){
         }
         /* fetch() calls: their addresses are in the fetch queue, ids rising */
         if(h && have_page && h->fetch_seq != fetch_seq_consumed){
-            static u8 ent[4096];
+            static u8 ent[HUSSER_FETCH_ENT];
             int all = 1;
             for(u32 k = 0; k < h->fetch_count && k < HUSSER_FETCH_MAX; k++){
-                husser_read(HUSSER_FETCHQ_OFF + (u64)k * 4096, ent, 4096);
-                ent[4095] = 0;
+                husser_read(HUSSER_FETCHQ_OFF + (u64)k * HUSSER_FETCH_ENT, ent, 4);
                 u32 id = (u32)ent[0] | (u32)ent[1] << 8 | (u32)ent[2] << 16 | (u32)ent[3] << 24;
                 if(id <= last_fetch_id) continue;
                 if(npend >= PEND_MAX){ all = 0; break; }
+                husser_read(HUSSER_FETCHQ_OFF + (u64)k * HUSSER_FETCH_ENT, ent, HUSSER_FETCH_ENT);
                 last_fetch_id = id;
-                pend[npend].kind = 4; pend[npend].idx = id;
-                ui_copy(pend[npend].url, (const char *)ent + 4, URL_MAX);
+                pend_t *pe = &pend[npend];
+                pe->kind = 4; pe->idx = id;
+                /* id, URL, method, content type, body length, body */
+                u32 at = 4, lim = HUSSER_FETCH_ENT - 4;
+                const char *u = (const char *)ent + at;
+                while(at < lim && ent[at]) at++;
+                ent[at] = 0; at++;
+                ui_copy(pe->url, u, URL_MAX);
+                const char *m = (const char *)ent + at;
+                while(at < lim && ent[at]) at++;
+                ent[at] = 0; at++;
+                ui_copy(pe->method, m, sizeof pe->method);
+                const char *ct = (const char *)ent + at;
+                while(at < lim && ent[at]) at++;
+                ent[at] = 0; at++;
+                ui_copy(pe->ctype, ct, sizeof pe->ctype);
+                u32 bl = (u32)ent[at] | (u32)ent[at + 1] << 8 | (u32)ent[at + 2] << 16 | (u32)ent[at + 3] << 24;
+                at += 4;
+                pe->rbody = NULL; pe->rblen = 0;
+                if(bl && bl <= HUSSER_FETCH_ENT - at && (pe->rbody = kmalloc(bl)) != NULL){ memcpy(pe->rbody, ent + at, bl); pe->rblen = bl; }
                 npend++;
             }
             if(all) fetch_seq_consumed = h->fetch_seq;
+        }
+        /* document.cookie assignments: into the jar, for this page's address */
+        if(h && have_page && h->cookie_out_seq != cookie_seq_consumed){
+            cookie_seq_consumed = h->cookie_out_seq;
+            u32 len = 0;
+            husser_read(HUSSER_COOKIE_OFF + HUSSER_COOKIE_IN, &len, 4);
+            if(len > HUSSER_COOKIE_BYTES - HUSSER_COOKIE_IN - 4) len = 0;
+            if(len < cookie_off) cookie_off = 0;
+            static char cw[HUSSER_COOKIE_BYTES];
+            if(len > cookie_off){
+                husser_read(HUSSER_COOKIE_OFF + HUSSER_COOKIE_IN + 4 + cookie_off, cw, len - cookie_off);
+                u32 n = len - cookie_off, s0 = 0;
+                for(u32 i = 0; i <= n; i++) if(i == n || cw[i] == '\n'){ if(i > s0) ck_set(cur_url, cw + s0, i - s0, 1); s0 = i + 1; }
+                cookie_off = len;
+            }
         }
         if(have_page && ld == LD_IDLE){ fetch_step(); fetch_status(); }
         if(h && have_page && ld == LD_IDLE && !husser_busy() && !fetch_active() && h->need_count == 0 && resources_busy){
@@ -1485,8 +1572,13 @@ static void media_step(void){
 /* What the window showed when it was last drawn: a change means it is drawn again. */
 static struct { u32 frame, title, console, error, state; int alive, ld; u64 phase; } seen;
 
+/* a voice command's address or search words, opened on the next tick (the window may be new) */
+static char voice_go[URL_MAX];
+void browser_open_text(const char *s){ ui_copy(voice_go, s, sizeof voice_go); }
+
 static void b_tick(void){
     if(!last_body.w) return;                                    /* not drawn yet: the page size is not known */
+    if(voice_go[0]){ char u[URL_MAX]; ui_copy(u, voice_go, sizeof u); voice_go[0] = 0; go(u, 1, 0); return; }
     if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
     ld_step();                                                  /* loading goes on while minimized */
     husser_pump();

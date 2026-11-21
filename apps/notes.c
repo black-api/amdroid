@@ -6,6 +6,7 @@
 #include "amdroid/fat32.h"
 #include "amdroid/keyboard.h"
 #include "amdroid/markdown.h"
+#include "amdroid/dictation.h"
 
 #define NOTE_FILE  "NOTES.MD"
 #define OLD_FILE   "NOTES.TXT"
@@ -80,7 +81,9 @@ static void wrap(int cols){
 
 static rect_t save_btn(rect_t b){ return ui_button(b, 140); }
 static rect_t view_btn(rect_t b){ rect_t s = ui_button(b, 140); s.x -= 180; s.w = 172; return s; }
+static rect_t mic_btn(rect_t b){ rect_t s = view_btn(b); s.x -= 220; s.w = 212; return s; }
 
+/* ---- dictation: the system service types into the focused window, which is us ---- */
 /* ---- the Markdown engine draws through these ---- */
 static void md_text(void *ctx, int x, int y, const char *s, u32 color, int scale, int bold){
     (void)ctx;
@@ -92,6 +95,18 @@ static void md_rect(void *ctx, int x, int y, int w, int h, u32 color){
     (void)ctx;
     if(x < 0 || y < 0 || w <= 0 || h <= 0) return;
     ui_fill((rect_t){ (u32)x, (u32)y, (u32)w, (u32)h }, color);
+}
+
+/* a voice command's note: a new list item at the end, saved at once */
+void notes_add_line(const char *s){
+    if(!loaded) load();
+    if(len && text[len - 1] != '\n' && len < NOTE_MAX) text[len++] = '\n';
+    const char *pre = "- ";
+    for(const char *p = pre; *p && len < NOTE_MAX; p++) text[len++] = *p;
+    for(const char *p = s; *p && len < NOTE_MAX; p++) text[len++] = *p;
+    text[len] = 0;
+    dirty = 1;
+    save();
 }
 
 static void n_open(void){
@@ -127,6 +142,11 @@ static void n_draw(rect_t b, int focused){
     rect_t vb = view_btn(b);
     ui_fill(vb, preview ? ui_accent() : C_CARD_HI);
     ui_text(vb.x + 14, vb.y + 4, preview ? "Edit" : "Preview", preview ? C_BAR : C_TEXT, UI_SCALE);
+    rect_t mb = mic_btn(b);
+    int ds = dict_state();
+    ui_fill(mb, ds == DICT_LISTEN ? 0xE5484D : ds == DICT_WRITE ? C_CARD : C_CARD_HI);
+    ui_text(mb.x + 14, mb.y + 4, ds == DICT_LISTEN ? "Stop" : ds == DICT_WRITE ? "Writing..." : "Dictate",
+            ds == DICT_LISTEN ? 0xFFFFFF : ds == DICT_WRITE ? C_DIM : C_TEXT, UI_SCALE);
 
     if(preview){
         draw_preview(b);
@@ -161,7 +181,10 @@ static void n_draw(rect_t b, int focused){
 }
 
 static void n_click(rect_t b, int x, int y){
-    if(ui_contains(save_btn(b), x, y)) save();
+    if(ui_contains(mic_btn(b), x, y)){
+        if(dict_state() != DICT_WRITE){ preview = 0; dict_toggle(); }
+    }
+    else if(ui_contains(save_btn(b), x, y)) save();
     else if(ui_contains(view_btn(b), x, y)){ preview = !preview; pscroll = 0; }
 }
 

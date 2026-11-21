@@ -12,6 +12,8 @@
 #define KEY_DEL   0x87
 #define KEY_PGUP  0x88
 #define KEY_PGDN  0x89
+#define KEY_DICTATE 0x9A        /* Ctrl+Space: system dictation */
+#define KEY_VOICE   0x9B        /* Alt+Space: a voice command */
 void keyboard_init(void);
 void keyboard_irq(void);
 int  keyboard_getchar(void); /* -1 if none, else ASCII */

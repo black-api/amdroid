@@ -177,6 +177,49 @@ void ui_rrect(u32 x, u32 y, u32 w, u32 h, u32 r, u32 c){
     }
 }
 
+/* ---- glass ---- */
+/* A rounded glass panel: the blurred desktop under it, tinted, with a faint light edge.
+ * Corners go through the same mask as ui_rrect. Returns 0 (drew nothing) when Glass is off. */
+int ui_glass_panel(u32 x, u32 y, u32 w, u32 h, u32 r){
+    const u32 *bd = glass_backdrop();
+    if(!bd) return 0;
+    if(!fb_clip_hits((i32)x, (i32)y, (i32)w, (i32)h)) return 1;
+    u32 tint, ta, bp = fb_width();
+    glass_params(&tint, &ta);
+    if(r > h / 2) r = h / 2;
+    if(r > w / 2) r = w / 2;
+    if(r > RR_MAXR) r = RR_MAXR;
+    const u8 *m = r ? corner_mask(r) : 0;
+    if(!m){ fb_glass_rect((i32)x, (i32)y, w, h, 0, bd, bp, tint, ta, (i32)y, h / 3, 30); }
+    else {
+        fb_glass_rect((i32)x, (i32)(y + r), w, h - 2 * r, 0, bd, bp, tint, ta, (i32)y, h / 3, 30);
+        fb_glass_rect((i32)(x + r), (i32)y, w - 2 * r, r, 0, bd, bp, tint, ta, (i32)y, h / 3, 30);
+        fb_glass_rect((i32)(x + r), (i32)(y + h - r), w - 2 * r, r, 0, bd, bp, tint, ta, (i32)y, h / 3, 30);
+        u8 mk[RR_MAXR * RR_MAXR];
+        for(u32 q = 0; q < 4; q++){                         /* top-left, top-right, bottom-left, bottom-right */
+            for(u32 py = 0; py < r; py++)
+                for(u32 px = 0; px < r; px++){
+                    u32 sx = (q & 1) ? r - 1 - px : px, sy = (q & 2) ? r - 1 - py : py;
+                    mk[py * r + px] = m[sy * r + sx];
+                }
+            i32 cx = (q & 1) ? (i32)(x + w - r) : (i32)x, cy = (q & 2) ? (i32)(y + h - r) : (i32)y;
+            fb_glass_rect(cx, cy, r, r, mk, bd, bp, tint, ta, (i32)y, h / 3, 30);
+        }
+    }
+    /* the light catching the edge: brighter on top, fainter on the sides and bottom */
+    fb_blend_rect(x + r, y, w - 2 * r, 1, 0xFFFFFF, 64);
+    fb_blend_rect(x, y + r, 1, h - 2 * r, 0xFFFFFF, 30);
+    fb_blend_rect(x + w - 1, y + r, 1, h - 2 * r, 0xFFFFFF, 22);
+    fb_blend_rect(x + r, y + h - 1, w - 2 * r, 1, 0xFFFFFF, 18);
+    return 1;
+}
+
+void ui_panel(u32 x, u32 y, u32 w, u32 h, u32 r, u32 edge, u32 fill){
+    if(ui_glass_panel(x, y, w, h, r)) return;
+    ui_rrect(x, y, w, h, r, edge);
+    ui_rrect(x + 1, y + 1, w - 2, h - 2, r ? r - 1 : 0, fill);
+}
+
 /* ---- anti-aliased round primitives (for icons) ----
  * Coverage comes from the pixel centre's distance to the shape edge, giving a
  * 1px soft edge blended over the background. */

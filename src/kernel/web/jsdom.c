@@ -155,6 +155,13 @@ static js_val_t get_attr(js_val_t self, int argc, js_val_t *argv, void *ctx){
     return v ? js_str(v) : js_null();
 }
 
+/* src set by a script: kept as the attribute, and an <img> starts loading it */
+static void set_src(wnode_t *n, const char *v){
+    wnode_attr_set(n, "src", v, (u32)strlen(v));
+    if(strcmp(n->tag, "img") == 0 && v[0]) n->img = img_register(v) + 1;
+    dirty = 1;
+}
+
 static js_val_t set_attr(js_val_t self, int argc, js_val_t *argv, void *ctx){
     (void)ctx;
     if(self.t != JS_OBJ || argc < 2) return js_undef();
@@ -167,6 +174,7 @@ static js_val_t set_attr(js_val_t self, int argc, js_val_t *argv, void *ctx){
     else if(strcmp(name, "alt") == 0 || strcmp(name, "placeholder") == 0) n->alt = (char *)v;
     else if(strcmp(name, "style") == 0){ n->style = (char *)v; dirty = 1; }
     else if(strcmp(name, "value") == 0){ n->value = (char *)v; dirty = 1; }
+    else if(strcmp(name, "src") == 0) set_src(n, v);
     else { wnode_attr_set(n, name, v, (u32)strlen(v)); dirty = 1; }
     return js_undef();
 }
@@ -466,8 +474,78 @@ static int style_get(js_obj_t *o, const char *name, js_val_t *out){
 }
 
 /* document.title = "..." changes the page title */
+/* ---- document.cookie ----
+ * The browser keeps the cookie jar; it gives the page its cookies before the scripts run
+ * (web_set_cookies), and what scripts assign is passed back to it (web_cookie_writes). */
+static char page_cookies[4096];
+static char cookie_out[4096];
+static u32 cookie_out_len;
+
+void web_set_cookies(const char *s){
+    u32 k = 0;
+    for(; s && s[k] && k + 1 < sizeof page_cookies; k++) page_cookies[k] = s[k];
+    page_cookies[k] = 0;
+    cookie_out_len = 0;
+}
+int web_cookie_writes(char *out, u32 cap){
+    u32 n = cookie_out_len < cap ? cookie_out_len : cap;
+    memcpy(out, cookie_out, n);
+    cookie_out_len = 0;
+    return (int)n;
+}
+static int ci_starts(const char *s, const char *lit){
+    for(; *lit; s++, lit++){ char c = *s; if(c >= 'A' && c <= 'Z') c += 32; if(c != *lit) return 0; }
+    return 1;
+}
+/* document.cookie = "name=value; path=/; max-age=..." : the name's value changes here at once */
+static void cookie_assign(const char *v){
+    u32 vl = (u32)strlen(v);
+    if(!vl || vl > 3000) return;
+    if(cookie_out_len + vl + 2 <= sizeof cookie_out){
+        memcpy(cookie_out + cookie_out_len, v, vl);
+        cookie_out_len += vl;
+        cookie_out[cookie_out_len++] = '\n';
+    }
+    u32 e = 0;
+    while(v[e] && v[e] != ';') e++;
+    u32 eq = 0;
+    while(eq < e && v[eq] != '=') eq++;
+    u32 ns = 0; while(ns < eq && v[ns] == ' ') ns++;
+    u32 ne = eq; while(ne > ns && v[ne - 1] == ' ') ne--;
+    int gone = 0;
+    for(const char *a = v + e; *a; a++){
+        if(*a != ';') continue;
+        const char *b = a + 1; while(*b == ' ') b++;
+        if(ci_starts(b, "max-age=") && (b[8] == '0' || b[8] == '-')) gone = 1;
+        if(ci_starts(b, "expires=")){ for(const char *y = b + 8; *y && *y != ';'; y++) if(y[0] == '1' && y[1] == '9' && y[2] >= '0' && y[2] <= '9') gone = 1; }
+    }
+    /* the jar's string without this name, then the new pair at the end */
+    char nb[sizeof page_cookies];
+    u32 k = 0;
+    const char *p = page_cookies;
+    while(*p){
+        while(*p == ' ' || *p == ';') p++;
+        if(!*p) break;
+        const char *s0 = p;
+        while(*p && *p != ';') p++;
+        u32 l = (u32)(p - s0), q = 0;
+        while(q < l && s0[q] != '=') q++;
+        if(q == ne - ns && memcmp(s0, v + ns, q) == 0) continue;
+        if(k + l + 2 >= sizeof nb) break;
+        if(k){ nb[k++] = ';'; nb[k++] = ' '; }
+        memcpy(nb + k, s0, l); k += l;
+    }
+    if(!gone && ne > ns && k + e + 2 < sizeof nb){
+        if(k){ nb[k++] = ';'; nb[k++] = ' '; }
+        memcpy(nb + k, v + ns, e - ns); k += e - ns;
+    }
+    nb[k] = 0;
+    memcpy(page_cookies, nb, k + 1);
+}
+
 static int doc_set(js_obj_t *o, const char *name, js_val_t v){
     (void)o;
+    if(strcmp(name, "cookie") == 0){ cookie_assign(js_to_str(v)); return 1; }
     if(strcmp(name, "title") == 0){
         const char *t = js_to_str(v);
         u32 k = 0;
@@ -505,7 +583,7 @@ static int doc_get(js_obj_t *o, const char *name, js_val_t *out){
     if(strcmp(name, "ownerDocument") == 0){ *out = js_null(); return 1; }
     if(strcmp(name, "compatMode") == 0){ *out = js_str(web_quirks ? "BackCompat" : "CSS1Compat"); return 1; }
     if(strcmp(name, "characterSet") == 0 || strcmp(name, "charset") == 0){ *out = js_str("UTF-8"); return 1; }
-    if(strcmp(name, "cookie") == 0){ *out = js_str(""); return 1; }
+    if(strcmp(name, "cookie") == 0){ *out = js_str(page_cookies); return 1; }
     if(strcmp(name, "location") == 0){ *out = js_get(js_global(), "location"); return 1; }
     return 0;
 }
@@ -529,6 +607,11 @@ static js_obj_t *wrap(wnode_t *n){
 static int elem_get(js_obj_t *o, const char *name, js_val_t *out){
     wnode_t *n = (wnode_t *)js_host(o);
     if(!n) return 0;
+    if(name[0] == 's' && strcmp(name, "src") == 0 && strcmp(n->tag, "script") != 0){
+        const char *v = wnode_attr_get(n, "src");
+        *out = js_str(v ? v : "");
+        return 1;
+    }
     if(strcmp(name, "textContent") == 0 || strcmp(name, "innerText") == 0){
         static char buf[4096];
         u32 len = 0;
@@ -637,6 +720,7 @@ static int elem_set(js_obj_t *o, const char *name, js_val_t v){
     if(strcmp(name, "id") == 0){ n->id = (char *)js_to_str(v); return 1; }
     if(strcmp(name, "value") == 0){ n->value = (char *)js_to_str(v); dirty = 1; return 1; }
     if(strcmp(name, "className") == 0){ n->cls = (char *)js_to_str(v); dirty = 1; return 1; }
+    if(strcmp(name, "src") == 0 && strcmp(n->tag, "script") != 0){ set_src(n, js_to_str(v)); return 1; }
     return 0;
 }
 
@@ -1047,7 +1131,7 @@ static void setup_window(void){
     js_set(nav, "userAgent", js_str("Mozilla/5.0 (am-droid) BRO-weser/1.0"));
     js_set(nav, "language", js_str("en-US"));
     js_set(nav, "platform", js_str("am-droid"));
-    js_set(nav, "cookieEnabled", js_bool(0));
+    js_set(nav, "cookieEnabled", js_bool(1));
     js_set(nav, "onLine", js_bool(1));
     js_set(g, "navigator", js_objv(nav));
     js_set(g, "localStorage", js_objv(storage()));

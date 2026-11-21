@@ -658,14 +658,31 @@ static rect_t seek_rect(rect_t b){ return (rect_t){ b.x + 16, b.y + b.h - BAR_H 
 static rect_t play_rect(rect_t b){ return (rect_t){ b.x + 16, b.y + b.h - 44, 40, 36 }; }
 
 static void draw_library(rect_t b){
-    ui_fill(b, C_WIN);
+    if(!ui_prefs.glass) ui_fill(b, C_WIN);       /* (glass: the window is already drawn) */
     ui_text(b.x + UI_PAD, b.y + 16, "MVP", ui_accent(), 3);
     ui_text(b.x + UI_PAD + 3 * 8 * 3 + 16, b.y + 30, "Mad Vid Player", C_MUTED, UI_SCALE);
     u32 y = b.y + 88;
     if(err[0]){ ui_text(b.x + UI_PAD, y, err, C_WARN, UI_SCALE); y += UI_ROW_H; }
     if(!nfiles){
         ui_text(b.x + UI_PAD, y, "No videos yet.", C_TEXT, UI_SCALE);
-        ui_text(b.x + UI_PAD, y + 40, "Put .MP4 / .WEB (H.264, VP9, AV1 + AAC, Opus) or .AVI (Motion-JPEG) files in VIDEOS/.", C_MUTED, UI_SCALE);
+        /* the hint, wrapped at the window's edge */
+        const char *hint = "Put .MP4 / .WEB (H.264, VP9, AV1 + AAC, Opus) or .AVI (Motion-JPEG) files in VIDEOS/.";
+        u32 per = (b.w - 2 * UI_PAD) / UI_CW;           /* characters a line holds */
+        if(per < 8) per = 8;
+        y += 40;
+        while(*hint){
+            u32 n = 0, brk = 0;
+            while(hint[n] && n < per){ if(hint[n] == ' ') brk = n; n++; }
+            if(hint[n] && brk) n = brk;                  /* break at the last space that fits */
+            char line[96];
+            u32 m = n < sizeof line - 1 ? n : (u32)sizeof line - 1;
+            for(u32 i = 0; i < m; i++) line[i] = hint[i];
+            line[m] = 0;
+            ui_text(b.x + UI_PAD, y, line, C_MUTED, UI_SCALE);
+            y += UI_ROW_H - 4;
+            hint += n;
+            while(*hint == ' ') hint++;
+        }
         return;
     }
     ui_text(b.x + UI_PAD, y, "Your videos", C_MUTED, UI_SCALE);

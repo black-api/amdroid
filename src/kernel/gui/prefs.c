@@ -1,13 +1,14 @@
 /* Desktop preferences: the Dynamic Island, dock, widgets, sound and display settings.
  * They live in one struct; a change repaints the screen and is saved to AMDROID.CFG a
  * moment after the last change (so dragging a slider writes the disk once, not 60 times). */
+#include "amdroid/serial.h"
 #include "gui_internal.h"
 #include "amdroid/fat32.h"
 #include "amdroid/fb.h"
 #include "amdroid/reel.h"
 #include "amdroid/timer.h"
 
-#define PREFS_MAGIC 0x41445002          /* "ADP" + layout version 2 */
+#define PREFS_MAGIC 0x41445003          /* "ADP" + layout version 3 */
 #define PREFS_FILE  "AMDROID.CFG"
 #define SAVE_DELAY  150                 /* 1.5 s after the last change */
 
@@ -20,9 +21,10 @@ static void defaults(void){
         .magic = PREFS_MAGIC,
         .isl_idle = ISL_IDLE_NAME, .isl_size = 1, .isl_style = ISL_STYLE_BLACK, .isl_secs = 4,
         .isl_snap = 1, .isl_x = -1, .isl_y = -1, .dnd = 0,
-        .dock_on = 1, .dock_edge = DOCK_RIGHT, .dock_size = 1, .dock_zoom = 2,
-        .wid_on = 1, .wid_mask = (1 << WID_CLOCK) | (1 << WID_SYSTEM) | (1 << WID_CALENDAR),
+        .dock_on = 0, .dock_edge = DOCK_RIGHT, .dock_size = 1, .dock_zoom = 2,
+        .wid_on = 0, .wid_mask = (1 << WID_CLOCK) | (1 << WID_SYSTEM) | (1 << WID_CALENDAR),
         .volume = 80, .brightness = 100,
+        .glass = 0, .glass_blur = 1, .glass_tint = 1,
     };
     for(int i = 0; i < UI_NWIDGETS; i++) ui_prefs.wid_x[i] = ui_prefs.wid_y[i] = -1;
 }
@@ -41,6 +43,9 @@ static void sanitize(void){
     p->dock_zoom = clampv(p->dock_zoom, 0, 2);
     p->volume = clampv(p->volume, 0, 100);
     p->brightness = clampv(p->brightness, 20, 100);
+    p->glass = p->glass ? 1 : 0;
+    p->glass_blur = clampv(p->glass_blur, 0, 2);
+    p->glass_tint = clampv(p->glass_tint, 0, 2);
     p->wid_mask &= (1 << UI_NWIDGETS) - 1;
 }
 

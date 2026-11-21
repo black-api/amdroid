@@ -375,6 +375,8 @@ static js_obj_t *for_in_keys(js_val_t v);
 static const char *uncaught_text(void);
 static js_val_t make_regex(const char *pat, const char *flags, void **cache);
 static js_obj_t *iterate_to_array(js_val_t v);
+static void typed_pull(js_obj_t *o);
+static void typed_push(js_obj_t *o);
 int js_drain_jobs(void);
 static js_val_t make_error_for_msg(const char *msg);
 static void jslib_early(void);
@@ -498,6 +500,7 @@ js_val_t js_get(js_obj_t *o, const char *name){
         if(x->is_array){
             if(is_str(name, "length")) return js_num(x->nitems);
             int i = as_index(name);
+            if(i >= 0 && x->kind == K_TYPED) typed_pull(x);
             if(i >= 0) return i < x->nitems && !is_hole(x->items[i]) ? x->items[i] : js_undef();
         }
         prop_t *p = find_own(x, name);
@@ -2419,6 +2422,7 @@ static void bind_pattern(jsnode_t *pat, js_val_t v, env_t *env){
                 break;
             }
             js_val_t item = js_undef();
+            if(v.t == JS_OBJ && v.o->kind == K_TYPED) typed_pull(v.o);
             if(v.t == JS_OBJ && v.o->is_array && i < v.o->nitems) item = v.o->items[i];
             else if(v.t == JS_OBJ && !v.o->is_array){ char b[16]; kfmt_double(b, sizeof b, (double)i); item = get_member(v, b); }
             bind_target(it, item, env);
@@ -2473,6 +2477,7 @@ static void assign_to(jsnode_t *t, js_val_t v, env_t *env){
                 break;
             }
             js_val_t item = js_undef();
+            if(v.t == JS_OBJ && v.o->kind == K_TYPED) typed_pull(v.o);
             if(v.t == JS_OBJ && v.o->is_array && i < v.o->nitems) item = v.o->items[i];
             assign_to(e, item, env);
         }
@@ -3097,7 +3102,17 @@ static js_obj_t *pending_new_target = NULL;
 static js_val_t call_value(js_val_t fn, js_val_t self, int argc, js_val_t *argv){
     js_obj_t *o = (fn.t == JS_OBJ) ? fn.o : NULL;
     if(!o || !o->is_func) return js_undef();   /* calling a non-function used to fault at o->native */
-    if(o->native) return o->native(self, argc, argv, o->ctx);
+    if(o->native){
+        if(self.t == JS_OBJ && self.o->kind == K_TYPED){
+            /* a method on a view of shared bytes: current numbers in, changed ones back out */
+            js_obj_t *t = self.o;
+            typed_pull(t);
+            js_val_t r = o->native(self, argc, argv, o->ctx);
+            typed_push(t);
+            return r;
+        }
+        return o->native(self, argc, argv, o->ctx);
+    }
     if(o->default_ctor){
         /* a class without a constructor passes its arguments to the superclass */
         js_val_t r = js_undef();

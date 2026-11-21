@@ -5,8 +5,9 @@ The kernel speaks plain HTTP only (no TLS). This proxy runs on the host, fetches
 pages with full certificate checks, and hands them to the guest over plain HTTP on the
 virtual network (QEMU's user networking reaches the host at 10.0.2.2).
 
-Guest request:  GET /https/<host>[:port]/<path> HTTP/1.0
-The proxy answers with the site's status and body. X-Final-URL names the page after any
+Guest request:  GET /https/<host>[:port]/<path> HTTP/1.0   (or POST, with Content-Type and a body)
+The proxy answers with the site's status and body. Cookies are the guest's: its Cookie header
+goes to the site, and the site's Set-Cookie headers (from every redirect) come back to it. X-Final-URL names the page after any
 redirects (so relative links resolve against it); on a failure it answers 502 with the reason
 in X-Proxy-Error.
 
@@ -122,9 +123,10 @@ def unpack(body, encoding):
     return body
 
 
-def fetch(url, accept):
-    """GET url over a pooled TLS connection, following redirects. Returns
-    (status, content type, final url, body)."""
+def fetch(url, accept, method="GET", body_out=None, ctype_out=None, cookie=None, set_cookies=None):
+    """GET (or POST) url over a pooled TLS connection, following redirects. Returns
+    (status, content type, final url, body). The site's Set-Cookie headers are added to
+    set_cookies; cookie is sent as the Cookie header (the guest picks it per site)."""
     for _ in range(MAX_REDIRECTS + 1):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https":
@@ -133,10 +135,15 @@ def fetch(url, accept):
         path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
         headers = {"Host": parts.netloc, "User-Agent": "BRO-weser-proxy", "Accept": accept,
                    "Accept-Encoding": "gzip, deflate", "Connection": "keep-alive"}
+        if cookie:
+            headers["Cookie"] = cookie
+        if method != "GET":
+            headers["Content-Type"] = ctype_out or "application/x-www-form-urlencoded"
+            headers["Content-Length"] = str(len(body_out or b""))
         for attempt in range(2):
             conn, reused = POOL.get(host, port, fresh=attempt > 0)
             try:
-                conn.request("GET", path, headers=headers)
+                conn.request(method, path, body=body_out if method != "GET" else None, headers=headers)
                 r = conn.getresponse()
                 body = r.read(MAX_BYTES + 1)
                 break
@@ -151,9 +158,13 @@ def fetch(url, accept):
         else:
             POOL.put(host, port, conn)
         body = unpack(body[:MAX_BYTES], rh.get("Content-Encoding"))
+        if set_cookies is not None:
+            set_cookies.extend(rh.get_all("Set-Cookie") or [])
         loc = rh.get("Location")
         if status in (301, 302, 303, 307, 308) and loc:
             url = urllib.parse.urljoin(url, loc)
+            if status in (301, 302, 303) and method != "GET":
+                method, body_out = "GET", None        # a form's answer: the browser GETs the new page
             continue
         return status, rh.get("Content-Type", "text/html"), url, body
     raise ValueError("too many redirects")
@@ -261,7 +272,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("proxy: " + (fmt % args) + "\n")
 
-    def do_GET(self):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.do_GET(method="POST", body=self.rfile.read(n) if n else b"")
+
+    def do_GET(self, method="GET", body=None):
         if self.path.startswith("/ytinfo/") or self.path.startswith("/ytm/"):
             self.serve_youtube()
             return
@@ -280,14 +295,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if m:
             threading.Thread(target=yt_prefetch, args=(m.group(1),), daemon=True).start()
         accept = self.headers.get("Accept") or "text/html,text/plain;q=0.9,*/*;q=0.5"
+        cookie = self.headers.get("Cookie")
         key = accept.split(",")[0] + " " + url
-        hit = CACHE.get(key)
+        hit = CACHE.get(key) if method == "GET" else None
         if hit:
             _, code, ctype, final, body = hit
             self.answer(code, ctype, final, body, "HIT")
             return
+        set_cookies = []
         try:
-            code, ctype, final, body = fetch(url, accept)
+            code, ctype, final, body = fetch(url, accept, method, body, self.headers.get("Content-Type"), cookie, set_cookies)
         except Exception as e:                      # bad certificate, DNS, timeout...
             reason = str(getattr(e, "reason", e)) or e.__class__.__name__
             reason = " ".join(reason.split())[:160]
@@ -297,9 +314,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        if code == 200 and any(t in ctype.lower() for t in CACHEABLE):
+        if code == 200 and method == "GET" and not set_cookies and any(t in ctype.lower() for t in CACHEABLE):
             CACHE.put(key, code, ctype, final, body)
-        self.answer(code, ctype, final, body, "MISS")
+        self.answer(code, ctype, final, body, "MISS", set_cookies)
 
     def serve_youtube(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -332,8 +349,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.send_error(400, "use /ytinfo/<id> or /ytm/<id>/<itag>?r=a-b")
 
-    def answer(self, code, ctype, final_url, body, cache):
+    def answer(self, code, ctype, final_url, body, cache, set_cookies=()):
         self.send_response(code)
+        for c in set_cookies:
+            self.send_header("Set-Cookie", c)
         self.send_header("Content-Type", ctype)
         self.send_header("X-Final-URL", final_url)
         self.send_header("X-Proxy-Cache", cache)

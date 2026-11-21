@@ -12,4 +12,9 @@ u32 hda_stream_write(const void *pcm, u32 bytes);   /* returns the bytes that fi
 u32 hda_stream_room(void);
 u64 hda_stream_played(void);                     /* bytes played so far (the audio clock) */
 void hda_stream_stop(void);
+/* microphone: continuous capture, 48 kHz 16-bit stereo */
+int hda_mic_present(void);                      /* 1 if the card has an input path */
+int hda_capture_start(void);
+u32 hda_capture_read(int16_t *out, u32 max_frames);  /* new frames since the last call */
+void hda_capture_stop(void);
 #endif
