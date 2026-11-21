@@ -4,3 +4,24 @@ PROGRESS.md
 # the OS's virtual disk (may hold account data)
 disk.img
 disk-*-backup.img
+
+# build outputs (rebuilt by make)
+*.o
+*.d
+__pycache__/
+out/*
+!out/qa/
+out/qa/*
+!out/qa/boot.sh
+!out/qa/qa.py
+
+# ThimbleLM: large downloads, models, venv and local builds (see ThimbleLM/engine/README.md)
+ThimbleLM/hf/
+ThimbleLM/models/
+ThimbleLM/engine/build/
+ThimbleLM/needle/dbg/
+ThimbleLM/needle/*.log
+
+# stray screenshots
+/s0.png
+/s1.png
