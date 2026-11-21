@@ -102,6 +102,23 @@ host compiler in `~/py/fuss`, with these differences:
 Build a test disk with `mkfs.fat -F 32` and `mcopy`, then boot with
 `qemu-system-x86_64 -cdrom out/amdroid.iso -hda disk.img -boot d -m 256M`.
 
+## App Store
+
+The App Store app browses an online catalog, installs and updates apps, and launches them.
+Apps are `.adp` packages (Fuss programs, see `tools/adp-build.py`) installed onto the FAT32 disk.
+
+1. On the host: `make store-server` (serves `examples/apps/*` that have a `store.meta`)
+2. Boot with a disk: `make run-disk`
+3. Open App Store. In QEMU's user network the host is `10.0.2.2:8642`, the default;
+   a file `STORE.CFG` in the disk root (`host` or `host:port`) points it elsewhere.
+
+Packages in the disk root show up under Library > On this disk. Every package is checked before
+it installs (structure, platform version, a scan for undeclared dangerous calls).
+
+To list your own app, add a `store.meta` next to its `app.manifest`:
+`category` (Games, Creative, Media, Productivity, Developer), `color` (hex), `tagline`,
+`about`, and `featured=1` to put it in the banner.
+
 ## Layout
 
 ```

@@ -26,7 +26,11 @@ static u32 fat_start, data_start, total_clusters, fsinfo_sector;
 static int read_sector(u32 lba){ return vol_read(lba,1,sector_buf); }
 
 /* reads the BPB of the current volume and sets up the driver's view of it */
+static int mounted;                 /* a volume was read successfully */
+int fat32_ready(void){ return mounted; }
+
 static int mount_volume(void){
+    mounted = 0;
     fat_cache_sec = 0xFFFFFFFFu; alloc_hint = 2;
     if(read_sector(0)!=0) return -1;
     /* BPB */
@@ -46,6 +50,7 @@ static int mount_volume(void){
     total_clusters = (total - data_start) / sectors_per_cluster;
     fsinfo_sector = *(u16*)(sector_buf+48);
     console_printf("[fat32] mounted, root cluster %u\n", root_cluster);
+    mounted = 1;
     return 0;
 }
 

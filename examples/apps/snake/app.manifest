@@ -1,0 +1,9 @@
+id=SNAKE
+name=Snake
+version=1.0.0
+author=Am-Droid
+icon=10
+desc=Eat, grow, do not bite your own tail
+perms=framebuffer,input
+requires=amdroid1+
+entry=MAIN.FAS

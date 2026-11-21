@@ -294,7 +294,12 @@ run-hd: $(KERNEL)
 # `make disk`  builds disk.img (FAT32) with the packages in its root
 # `make run-disk` boots the ISO with that disk attached (so the App Store sees them)
 PKG_OUT = out/pkg
-ADP_FILES = $(PKG_OUT)/HELLO.ADP $(PKG_OUT)/BARS.ADP $(PKG_OUT)/SKETCHY.ADP $(PKG_OUT)/MDVIEW.ADP
+ADP_FILES = $(PKG_OUT)/HELLO.ADP $(PKG_OUT)/BARS.ADP $(PKG_OUT)/SKETCHY.ADP $(PKG_OUT)/MDVIEW.ADP \
+            $(PKG_OUT)/SNAKE.ADP $(PKG_OUT)/TILES.ADP $(PKG_OUT)/LIFE.ADP $(PKG_OUT)/STARS.ADP
+
+# the newer apps: examples/apps/<lowercase id> -> out/pkg/<ID>.ADP
+STORE_APPS = snake tiles life stars
+$(foreach a,$(STORE_APPS),$(eval $(PKG_OUT)/$(shell echo $(a) | tr a-z A-Z).ADP: examples/apps/$(a)/app.manifest examples/apps/$(a)/MAIN.FAS tools/adp-build.py ; @mkdir -p $(PKG_OUT) && python3 tools/adp-build.py examples/apps/$(a) -o $$@))
 
 $(PKG_OUT)/HELLO.ADP: examples/apps/hello/app.manifest examples/apps/hello/MAIN.FAS tools/adp-build.py
 	@mkdir -p $(PKG_OUT)
@@ -317,6 +322,11 @@ $(PKG_OUT)/BROKEN.ADP: $(PKG_OUT)/HELLO.ADP
 	head -c 200 $(PKG_OUT)/HELLO.ADP > $@
 
 pkgs: $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP
+
+# The App Store server: the catalog and packages the App Store app downloads (from the guest,
+# QEMU's user network reaches it at 10.0.2.2:8642). Apps with a store.meta are listed.
+store-server:
+	python3 tools/store-server.py
 
 disk.img: $(ADP_FILES) $(PKG_OUT)/BROKEN.ADP
 	mkfs.fat -C -F 32 -S 512 -s 1 $@ 65536
@@ -346,7 +356,7 @@ kvm:
 		lsmod 2>/dev/null | grep -qE '^kvm_(intel|amd)' && echo "  the kvm module is loaded but /dev/kvm is missing or not writable - check its permissions"; \
 	fi; :
 
-.PHONY: all clean run run-hd run-disk disk pkgs userprogs kvm mediatest FORCE
+.PHONY: all clean run run-hd run-disk disk pkgs store-server userprogs kvm mediatest FORCE
 
 # Header dependencies (written by -MMD): a changed header rebuilds the files that use it.
 -include $(OBJS:.o=.d) $(HUSSER_OBJS:.o=.d)

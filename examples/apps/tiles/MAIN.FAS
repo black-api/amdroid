@@ -1,0 +1,156 @@
+# Tiles - slide the board with the arrow keys; equal tiles merge. N starts over, Esc leaves.
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+bg = rgb(14, 18, 22)
+boardc = rgb(34, 43, 49)
+emptyc = rgb(44, 55, 63)
+white = rgb(242, 245, 247)
+dark = rgb(20, 24, 28)
+muted = rgb(154, 167, 176)
+accent = rgb(255, 181, 71)
+
+colors = [emptyc, rgb(58, 74, 84), rgb(72, 96, 110), rgb(61, 140, 220), rgb(80, 120, 240),
+          rgb(140, 100, 240), rgb(200, 90, 220), rgb(240, 90, 150), rgb(255, 110, 90),
+          rgb(255, 150, 70), rgb(255, 190, 60), rgb(61, 220, 151), rgb(61, 220, 220)]
+
+w = fb_width()
+h = fb_height()
+cell = floor((h - 240) / 4)
+if cell > 140 { cell = 140 }
+gap = 12
+size = cell * 4 + gap * 5
+ox = floor((w - size) / 2)
+oy = 150
+none = 0 - 1
+
+b = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+st = [0, 0, 0]     # score, best, won-shown
+
+fn add_tile(b) {
+    free = []
+    i = 0
+    while i < 16 {
+        if b[i] == 0 { push(free, i) }
+        i = i + 1
+    }
+    if len(free) == 0 { ret false }
+    v = 1
+    if randbelow(10) == 0 { v = 2 }
+    b[free[randbelow(len(free))]] = v
+    ret true
+}
+
+# slides one line of four cells (given by their indexes) toward its first cell
+fn slide(b, idx, st) {
+    vals = []
+    for i in idx {
+        if b[i] != 0 { push(vals, b[i]) }
+    }
+    out = []
+    j = 0
+    while j < len(vals) {
+        if j + 1 < len(vals) and vals[j] == vals[j + 1] {
+            push(out, vals[j] + 1)
+            st[0] = st[0] + pow(2, vals[j] + 1)
+            j = j + 2
+        } else {
+            push(out, vals[j])
+            j = j + 1
+        }
+    }
+    while len(out) < 4 { push(out, 0) }
+    moved = false
+    k = 0
+    while k < 4 {
+        if b[idx[k]] != out[k] { moved = true }
+        b[idx[k]] = out[k]
+        k = k + 1
+    }
+    ret moved
+}
+
+fn move(b, dir, st) {
+    moved = false
+    r = 0
+    while r < 4 {
+        if dir == 0 { idx = [r * 4, r * 4 + 1, r * 4 + 2, r * 4 + 3] }
+        if dir == 1 { idx = [r * 4 + 3, r * 4 + 2, r * 4 + 1, r * 4] }
+        if dir == 2 { idx = [r, r + 4, r + 8, r + 12] }
+        if dir == 3 { idx = [r + 12, r + 8, r + 4, r] }
+        if slide(b, idx, st) { moved = true }
+        r = r + 1
+    }
+    ret moved
+}
+
+fn can_move(b) {
+    i = 0
+    while i < 16 {
+        if b[i] == 0 { ret true }
+        if i % 4 < 3 and b[i] == b[i + 1] { ret true }
+        if i < 12 and b[i] == b[i + 4] { ret true }
+        i = i + 1
+    }
+    ret false
+}
+
+fn restart(b, st) {
+    i = 0
+    while i < 16 {
+        b[i] = 0
+        i = i + 1
+    }
+    st[0] = 0
+    st[2] = 0
+    add_tile(b)
+    add_tile(b)
+}
+
+restart(b, st)
+running = true
+dirty = true
+while running {
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 { running = false }
+        if k == 110 or k == 78 { restart(b, st) }
+        d = none
+        if k == 131 { d = 0 }
+        if k == 132 { d = 1 }
+        if k == 129 { d = 2 }
+        if k == 130 { d = 3 }
+        if d != none {
+            if move(b, d, st) { add_tile(b) }
+        }
+        if st[0] > st[1] { st[1] = st[0] }
+        dirty = true
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }
+    if dirty {
+        dirty = false
+        fb_clear(bg)
+        fb_text(ox, 64, "TILES", accent, bg)
+        fb_text(ox, 92, "Score " + str(st[0]) + "    Best " + str(st[1]), white, bg)
+        fb_text(ox + size - 272, 92, "Arrows slide  N new  Esc quit", muted, bg)
+        fb_rect(ox, oy, size, size, boardc)
+        i = 0
+        while i < 16 {
+            x = ox + gap + (i % 4) * (cell + gap)
+            y = oy + gap + floor(i / 4) * (cell + gap)
+            v = b[i]
+            ci = v
+            if ci > 12 { ci = 12 }
+            fb_rect(x, y, cell, cell, colors[ci])
+            if v > 0 {
+                s = str(pow(2, v))
+                fg = white
+                if v <= 2 { fg = rgb(230, 236, 240) }
+                fb_text(x + floor((cell - len(s) * 8) / 2), y + floor(cell / 2) - 8, s, fg, colors[ci])
+            }
+            i = i + 1
+        }
+        if not can_move(b) { fb_text(ox + floor(size / 2) - 116, oy + size + 24, "No moves left - N to play again", accent, bg) }
+        fb_present()
+    }
+    sleep_ms(10)
+}

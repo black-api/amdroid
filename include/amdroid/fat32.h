@@ -7,6 +7,7 @@ int fat32_open(const char *path, fat32_file_t *f);                 /* 0 on succe
 int fat32_read_at(fat32_file_t *f, u32 off, void *buf, u32 len);   /* bytes read, or -1 */
 void fat32_close(fat32_file_t *f);
 int fat32_init(void);                 /* returns 0 on success */
+int fat32_ready(void);                /* 1 when a FAT32 volume is mounted */
 int fat32_list_root(void (*cb)(const char *name, int is_dir, u32 size));
 int fat32_read_file(const char *name, void *buf, u32 max, u32 *out_size);
 int fat32_write_file(const char *name, const void *data, u32 size); /* 8.3 root file */

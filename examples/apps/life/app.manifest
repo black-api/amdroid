@@ -1,0 +1,9 @@
+id=LIFE
+name=Life
+version=1.0.0
+author=Am-Droid
+icon=14
+desc=Conway's Game of Life on a wrapping board
+perms=framebuffer,input
+requires=amdroid1+
+entry=MAIN.FAS

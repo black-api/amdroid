@@ -1,0 +1,9 @@
+id=TILES
+name=Tiles
+version=1.0.0
+author=Am-Droid
+icon=7
+desc=Slide and merge numbers until you reach 2048
+perms=framebuffer,input
+requires=amdroid1+
+entry=MAIN.FAS

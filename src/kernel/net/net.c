@@ -418,6 +418,8 @@ typedef struct {
     u32 cwnd, ssthresh;       /* congestion window and slow-start threshold, in bytes */
     int dupacks;
     u32 adv_wnd;              /* the window we last told the peer about */
+    int syn_tries;            /* tcp_open: SYNs sent so far, 0 once connected */
+    u64 syn_at;               /* when the last SYN went out */
     ooo_t ooo[OOO_SLOTS];     /* segments that arrived out of order */
 } tcb_t;
 
@@ -660,7 +662,10 @@ static int tcp_send_seg(tcb_t *s, u8 flags, const u8 *data, u32 len){
     return tcp_seg(s, s->snd_nxt, flags, data, len);
 }
 
-int tcp_connect(u32 ip, u16 port){
+/* Non-blocking connect: tcp_open sends the SYN and returns the socket; tcp_open_poll says
+ * how it is going (1 connected, 0 still trying, -1 failed and the socket is freed). The SYN
+ * is sent again every 1.5 s, three times in all, like tcp_connect. */
+int tcp_open(u32 ip, u16 port){
     int id = -1;
     for(int i = 0; i < MAX_SOCK; i++) if(!socks[i].used){ id = i; break; }
     if(id < 0) return -1;
@@ -673,22 +678,51 @@ int tcp_connect(u32 ip, u16 port){
     s->rx = kmalloc(RXBUF);
     if(!s->rx){ s->used = 0; return -1; }
     s->state = TS_SYN_SENT;
-    for(int tries = 0; tries < 3; tries++){
-        tcp_send_seg(s, TF_SYN, 0, 0);
-        u64 until = timer_ticks() + 150;
-        while(timer_ticks() < until){
-            net_poll();
-            if(s->state == TS_ESTABLISHED){
-                s->snd_nxt++;                 /* our SYN consumes one sequence number */
-                tcp_send_seg(s, TF_ACK, 0, 0);
-                return id;
-            }
-            proc_yield();
-        }
+    s->syn_tries = 1;
+    s->syn_at = timer_ticks();
+    tcp_send_seg(s, TF_SYN, 0, 0);
+    return id;
+}
+
+int tcp_open_poll(int id){
+    if(id < 0 || id >= MAX_SOCK || !socks[id].used) return -1;
+    tcb_t *s = &socks[id];
+    if(s->state == TS_ESTABLISHED && s->syn_tries){
+        s->syn_tries = 0;
+        s->snd_nxt++;                         /* our SYN consumes one sequence number */
+        tcp_send_seg(s, TF_ACK, 0, 0);
+        return 1;
     }
-    kfree(s->rx);
-    s->used = 0;
-    return -1;
+    if(s->state == TS_ESTABLISHED) return 1;
+    net_poll();
+    if(s->state == TS_ESTABLISHED) return tcp_open_poll(id);
+    int refused = s->state == TS_CLOSED_BY_PEER;
+    if(!refused && timer_ticks() - s->syn_at >= 150){
+        if(s->syn_tries < 3){
+            s->syn_tries++;
+            s->syn_at = timer_ticks();
+            tcp_send_seg(s, TF_SYN, 0, 0);
+            return 0;
+        }
+        refused = 1;
+    }
+    if(refused){
+        kfree(s->rx);
+        s->used = 0;
+        s->state = TS_FREE;
+        return -1;
+    }
+    return 0;
+}
+
+int tcp_connect(u32 ip, u16 port){
+    int id = tcp_open(ip, port);
+    if(id < 0) return -1;
+    for(;;){
+        int r = tcp_open_poll(id);
+        if(r) return r > 0 ? id : -1;
+        proc_yield();
+    }
 }
 
 int tcp_listen(u16 port){

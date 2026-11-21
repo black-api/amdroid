@@ -13,6 +13,8 @@ void net_info(u32 *ip, u32 *gw, u8 mac[6]);
 
 /* TCP. Sockets are small integers; -1 means failure. */
 int  tcp_connect(u32 ip, u16 port);
+int  tcp_open(u32 ip, u16 port);                   /* non-blocking connect: sends the SYN, returns the socket */
+int  tcp_open_poll(int sock);                      /* 1 connected, 0 still trying, -1 failed (socket freed) */
 int  tcp_listen(u16 port);                        /* a listening socket */
 int  tcp_accept(int lsock, u32 timeout_ms);       /* the next connection, or -1 */
 int  tcp_send(int sock, const void *data, u32 len);

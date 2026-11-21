@@ -1,0 +1,5 @@
+category=Creative
+color=3DC8DC
+featured=1
+tagline=Conway's cellular automaton
+about=A living board of cells that are born, survive or die by three simple rules. Space pauses, R reseeds the board, G drops Gosper's glider gun.

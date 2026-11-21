@@ -1,0 +1,58 @@
+# Starfield - Up/Down change speed, Esc or a click leaves.
+fn rgb(r, g, b) { ret r * 65536 + g * 256 + b }
+bg = rgb(4, 6, 10)
+white = rgb(242, 245, 247)
+muted = rgb(120, 132, 140)
+w = fb_width()
+h = fb_height()
+cx = w / 2
+cy = h / 2
+n = 420
+none = 0 - 1
+xs = []
+ys = []
+zs = []
+i = 0
+while i < n {
+    push(xs, randbelow(2000) - 1000)
+    push(ys, randbelow(2000) - 1000)
+    push(zs, randbelow(1000) + 1)
+    i = i + 1
+}
+speed = 8
+running = true
+while running {
+    k = poll_key()
+    while k != none {
+        if k == 27 or k == 113 { running = false }
+        if k == 129 and speed < 40 { speed = speed + 2 }
+        if k == 130 and speed > 2 { speed = speed - 2 }
+        k = poll_key()
+    }
+    if poll_click() == 1 { running = false }
+    fb_clear(bg)
+    i = 0
+    while i < n {
+        z = zs[i] - speed
+        if z < 1 {
+            z = 1000
+            xs[i] = randbelow(2000) - 1000
+            ys[i] = randbelow(2000) - 1000
+        }
+        zs[i] = z
+        sx = cx + xs[i] * 300 / z
+        sy = cy + ys[i] * 300 / z
+        if sx >= 0 and sy >= 0 and sx < w - 4 and sy < h - 4 {
+            v = floor(255 - z / 4)
+            if v < 40 { v = 40 }
+            s = 1
+            if z < 400 { s = 2 }
+            if z < 150 { s = 3 }
+            fb_rect(sx, sy, s, s, rgb(v, v, floor(v * 0.9 + 25)))
+        }
+        i = i + 1
+    }
+    fb_text(32, h - 40, "Starfield   speed " + str(speed) + "   Up/Down faster/slower   Esc quit", muted, bg)
+    fb_present()
+    sleep_ms(16)
+}
