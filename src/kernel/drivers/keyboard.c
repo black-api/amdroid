@@ -84,6 +84,10 @@ void keyboard_irq(void){
         }
         return;
     }
+    /* Ctrl+Alt+1..9 as well as Ctrl+Alt+F1..F9: the messages on screen say "Ctrl+Alt+2" */
+    if(ctrl && alt && sc >= 0x02 && sc <= 0x0A){ requested_vt = sc - 0x01; return; }
+    if(ctrl && !alt && sc == 0x39){ keyboard_inject(0x9A); return; }   /* Ctrl+Space: KEY_DICTATE */
+    if(alt && !ctrl && sc == 0x39){ keyboard_inject(0x9B); return; }   /* Alt+Space: KEY_VOICE */
     char c = (sc < 128) ? (shift ? scancode_shift_map[sc] : scancode_map[sc]) : 0;
     if(ctrl && c >= 'a' && c <= 'z') c = (char)(c - 'a' + 1);   /* Ctrl+letter: 1..26 */
     if(c){

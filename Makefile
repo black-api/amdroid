@@ -29,7 +29,7 @@ GUI_SRCS = $(wildcard src/kernel/gui/*.c) $(wildcard apps/*.c)
 
 # The Husser renderer: the web engine (HTML, CSS, layout, images) and the JavaScript
 # interpreter, built for ring 3 as a blob that the kernel embeds and starts as a process.
-HUSSER_ENGINE = src/kernel/web/html.c src/kernel/web/css.c src/kernel/web/layout.c src/kernel/web/jsdom.c src/kernel/web/image.c src/kernel/js/js.c src/kernel/js/regex.c
+HUSSER_ENGINE = src/kernel/web/html.c src/kernel/web/css.c src/kernel/web/layout.c src/kernel/web/jsdom.c src/kernel/web/image.c src/kernel/web/svg.c src/kernel/js/js.c src/kernel/js/regex.c
 HUSSER_SRCS = src/user/husser/husser.c src/user/husser/heap_shim.c src/user/husser/painter.c $(HUSSER_ENGINE) src/lib/string.c src/lib/klib.c src/lib/kmath.c
 HUSSER_OBJS = $(addprefix out/husser/,$(notdir $(HUSSER_SRCS:.c=.o)))
 HUSSER_CFLAGS = -std=gnu11 -ffreestanding -O2 -fno-stack-protector -fno-pie -mno-red-zone -m64 -w -Isrc/user/husser/shim -Iinclude -MMD -MP
@@ -83,7 +83,9 @@ C_SRCS = \
  src/kernel/net/net.c \
  src/kernel/crypto/sha256.c \
  src/kernel/web/image.c \
- src/kernel/reel_bridge.c
+ src/kernel/web/svg.c \
+ src/kernel/reel_bridge.c \
+ src/kernel/scribe_bridge.c
 
 ASM_SRCS = \
  src/boot/boot.asm \
@@ -91,14 +93,15 @@ ASM_SRCS = \
  src/user/hello.asm \
  src/user/busy.asm \
  src/user/husser/husser_blob.asm \
- src/user/reel/reel_blob.asm
+ src/user/reel/reel_blob.asm \
+ src/user/scribe/scribe_blob.asm
 
 OBJS = $(C_SRCS:.c=.o) $(ASM_SRCS:.asm=.o)
 
 # RAM for the VM. 1G is enough for ultra mode (the browser's big caches and script heap).
 MEM ?= 1G
 # sound for MVP (the video player) and beep: an HD Audio card on PulseAudio
-QEMU_AUDIO = -audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
+QEMU_AUDIO = -audiodev pa,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
 # QEMU's window: GTK, zoomed down to fit the screen if the guest mode is still bigger than
 # it. `make run QEMU_DISPLAY="-display none -serial stdio"` for no window, `-display sdl`
 # for SDL.
@@ -187,6 +190,33 @@ out/user/reel_defs.inc: out/user/reel.elf
 
 src/user/reel/reel_blob.o: src/user/reel/reel_blob.asm out/user/reel.bin out/user/reel_defs.inc
 
+# Scribe, the speech-to-text process: the Thimble Whisper engine, built with Reel's musl
+# toolchain, and its model (ThimbleLM/models/whisper-tiny-en.thim) embedded beside it.
+SCRIBE_CFLAGS = -std=gnu11 -O3 -msse4.1 -fno-math-errno -fno-pie -fno-stack-protector \
+ -fno-asynchronous-unwind-tables -w -Iinclude -IThimbleLM/engine/include
+SCRIBE_OBJS = out/scribe/scribe.o out/scribe/stt.o out/scribe/needle.o out/scribe/glue.o
+out/scribe/scribe.o: src/user/scribe/scribe.c include/amdroid/scribe_proto.h include/amdroid/voice_tools.h ThimbleLM/engine/include/thimble_needle.h $(CODECS_DONE)
+	@mkdir -p out/scribe
+	$(REEL_CC) $(SCRIBE_CFLAGS) -c $< -o $@
+out/scribe/stt.o: ThimbleLM/engine/src/stt.c ThimbleLM/engine/include/thimble_stt.h $(CODECS_DONE)
+	@mkdir -p out/scribe
+	$(REEL_CC) $(SCRIBE_CFLAGS) -c $< -o $@
+out/scribe/needle.o: ThimbleLM/engine/src/needle.c ThimbleLM/engine/include/thimble_needle.h $(CODECS_DONE)
+	@mkdir -p out/scribe
+	$(REEL_CC) $(SCRIBE_CFLAGS) -c $< -o $@
+out/scribe/glue.o: src/user/scribe/glue.c src/user/reel/glue.c $(CODECS_DONE)
+	@mkdir -p out/scribe
+	$(REEL_CC) $(SCRIBE_CFLAGS) -fno-builtin -ffreestanding -c $< -o $@
+out/user/scribe.elf: $(SCRIBE_OBJS) src/user/scribe/linker.ld
+	@mkdir -p out/user
+	$(LD) -T src/user/scribe/linker.ld -static -nostdlib --no-warn-rwx-segments -o $@ $(SCRIBE_OBJS) $(CODECS)/lib/libc-musl.a $(LIBGCC)
+out/user/scribe.bin: out/user/scribe.elf
+	objcopy -O binary $< $@
+out/user/scribe_defs.inc: out/user/scribe.elf
+	@nm $< | awk '$$NF=="__scribe_end"{print ".global scribe_bss_end\nscribe_bss_end = 0x" $$1 ";"} $$NF=="_start"{print ".global scribe_entry\nscribe_entry = 0x" $$1 ";"}' > $@
+	@grep -q scribe_entry $@ || { echo "scribe: _start not found"; exit 1; }
+src/user/scribe/scribe_blob.o: src/user/scribe/scribe_blob.asm out/user/scribe.bin out/user/scribe_defs.inc ThimbleLM/models/whisper-tiny-en.thim ThimbleLM/hf/needle3/needle3.cact
+
 # The media pipeline on the host, against real files: make mediatest; out/mtest/mediatest FILE
 mediatest: $(CODECS_DONE)
 	@mkdir -p out/mtest
@@ -217,6 +247,7 @@ apps/%.o: CFLAGS += -O2
 src/kernel/drivers/fb.o: CFLAGS += -O2
 # The video player's path: decoding frames, reading the disk, streaming sound.
 src/kernel/web/image.o: CFLAGS += -O2
+src/kernel/web/svg.o: CFLAGS += -O2
 src/kernel/fs/fat32.o: CFLAGS += -O2
 src/kernel/drivers/ata.o: CFLAGS += -O2
 src/kernel/drivers/hda.o: CFLAGS += -O2

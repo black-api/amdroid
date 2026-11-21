@@ -1,4 +1,6 @@
 #include "amdroid/console.h"
+#include "amdroid/scribe.h"
+#include "amdroid/heap.h"
 #include "amdroid/vga.h"
 #include "amdroid/vfs.h"
 #include "amdroid/fat32.h"
@@ -360,6 +362,9 @@ static void cmd_help(void){
     console_puts("  date        - show the real-time clock\n");
     console_puts("  whoami      - show the current user\n");
     console_puts("  record <s> <FILE.WAV> - record from the sound card input (root)\n");
+    console_puts("  dictate [s]          - speak into the microphone, get the text\n");
+    console_puts("  scribe <FILE.WAV>    - speech to text from a WAV file\n");
+    console_puts("  ask <words>          - what a voice command (Alt+Space) would do\n");
     console_puts("  usbdisk     - show a USB storage disk and its first sector\n");
     console_puts("  usbmount    - use the FAT32 file system on the USB disk\n");
     console_puts("  fsck        - free clusters that no file uses (after a crash)\n");
@@ -427,6 +432,95 @@ static void cmd_cat(const char *arg){
     }
 }
 
+static void cmd_scribe(const char *arg){
+    if(!arg || !*arg){ console_puts("usage: scribe <file.wav>   (speech to text)\n"); return; }
+    u64 off = 0;
+    u8 *buf;
+    vfs_node_t *n = vfs_lookup(arg);
+    if(n && !n->is_dir){
+        if(n->size > 16u * 1024 * 1024){ console_puts("file too big\n"); return; }
+        buf = kmalloc(n->size + 1);
+        if(!buf){ console_puts("out of memory\n"); return; }
+        while(off < n->size){ int r = vfs_read(n, off, n->size - off, buf + off); if(r <= 0) break; off += r; }
+    } else {                                     /* a file on the FAT disk: "LS0.WAV", "DIR/A.WAV" */
+        char up[64]; int k = 0;
+        while(arg[k] && k < 63){ char c = arg[k]; up[k] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; k++; }
+        up[k] = 0;
+        if(!auth_may(up, 0)){ console_puts("permission denied\n"); return; }
+        u32 cap = 16u * 1024 * 1024, sz = 0;
+        buf = kmalloc(cap);
+        if(!buf){ console_puts("out of memory\n"); return; }
+        if(fat32_read_path(up, buf, cap, &sz) != 0){ kfree(buf); console_puts("not found\n"); return; }
+        off = sz;
+    }
+    static char text[4096];
+    console_puts("transcribing...\n");
+    u64 t0 = timer_ticks();
+    int r = scribe_transcribe_wav(buf, (u32)off, text, sizeof text);
+    kfree(buf);
+    if(r < 0){ console_printf("scribe: %s\n", text); return; }
+    const volatile scribe_hdr_t *h = scribe_header();
+    console_printf("%s\n[%u frames, %u tokens, mel %u ms, encoder %u ms, decoder %u ms, total %llu ms]\n", text,
+        h->enc_frames, h->tokens, h->mel_us / 1000, h->enc_us / 1000, h->dec_us / 1000, (unsigned long long)(timer_ticks() - t0) * 10);
+}
+
+/* ask TEXT: what a voice command would do with these words (Needle in Scribe; nothing runs) */
+static void cmd_ask(const char *arg){
+    if(!arg || !*arg){ console_puts("usage: ask <words>   e.g. ask open notes\n"); return; }
+    static char why[160];
+    console_puts("thinking...\n");
+    u64 t0 = timer_ticks();
+    if(scribe_submit_ask(arg, why, sizeof why) != 0){ console_printf("ask: %s\n", why); return; }
+    int r;
+    while((r = scribe_poll(why, sizeof why)) == -2) proc_yield();
+    static scribe_cmd_t c;
+    scribe_command_result(&c);
+    if(c.withheld < 0){ console_puts("ask: the model did not load\n"); return; }
+    console_printf("calls: %s\nreasoning: %s\nconfidence %u%%, withheld %d, needle %u ms (load %u ms), total %llu ms\n",
+        c.calls[0] ? c.calls : "[]", c.reasoning, (u32)(c.confidence * 100), c.withheld, c.needle_ms, c.load_ms,
+        (unsigned long long)(timer_ticks() - t0) * 10);
+}
+
+/* dictate [SECONDS]: records from the microphone and prints what was said */
+static void cmd_dictate(const char *arg){
+    int secs = 0;
+    for(const char *c = arg ? arg : ""; *c >= '0' && *c <= '9'; c++) secs = secs * 10 + (*c - '0');
+    if(!secs) secs = 5;
+    if(secs > 30){ console_puts("usage: dictate [1-30 seconds]\n"); return; }
+    if(!hda_mic_present()){ console_puts("dictate: no microphone (no sound card with an input)\n"); return; }
+    u32 want = (u32)secs * 48000u;
+    int16_t *st = kmalloc((u64)want * 4);
+    float *mono = kmalloc((u64)want / 3 * 4 + 16);
+    if(!st || !mono){ console_puts("dictate: out of memory\n"); if(st) kfree(st); if(mono) kfree(mono); return; }
+    if(hda_capture_start() != 0){ console_puts("dictate: the microphone did not start\n"); kfree(st); kfree(mono); return; }
+    console_printf("listening for %d s... (any key stops early)\n", secs);
+    u32 n = 0; u64 until = timer_ticks() + (u64)secs * 100 + 100; int last_sec = -1;
+    while(n < want && timer_ticks() < until){
+        n += hda_capture_read(st + n * 2, want - n);
+        if(keyboard_getchar() != -1) break;
+        int sec = (int)(n / 48000);
+        if(sec != last_sec){ last_sec = sec; console_putc('.'); }
+        timer_sleep(10);
+    }
+    hda_capture_stop();
+    console_putc('\n');
+    /* 48 kHz stereo -> 16 kHz mono: average each 3 frames (a box low-pass, enough for speech) */
+    u32 m = n / 3; int peak = 0;
+    for(u32 i = 0; i < m; i++){
+        int acc = 0;
+        for(int k = 0; k < 3; k++){ int l = st[(i*3+k)*2], r = st[(i*3+k)*2+1]; acc += l + r; int a = l < 0 ? -l : l; if(a > peak) peak = a; }
+        mono[i] = (float)acc / (6.0f * 32768.0f);
+    }
+    kfree(st);
+    console_printf("heard %u.%u s, peak level %d of 32767\n", n / 48000, n % 48000 / 4800, peak);
+    if(peak < 300){ console_puts("only silence: is the microphone connected and unmuted?\n"); kfree(mono); return; }
+    static char text[4096];
+    int r = scribe_transcribe(mono, m, text, sizeof text);
+    kfree(mono);
+    if(r < 0){ console_printf("dictate: %s\n", text); return; }
+    console_printf("> %s\n", r ? text : "(no speech)");
+}
+
 /* Runs the text shell until a VT switch is requested. Returns that VT (1..9). */
 int shell_run(void){
     for(;;){
@@ -446,6 +540,9 @@ int shell_run(void){
         if(strcmp(cmd,"help")==0) cmd_help();
         else if(strcmp(cmd,"ls")==0) cmd_ls(arg);
         else if(strcmp(cmd,"cat")==0) cmd_cat(arg);
+        else if(strcmp(cmd,"scribe")==0) cmd_scribe(arg);
+        else if(strcmp(cmd,"dictate")==0) cmd_dictate(arg);
+        else if(strcmp(cmd,"ask")==0) cmd_ask(arg);
         else if(strcmp(cmd,"echo")==0) console_printf("%s\n", arg);
         else if(strcmp(cmd,"pwd")==0) console_puts("/\n");
         else if(strcmp(cmd,"free")==0) console_printf("total pages: %llu free: %llu\n",
@@ -650,7 +747,7 @@ int shell_run(void){
             take_word(&q, fname, sizeof fname);
             int secs = 0;
             for(const char *c = sec; *c >= '0' && *c <= '9'; c++) secs = secs * 10 + (*c - '0');
-            if(secs < 1 || secs > 4 || !fname[0]) console_puts("usage: record <1-4 seconds> <FILE.WAV>\n");
+            if(secs < 1 || secs > 30 || !fname[0]) console_puts("usage: record <1-30 seconds> <FILE.WAV>\n");
             else if(auth_uid() != 0) console_puts("record: only root can write files here\n");
             else {
                 for(int i = 0; fname[i]; i++) if(fname[i] >= 'a' && fname[i] <= 'z') fname[i] = (char)(fname[i] - 32);
