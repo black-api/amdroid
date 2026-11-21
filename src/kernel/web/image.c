@@ -1301,6 +1301,7 @@ int web_add_image(int idx, const char *data, u32 len){
     else if(len >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) ok = jpeg_decode(d, len, &px, &w, &h);
     else if(len >= 2 && d[0] == 'B' && d[1] == 'M') ok = bmp_decode(d, len, &px, &w, &h);
     else if(len >= 6 && !memcmp(d, "GIF8", 4)) ok = gif_decode(d, len, &px, &w, &h);
+    else if(len >= 16 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)) ok = webp_decode(d, len, &px, &w, &h);
     if(ok != 0){ im->state = 2; return -1; }
     if(img_bytes + w * h * 4 > IMG_BUDGET){ kfree(px); im->state = 2; return -1; }   /* the page has enough pictures */
     if(im->pixels) kfree(im->pixels);

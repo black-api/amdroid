@@ -140,6 +140,7 @@ wnode_t *web_new_node(void);
 int img_register(const char *url);
 int css_parse_color(const char *lower, u32 n, u32 *rgb);   /* 1 colour, 2 none, 3 currentColor, 0 not a colour */
 int svg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h, int *ss);
+int webp_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h);
 void web_images_reset(void);
 /* Generic attribute store for names without a dedicated field. */
 void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen);

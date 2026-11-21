@@ -29,7 +29,7 @@ GUI_SRCS = $(wildcard src/kernel/gui/*.c) $(wildcard apps/*.c)
 
 # The Husser renderer: the web engine (HTML, CSS, layout, images) and the JavaScript
 # interpreter, built for ring 3 as a blob that the kernel embeds and starts as a process.
-HUSSER_ENGINE = src/kernel/web/html.c src/kernel/web/css.c src/kernel/web/layout.c src/kernel/web/jsdom.c src/kernel/web/image.c src/kernel/web/svg.c src/kernel/js/js.c src/kernel/js/regex.c
+HUSSER_ENGINE = src/kernel/web/html.c src/kernel/web/css.c src/kernel/web/layout.c src/kernel/web/jsdom.c src/kernel/web/image.c src/kernel/web/svg.c src/kernel/web/webp.c src/kernel/js/js.c src/kernel/js/regex.c
 HUSSER_SRCS = src/user/husser/husser.c src/user/husser/heap_shim.c src/user/husser/painter.c $(HUSSER_ENGINE) src/lib/string.c src/lib/klib.c src/lib/kmath.c
 HUSSER_OBJS = $(addprefix out/husser/,$(notdir $(HUSSER_SRCS:.c=.o)))
 HUSSER_CFLAGS = -std=gnu11 -ffreestanding -O2 -fno-stack-protector -fno-pie -mno-red-zone -m64 -w -Isrc/user/husser/shim -Iinclude -MMD -MP
@@ -86,6 +86,7 @@ C_SRCS = \
  src/kernel/crypto/sha256.c \
  src/kernel/web/image.c \
  src/kernel/web/svg.c \
+ src/kernel/web/webp.c \
  src/kernel/reel_bridge.c \
  src/kernel/scribe_bridge.c
 
@@ -250,6 +251,7 @@ src/kernel/drivers/fb.o: CFLAGS += -O2
 # The video player's path: decoding frames, reading the disk, streaming sound.
 src/kernel/web/image.o: CFLAGS += -O2
 src/kernel/web/svg.o: CFLAGS += -O2
+src/kernel/web/webp.o: CFLAGS += -O2
 src/kernel/fs/fat32.o: CFLAGS += -O2
 src/kernel/drivers/ata.o: CFLAGS += -O2
 src/kernel/drivers/hda.o: CFLAGS += -O2
