@@ -37,8 +37,16 @@ void desk_init(u32 sw, u32 sh){
     if(!done){ desk_sort(); done = 1; }     /* keep the arrangement across sign-ins */
 }
 
+/* The icon grid starts clear of a dock on the left and stops above one along the bottom. */
+static int grid_x0(void){ return DK_X0 + dk_reserve_left(); }
+static int grid_rows(void){
+    int r = ((int)scr_h - DK_Y0 - 48 - 2 * 12 - 16 - dk_reserve_bottom()) / DK_CELL_H;
+    return r < 1 ? 1 : r;
+}
+
 static rect_t cell_rect(int c){
-    return (rect_t){ (u32)(DK_X0 + (c / rows) * DK_CELL_W), (u32)(DK_Y0 + (c % rows) * DK_CELL_H), DK_CELL_W, DK_CELL_H };
+    rows = grid_rows();
+    return (rect_t){ (u32)(grid_x0() + (c / rows) * DK_CELL_W), (u32)(DK_Y0 + (c % rows) * DK_CELL_H), DK_CELL_W, DK_CELL_H };
 }
 static rect_t hit_rect(int c){
     rect_t r = cell_rect(c);
@@ -47,10 +55,11 @@ static rect_t hit_rect(int c){
 
 /* The cell under (x, y), or -1. */
 static int cell_at(int x, int y){
-    if(x < DK_X0 || y < DK_Y0) return -1;
-    int col = (x - DK_X0) / DK_CELL_W, row = (y - DK_Y0) / DK_CELL_H;
+    rows = grid_rows();
+    if(x < grid_x0() || y < DK_Y0) return -1;
+    int col = (x - grid_x0()) / DK_CELL_W, row = (y - DK_Y0) / DK_CELL_H;
     if(row >= rows) return -1;
-    if(DK_X0 + (col + 1) * DK_CELL_W > (int)scr_w) return -1;
+    if(grid_x0() + (col + 1) * DK_CELL_W > (int)scr_w) return -1;
     return col * rows + row;
 }
 
@@ -67,7 +76,7 @@ int desk_press(int x, int y, u64 now){
     int a = desk_hit(x, y);
     sel = a;
     if(a < 0){ last_app = -1; return -1; }
-    if(a == last_app && now - last_at < 40){ last_app = -1; press_app = -1; return a; }
+    if(a == last_app && now - last_at < 40){ last_app = -1; press_app = -1; sel = -1; return a; }   /* opened: no highlight left behind */
     last_app = a;
     last_at = now;
     press_app = a;
@@ -169,6 +178,20 @@ void desk_damage(int mx, int my){
         }
         sh_drag = drag; sh_drag_x = drag_x; sh_drag_y = drag_y; sh_drag_cell = drag_cell;
     }
+}
+
+void desk_draw_plain(void){
+    int n = ui_app_count();
+    for(int a = 0; a < n; a++){
+        rect_t r = cell_rect(cell_of[a]);
+        tile(a, r.x, r.y, 0, 0);
+    }
+}
+
+u32 desk_signature(void){
+    u32 h = (u32)grid_x0() * 31u + (u32)grid_rows();
+    for(int a = 0; a < UI_MAX_APPS; a++) h = h * 33u + (u32)cell_of[a] + 1u;
+    return h;
 }
 
 void desk_draw(void){

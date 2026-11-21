@@ -27,5 +27,11 @@ int  vm_copy_to_user(u64 cr3, u64 va, const void *src, u64 len);
 int  vm_copy_from_user(u64 cr3, u64 va, void *dst, u64 len);
 u64  vm_user_pages(u64 cr3);                        /* resident pages of a process's own region */
 u64  vm_lookup(u64 cr3, u64 virt);                    /* physical page or 0 */
+/* Demand paging: a process's big, mostly empty regions (heaps, stacks) are not backed until
+ * touched. vm_lazy_range registers [lo, hi) for this address space; the first touch of a page
+ * (a user page fault, or a system call copying to it) maps a zeroed page. vm_demand returns 1
+ * when the page is now there. */
+void vm_lazy_range(u64 cr3, u64 lo, u64 hi);
+int  vm_demand(u64 cr3, u64 va);
 
 #endif

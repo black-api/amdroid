@@ -92,8 +92,10 @@ void cm_draw(int mx, int my, u64 now){
     rect_t c = card;
     c.y = (u32)((int)c.y - dy);
     ui_rrect(c.x + 3, c.y + 8, c.w, c.h, 14, C_SHADOW);
-    ui_rrect(c.x, c.y, c.w, c.h, 14, ui_lerp(C_WIN, C_BAR_EDGE, t));
-    ui_rrect(c.x + 1, c.y + 1, c.w - 2, c.h - 2, 13, C_MENU);
+    if(!ui_glass_panel(c.x, c.y, c.w, c.h, 14)){
+        ui_rrect(c.x, c.y, c.w, c.h, 14, ui_lerp(C_WIN, C_BAR_EDGE, t));
+        ui_rrect(c.x + 1, c.y + 1, c.w - 2, c.h - 2, 13, C_MENU);
+    }
     int hov = item_at(mx, my + dy);
     int top = (int)c.y + CM_PAD;
     for(int i = 0; i < nitems; i++){

@@ -104,8 +104,7 @@ void tb_damage(int n, rect_t bar, int hover, int hover_amt, int top, int start_o
 
 void tb_draw(const item_t *it, int n, rect_t bar, int hover, int hover_amt, int top, int start_open){
     if(!fb_clip_hits((i32)bar.x - 48, (i32)bar.y - TIP_H, (i32)bar.w + 96, (i32)bar.h + TIP_H)) return;
-    ui_rrect(bar.x, bar.y, bar.w, bar.h, bar.h / 2, C_BAR_EDGE);
-    ui_rrect(bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 2, (bar.h - 2) / 2, C_BAR);
+    ui_panel(bar.x, bar.y, bar.w, bar.h, bar.h / 2, C_BAR_EDGE, C_BAR);
     for(int i = 0; i < n; i++){
         rect_t r = tb_item(bar, i);
         if(i == hover) ui_rrect(r.x, r.y, r.w, r.h, 10, ui_lerp(C_BAR, C_HOVER, hover_amt));
@@ -279,7 +278,7 @@ void tb_menu_draw(rect_t bar, u32 sw, int dy, int mx, int my){
     m.y += (u32)dy;
     if(!fb_clip_hits((i32)m.x, (i32)m.y, (i32)m.w + 6, (i32)m.h + 10)) return;
     ui_rrect(m.x + 6, m.y + 10, m.w, m.h, 16, C_SHADOW);
-    ui_rrect(m.x, m.y, m.w, m.h, 16, C_MENU);
+    if(!ui_glass_panel(m.x, m.y, m.w, m.h, 16)) ui_rrect(m.x, m.y, m.w, m.h, 16, C_MENU);
 
     /* the search box: what was typed, with a caret */
     rect_t sb = { m.x + 14, m.y + 14, m.w - 28, 44 };

@@ -92,6 +92,17 @@ int dk_reserve_right(void){
     return base_size() + 2 * PAD + EDGE_GAP + 8;
 }
 
+/* The same for the left edge (the desktop icons move over), and for the strip above the
+ * taskbar when the dock lies along the bottom. */
+int dk_reserve_left(void){
+    if(!ui_prefs.dock_on || ui_prefs.dock_edge != DOCK_LEFT) return 0;
+    return base_size() + 2 * PAD + EDGE_GAP + 8;
+}
+int dk_reserve_bottom(void){
+    if(!ui_prefs.dock_on || ui_prefs.dock_edge != DOCK_BOTTOM) return 0;
+    return base_size() + 2 * PAD + 10;
+}
+
 int dk_over(int x, int y){
     if(!ui_prefs.dock_on) return 0;
     layout_t L; layout(&L);
@@ -195,8 +206,7 @@ void dk_draw(void){
     rect_t p = L.pill;
     u32 rad = (vertical() ? p.w : p.h) / 2;
     ui_rrect(p.x + 2, p.y + 5, p.w, p.h, rad, C_SHADOW);
-    ui_rrect(p.x, p.y, p.w, p.h, rad, C_BAR_EDGE);
-    ui_rrect(p.x + 1, p.y + 1, p.w - 2, p.h - 2, rad - 1, C_BAR);
+    ui_panel(p.x, p.y, p.w, p.h, rad, C_BAR_EDGE, C_BAR);
     int top = win_top_app();
     for(int i = 0; i < L.n; i++){
         rect_t t = L.t[i];

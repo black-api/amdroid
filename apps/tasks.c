@@ -463,7 +463,7 @@ static void t_draw(rect_t b, int focused){
         else if(r->born && now - r->born < MARK_TICKS) mark = COL_START;
         else if(r->changed && now - r->changed < SAMPLE_TICKS + 10) mark = COL_CHANGE;
         if(mark) bg = ui_lerp(bg, mark, 60);
-        ui_rrect(rr.x, rr.y, rr.w, rr.h, 8, bg);
+        if(!(bg == C_WIN && ui_prefs.glass)) ui_rrect(rr.x, rr.y, rr.w, rr.h, 8, bg);   /* plain rows stay glass */
         if(k == si && !ghost) ui_fill((rect_t){ rr.x, rr.y + 6, 4, rr.h - 12 }, ui_accent());
         u32 ts = nar ? 1 : UI_SCALE;   /* scale 1 keeps the numbers inside narrow columns */
         u32 pad = nar ? 8 : 14;

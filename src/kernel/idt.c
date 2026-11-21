@@ -99,6 +99,7 @@ u64 *isr_handler(u64 *frame){
         case 14: {
             u64 cr2 = 0;
             if(vec == 14) __asm__ volatile("mov %%cr2,%0":"=r"(cr2));
+            if(from_user && vec == 14 && vm_demand(vm_read_cr3(), cr2)) break;     /* a heap or stack page touched for the first time */
             if(from_user){
                 console_printf("[proc %d] killed: %s at rip=%p addr=%p\n", proc_current(),
                                vec == 14 ? "page fault" : "general protection fault",
@@ -125,6 +126,7 @@ u64 *isr_handler(u64 *frame){
                 next = proc_exit(frame, -1);
                 break;
             }
+            if(vec == 14 && vm_demand(vm_read_cr3(), cr2)) break;     /* the kernel touched a user heap page first (a system call) */
             console_printf("KERNEL %s at rip=%p addr=%p\n",
                            vec == 14 ? "PAGE FAULT" : "GP FAULT", (void*)frame[17], (void*)cr2);
             for(;;) __asm__ volatile("cli; hlt");

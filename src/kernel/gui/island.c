@@ -8,6 +8,7 @@
  *  - Clicked while idle, it opens to show memory, uptime, network and the last notifications.
  *  - It can be dragged anywhere (it snaps to the edges and the centre), and its size, style
  *    and timing are in Settings -> Dynamic Island. */
+#include "amdroid/dictation.h"
 #include "gui_internal.h"
 #include "amdroid/pmm.h"
 #include "amdroid/net.h"
@@ -76,6 +77,12 @@ void ui_notify(int app, const char *title, const char *body){
 static const int IDLE_W[3] = { 190, 240, 300 }, IDLE_H[3] = { 40, 46, 54 }, CARD_W[3] = { 560, 640, 720 };
 static int note_ticks(void){ return ui_prefs.isl_secs * 100; }
 static int card_w(void){ return CARD_W[ui_prefs.isl_size]; }
+/* The resting pill's width: the stats face needs room for its longest text ("CPU 100%  RAM 100%"). */
+static int idle_w(void){
+    int w = IDLE_W[ui_prefs.isl_size];
+    if(ui_prefs.isl_idle == ISL_IDLE_STATS && w < 340) w = 340;
+    return w;
+}
 
 typedef struct { u32 fill, edge, fg, muted, dim, rule, bar_back; int has_edge; } look_t;
 static look_t look(void){
@@ -125,7 +132,9 @@ void isl_update(u32 sw, u64 now, int animate){
     u64 steps = now - last_now > 8 ? 8 : now - last_now;      /* ticks since the last frame */
     last_now = now;
     if(showing && now - shown_at >= (u64)note_ticks()) showing = 0;
-    if(!showing && nqueue > 0 && !isl_open){
+    int dict = dict_state() != DICT_IDLE && !isl_open;
+    if(dict && showing) shown_at = now;               /* a notification waits while dictation shows */
+    if(!showing && nqueue > 0 && !isl_open && !dict){
         cur = queue[0];
         for(int i = 1; i < nqueue; i++) queue[i - 1] = queue[i];
         nqueue--;
@@ -133,10 +142,10 @@ void isl_update(u32 sw, u64 now, int animate){
         shown_at = now;
     }
     int sz = ui_prefs.isl_size;
-    int tw = IDLE_W[sz], th = IDLE_H[sz];
+    int tw = idle_w(), th = IDLE_H[sz];
     if(ui_prefs.isl_idle == ISL_IDLE_HIDDEN){ tw = 64; th = 10; }
     if(isl_open){ tw = card_w(); th = open_height(); }
-    else if(showing){ tw = card_w(); th = 88; }
+    else if(dict || showing){ tw = card_w(); th = 88; }
     tgt_w = tw; tgt_h = th;
     if(animate){
         for(u64 k = 0; k < steps; k++){
@@ -185,6 +194,7 @@ static int mode(void){
     int settled = near(isl_w, tgt_w) && near(isl_h, tgt_h);
     if(!settled) return 0;
     if(isl_open) return 3;
+    if(dict_state() != DICT_IDLE) return 4;
     if(showing) return 2;
     return 1;
 }
@@ -206,6 +216,7 @@ void isl_damage(u64 now){
     int m = mode();
     u32 left = m == 2 ? note_left(now) : 0;
     u64 sec = m == 3 ? now / 100 : 0;                /* the open panel shows the uptime */
+    if(m == 4) sec = (u64)dict_state() << 40 | (u64)dict_is_command() << 36 | (u64)dict_tenths() << 8 | dict_level() >> 10;   /* timer, level */
     char idle[32];
     if(m == 1) idle_text(idle, sizeof idle); else idle[0] = 0;
     if(box.x != sh_box.x || box.y != sh_box.y || box.w != sh_box.w || box.h != sh_box.h || m != sh_mode ||
@@ -262,6 +273,24 @@ void isl_draw(u64 now){
             ui_text(b.x + 88, y + 22, t, lk.muted, 1);
             y += 56;
         }
+    } else if(m == 4){
+        int st = dict_state(), listen = st == DICT_LISTEN;
+        ui_disc((int)b.x + 48, (int)b.y + 44, 20, listen ? 0xE5484D : st == DICT_CONFIRM ? ui_accent() : tile);
+        if(listen) ui_disc((int)b.x + 48, (int)b.y + 44, 8, 0xFFFFFF);
+        else if(st == DICT_CONFIRM){ ui_text(b.x + 44, b.y + 32, "?", 0xFFFFFF, UI_SCALE); }
+        char t[96], bd[200], ft[64], fb[100];
+        dict_face(t, sizeof t, bd, sizeof bd);
+        fit(ft, sizeof ft, t, (b.w - 92 - 28) / 16);
+        fit(fb, sizeof fb, bd, (b.w - 92 - 28) / 8);
+        ui_text(b.x + 92, b.y + 12, ft, lk.fg, UI_SCALE);
+        ui_text(b.x + 92, b.y + 50, fb, lk.muted, 1);
+        u32 full = b.w - 140;
+        ui_fill((rect_t){ b.x + 92, b.y + b.h - 10, full, 2 }, lk.bar_back);
+        if(listen){
+            u32 w = dict_level() * full / 32768 * 2;           /* speech rarely passes half scale */
+            if(w > full) w = full;
+            if(w) ui_fill((rect_t){ b.x + 92, b.y + b.h - 11, w, 4 }, 0xE5484D);
+        }
     } else if(m == 2){
         note_icon(cur.app, b.x + 20, b.y + 16, 56, tile, glyph);
         char t[48];
@@ -308,7 +337,7 @@ void isl_press(int x, int y){
 static void settle(void){
     int w = (int)box.w, left = (int)box.x, top = (int)box.y;
     int cx = left + w / 2;
-    int iw = ui_prefs.isl_idle == ISL_IDLE_HIDDEN ? 64 : IDLE_W[ui_prefs.isl_size];   /* what it shrinks to */
+    int iw = ui_prefs.isl_idle == ISL_IDLE_HIDDEN ? 64 : idle_w();   /* what it shrinks to */
     if(ui_prefs.isl_snap){
         if(cx > scr_w / 2 - SNAP_DIST && cx < scr_w / 2 + SNAP_DIST) cx = scr_w / 2;
         if(left < SNAP_DIST + 14) cx = 14 + iw / 2;

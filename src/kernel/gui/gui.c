@@ -1,4 +1,5 @@
 /* The GUI main loop: input routing, drawing order and the cursor. */
+#include "amdroid/dictation.h"
 #include "amdroid/gui.h"
 #include "amdroid/fb.h"
 #include "amdroid/mouse.h"
@@ -400,6 +401,10 @@ static void compose(box_t box, u64 now, const item_t *it, int n, rect_t bar, int
 /* A key press: the Start menu's search, then the focused app, then the desktop's own keys. */
 static void on_key(int c, u64 now, int *next_vt){
     int top = win_top_app();
+    if(c == KEY_DICTATE){ dict_toggle(); return; }
+    if(c == KEY_VOICE){ dict_command(); return; }
+    if(dict_state() == DICT_CONFIRM && (c == '\n' || c == 27)){ dict_confirm(c == '\n', next_vt); return; }
+    if(c == 27 && dict_state() == DICT_LISTEN){ dict_cancel(); return; }
     if(c == 27 && cm_is_open()){ cm_close(); return; }
     if(pn_key(c)) return;
     if(start_open){
@@ -561,8 +566,11 @@ int gui_run(void){
         if(next_vt) break;
 
         /* every layer reports what changed since it was last drawn */
+        dict_tick(&next_vt);
+        if(next_vt) break;
         prefs_tick(now);
         isl_update(sw, now, ui_anim_on);
+        glass_tick();
         desk_damage(mx, my);
         wid_damage(now);
         dk_damage(now);
