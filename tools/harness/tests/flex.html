@@ -1,0 +1,41 @@
+<!DOCTYPE html><html><head><style>
+body{margin:8px;font:14px sans-serif}
+.row{display:flex;background:#eee;margin:6px 0;height:40px}
+.row div{background:#69c;color:#fff;padding:4px;margin:2px}
+.c{justify-content:center}.e{justify-content:flex-end}.sb{justify-content:space-between}.sa{justify-content:space-around}.se{justify-content:space-evenly}
+.ai{align-items:center}.ae{align-items:flex-end}
+.g{gap:20px}
+.rr{flex-direction:row-reverse}
+.col{display:flex;flex-direction:column;background:#eee;width:200px;margin:6px 0}
+.col div{background:#c96;margin:2px;padding:4px}
+.colc{align-items:center}
+.grow div:nth-child(1){flex:1}.grow div:nth-child(2){flex:2}
+.ord div:first-child{order:3}
+.auto div:last-child{margin-left:auto}
+.self div:nth-child(2){align-self:flex-end}
+.wrap{display:flex;flex-wrap:wrap;width:300px;background:#eee;gap:4px}
+.wrap div{width:90px;height:30px;background:#9c6}
+.nest{display:flex;background:#ddd}
+.nest>div{flex:1;display:flex;flex-direction:column;justify-content:space-between;height:80px;background:#bbb;margin:2px}
+.nest span{background:#963;color:#fff}
+.shr{display:flex;width:300px;background:#eee}.shr div{width:200px;background:#c69;flex-shrink:1}
+</style></head><body>
+<div class="row c"><div>center</div><div>B</div></div>
+<div class="row e"><div>end</div><div>B</div></div>
+<div class="row sb"><div>between</div><div>B</div><div>C</div></div>
+<div class="row sa"><div>around</div><div>B</div><div>C</div></div>
+<div class="row se"><div>evenly</div><div>B</div><div>C</div></div>
+<div class="row ai"><div style="height:30px">align center</div><div>B</div></div>
+<div class="row ae"><div>align end</div><div>B</div></div>
+<div class="row g"><div>gap 20</div><div>B</div><div>C</div></div>
+<div class="row rr"><div>1 row-reverse</div><div>2</div><div>3</div></div>
+<div class="row grow"><div>flex 1</div><div>flex 2</div><div>none</div></div>
+<div class="row ord"><div>order 3 (last)</div><div>B</div><div>C</div></div>
+<div class="row auto"><div>A</div><div>B</div><div>margin-left auto</div></div>
+<div class="row self"><div>A</div><div>self end</div><div>C</div></div>
+<div class="col"><div>col A</div><div>col B</div></div>
+<div class="col colc"><div>centered</div><div>col B wide text</div></div>
+<div class="wrap"><div>1</div><div>2</div><div>3</div><div>4</div><div>5</div></div>
+<div class="nest"><div><span>top</span><span>bottom</span></div><div><span>top</span><span>bottom</span></div></div>
+<div class="shr"><div>shrink A</div><div>shrink B</div></div>
+</body></html>

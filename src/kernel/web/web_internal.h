@@ -40,7 +40,11 @@ typedef struct wstyle {
     int flex_grow;            /* flex-grow (0 = keep its size) */
     int flex_wrap;            /* flex-wrap: wrap */
     int flex_col;             /* flex-direction: column */
-    int justify;              /* justify-content: 0 start, 1 centre, 2 end, 3 space-between, 4 space-around */
+    int justify;              /* justify-content: 0 start, 1 centre, 2 end, 3 space-between, 4 space-around, 5 space-evenly */
+    u8 align_items;           /* align-items: 0 stretch, 1 start, 2 centre, 3 end */
+    u8 align_self;            /* align-self: 0 auto (the container's), 1 start, 2 centre, 3 end, 4 stretch */
+    u8 flex_rev;              /* flex-direction: row-reverse / column-reverse */
+    short order;              /* order (flex and grid items) */
     u32 under;                /* the colour behind this box (the nearest ancestor background), for alpha */
     int rgap;                 /* flex/grid: space between lines (row-gap) */
     int basis, basis_pct;     /* flex-basis: px, or tenths of a percent */

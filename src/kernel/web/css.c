@@ -591,7 +591,7 @@ enum {
     PR_MARGIN_INLINE, PR_MARGIN_BLOCK, PR_PADDING_INLINE, PR_PADDING_BLOCK,
     PR_POSITION, PR_FLOAT, PR_OPACITY, PR_CLIP, PR_CLIPPATH, PR_TOP, PR_RIGHT, PR_BOTTOM, PR_LEFT, PR_INSET,
     PR_TRANSFORM, PR_CONTENT_VIS, PR_MASK, PR_GRIDROW, PR_GRIDAREAS, PR_GRIDCOLSTART, PR_GRIDCOLEND,
-    PR_BGPOS, PR_BGSIZE, PR_BGREPEAT, PR_CONTENT, PR_CLEAR
+    PR_BGPOS, PR_BGSIZE, PR_BGREPEAT, PR_CONTENT, PR_CLEAR, PR_ALIGNITEMS, PR_ALIGNSELF, PR_ORDER, PR_PLACEITEMS
 };
 static const struct { const char *name; u8 id; } props[] = {
     { "color", PR_COLOR }, { "background", PR_BG }, { "background-color", PR_BGCOLOR },
@@ -637,7 +637,9 @@ static const struct { const char *name; u8 id; } props[] = {
     { "clip-path", PR_CLIPPATH }, { "left", PR_LEFT }, { "top", PR_TOP }, { "right", PR_RIGHT }, { "bottom", PR_BOTTOM },
     { "inset", PR_INSET }, { "inset-inline-start", PR_LEFT }, { "inset-inline-end", PR_RIGHT },
     { "inset-block-start", PR_TOP }, { "inset-block-end", PR_BOTTOM }, { "transform", PR_TRANSFORM },
-    { "content-visibility", PR_CONTENT_VIS }, { "content", PR_CONTENT }, { "clear", PR_CLEAR }, { "mask", PR_MASK }, { "mask-image", PR_MASK },
+    { "content-visibility", PR_CONTENT_VIS }, { "content", PR_CONTENT }, { "clear", PR_CLEAR },
+    { "align-items", PR_ALIGNITEMS }, { "align-self", PR_ALIGNSELF }, { "order", PR_ORDER }, { "place-items", PR_PLACEITEMS },
+    { "place-self", PR_ALIGNSELF }, { "mask", PR_MASK }, { "mask-image", PR_MASK },
 };
 static u8 prop_id(const char *s, u32 n){
     char b[40];
@@ -2136,17 +2138,34 @@ static void apply_decl(wstyle_t *st, const wstyle_t *ps, int psize, const decl_t
         if(!word_eq(v, "auto") && !word_eq(v, "content") && eval_len(v, vl, base, &l)){ st->basis = l.px; st->basis_pct = l.pct; st->basis_set = 1; }
         break; }
     case PR_FLEXWRAP: st->flex_wrap = word_eq(v, "wrap") || word_eq(v, "wrap-reverse"); break;
-    case PR_FLEXDIR: st->flex_col = starts_n(v, vl, "column"); break;
+    case PR_FLEXDIR: st->flex_col = starts_n(v, vl, "column"); st->flex_rev = strstr(v, "reverse") != NULL; break;
     case PR_FLEXFLOW:
         st->flex_col = strstr(v, "column") != NULL;
+        st->flex_rev = strstr(v, "reverse") != NULL;
         st->flex_wrap = strstr(v, "wrap") != NULL && strstr(v, "nowrap") == NULL;
         break;
     case PR_JUSTIFY:
         st->justify = word_eq(v, "center") ? 1 :
                       (word_eq(v, "flex-end") || word_eq(v, "end") || word_eq(v, "right")) ? 2 :
                       word_eq(v, "space-between") ? 3 :
-                      (word_eq(v, "space-around") || word_eq(v, "space-evenly")) ? 4 : 0;
+                      word_eq(v, "space-around") ? 4 : word_eq(v, "space-evenly") ? 5 : 0;
         break;
+    case PR_ALIGNITEMS: case PR_PLACEITEMS: case PR_ALIGNSELF: {
+        /* the first word: place-items / place-self give align-* first */
+        u32 e = 0;
+        while(e < vl && v[e] != ' ') e++;
+        int a = (eq_n(v, e, "center") || eq_n(v, e, "safe")) ? 2 :
+                (eq_n(v, e, "flex-end") || eq_n(v, e, "end") || eq_n(v, e, "self-end") || eq_n(v, e, "last")) ? 3 :
+                (eq_n(v, e, "flex-start") || eq_n(v, e, "start") || eq_n(v, e, "self-start") || eq_n(v, e, "baseline") ||
+                 eq_n(v, e, "first")) ? 1 :
+                eq_n(v, e, "stretch") ? 4 : 0;
+        if(d->id == PR_ALIGNSELF) st->align_self = (u8)a;
+        else st->align_items = (u8)(a == 4 ? 0 : a);
+        break; }
+    case PR_ORDER: {
+        u32 i = 0; int m;
+        if(num_milli(v, vl, &i, &m)) st->order = (short)(m / 1000);
+        break; }
     case PR_BOXSIZING: st->border_box = word_eq(v, "border-box"); break;
     case PR_OVERFLOW: st->ovf_hidden = starts_n(v, vl, "hidden") || starts_n(v, vl, "clip"); break;
     case PR_VISIBILITY:
@@ -2772,6 +2791,7 @@ void css_apply(wnode_t *n, wnode_t *parent){
         st->max_w = st->max_pct = st->max_vw = 0; st->min_w = 0;
         st->auto_lr = 0; st->border_box = 0;
         st->flex_grow = st->flex_wrap = st->flex_col = st->justify = 0;
+        st->align_items = st->align_self = st->flex_rev = 0; st->order = 0;
         st->basis = st->basis_pct = 0; st->no_shrink = 0; st->basis_set = 0;
         st->grid = 0; st->grid_cols = 0; st->grid_min = 0;
         st->gareas = NULL; st->garea = NULL; st->gcs = st->gce = st->grs = st->gre = 0; st->gcspan = st->grspan = 0;
