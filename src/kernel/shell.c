@@ -597,8 +597,9 @@ int shell_run(void){
                 u32 ip, gw; u8 mac[6];
                 net_info(&ip, &gw, mac);
                 nic_t *n = nic_get();
-                console_printf("%s  mac %02x:%02x:%02x:%02x:%02x:%02x\n", n->name,
-                               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                console_printf("%s  mac %02x:%02x:%02x:%02x:%02x:%02x  link %s\n", n->name,
+                               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                               !n->link ? "?" : n->link() ? "up" : "down");
                 u32 dns = net_dns();
                 console_printf("  inet %u.%u.%u.%u  gateway %u.%u.%u.%u  dns %u.%u.%u.%u\n",
                                ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,

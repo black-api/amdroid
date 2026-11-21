@@ -78,6 +78,8 @@ C_SRCS = \
  src/kernel/drivers/hda.c \
  src/kernel/drivers/e1000.c \
  src/kernel/drivers/virtio_net.c \
+ src/kernel/drivers/rtl8169.c \
+ src/kernel/drivers/rtl8139.c \
  src/kernel/drivers/xhci.c \
  src/kernel/net/nic.c \
  src/kernel/net/net.c \
