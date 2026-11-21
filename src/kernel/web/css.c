@@ -580,11 +580,13 @@ enum {
     PR_PADDING, PR_PADDING_T, PR_PADDING_R, PR_PADDING_B, PR_PADDING_L,
     PR_MARGIN_INLINE, PR_MARGIN_BLOCK, PR_PADDING_INLINE, PR_PADDING_BLOCK,
     PR_POSITION, PR_FLOAT, PR_OPACITY, PR_CLIP, PR_CLIPPATH, PR_TOP, PR_RIGHT, PR_BOTTOM, PR_LEFT, PR_INSET,
-    PR_TRANSFORM, PR_CONTENT_VIS, PR_MASK, PR_GRIDROW, PR_GRIDAREAS, PR_GRIDCOLSTART, PR_GRIDCOLEND
+    PR_TRANSFORM, PR_CONTENT_VIS, PR_MASK, PR_GRIDROW, PR_GRIDAREAS, PR_GRIDCOLSTART, PR_GRIDCOLEND,
+    PR_BGPOS, PR_BGSIZE, PR_BGREPEAT
 };
 static const struct { const char *name; u8 id; } props[] = {
     { "color", PR_COLOR }, { "background", PR_BG }, { "background-color", PR_BGCOLOR },
-    { "background-image", PR_BGIMAGE }, { "font", PR_FONT }, { "font-size", PR_FONTSIZE },
+    { "background-image", PR_BGIMAGE }, { "background-position", PR_BGPOS }, { "background-size", PR_BGSIZE },
+    { "background-repeat", PR_BGREPEAT }, { "font", PR_FONT }, { "font-size", PR_FONTSIZE },
     { "font-weight", PR_FONTWEIGHT }, { "font-style", PR_FONTSTYLE }, { "white-space", PR_WHITESPACE },
     { "text-decoration", PR_TEXTDEC }, { "text-decoration-line", PR_TEXTDEC }, { "text-align", PR_TEXTALIGN },
     { "text-transform", PR_TEXTTRANSFORM }, { "text-indent", PR_TEXTINDENT }, { "display", PR_DISPLAY },
@@ -1667,6 +1669,142 @@ static void text_dec(wstyle_t *st, const char *v){
 
 /* ================= applying ================= */
 
+/* For the SVG renderer: a colour in a plain (lower case) string. */
+int css_parse_color(const char *lower, u32 n, u32 *rgb){
+    u32 c;
+    if(!parse_color(lower, n, &c, 0xFFFFFF)) return 0;
+    if(c == COL_TRANSPARENT) return 2;
+    if(c == COL_CURRENT) return 3;
+    if(c == COL_INHERIT) return 0;
+    *rgb = c & 0xFFFFFF;
+    return 1;
+}
+
+/* ---- background pictures: url(), size, position, repeat (the first layer only) ---- */
+static void bg_defaults(wstyle_t *st){
+    st->bg_repeat = 3; st->bg_size_mode = 0;
+    st->bg_w = st->bg_h = -1; st->bg_wp = st->bg_hp = 0;
+    st->bg_x = st->bg_y = 0; st->bg_xp = st->bg_yp = 0;
+}
+
+/* the URL inside url(...), registered in the image table; 0 when it is not usable */
+static int bg_register_url(const char *s, u32 n){
+    if(n < 5) return 0;
+    const char *p = s + 4, *e = s + n;                  /* after "url(" */
+    while(p < e && (c_ws(*p))) p++;
+    char q = 0;
+    if(p < e && (*p == '"' || *p == '\'')) q = *p++;
+    char buf[1024]; u32 k = 0;
+    while(p < e && k + 1 < sizeof buf){
+        if(q ? *p == q : (*p == ')' || c_ws(*p))) break;
+        if(!q && *p == ')') break;
+        buf[k++] = *p++;
+    }
+    buf[k] = 0;
+    if(!k) return 0;
+    int i = img_register(buf);
+    return i >= 0 ? i + 1 : 0;
+}
+
+static int is_pos_kw(const char *w, u32 n){
+    return eq_n(w, n, "left") || eq_n(w, n, "right") || eq_n(w, n, "top") || eq_n(w, n, "bottom") || eq_n(w, n, "center");
+}
+static int is_lenish(const char *w, u32 n){
+    if(!n) return 0;
+    return c_digit(w[0]) || w[0] == '.' || w[0] == '-' || w[0] == '+' || starts_n(w, n, "calc(") || w[n - 1] == '%';
+}
+/* one position component: left/center/right (x) or top/center/bottom (y) or a length */
+static int pos_component(wstyle_t *st, const char *w, u32 n, int *px, short *pct){
+    *px = 0; *pct = 0;
+    if(eq_n(w, n, "left") || eq_n(w, n, "top")) return 1;
+    if(eq_n(w, n, "center")){ *pct = 500; return 1; }
+    if(eq_n(w, n, "right") || eq_n(w, n, "bottom")){ *pct = 1000; return 1; }
+    len_t l;
+    if(!eval_len(w, n, st->size, &l)) return 0;
+    *px = l.px + view_width * l.vw / 1000; *pct = (short)l.pct;
+    return 1;
+}
+static void bg_set_pos(wstyle_t *st, const char **w, u32 *wl, int n){
+    if(n < 1) return;
+    const char *a = w[0], *b = n > 1 ? w[1] : NULL; u32 al = wl[0], bl = n > 1 ? wl[1] : 0;
+    int swap = (b && (eq_n(a, al, "top") || eq_n(a, al, "bottom") || eq_n(b, bl, "left") || eq_n(b, bl, "right"))) || (!b && (eq_n(a, al, "top") || eq_n(a, al, "bottom")));
+    if(!b){
+        if(swap){ pos_component(st, a, al, &st->bg_y, &st->bg_yp); st->bg_x = 0; st->bg_xp = 500; }
+        else { pos_component(st, a, al, &st->bg_x, &st->bg_xp); st->bg_y = 0; st->bg_yp = 500; }
+        return;
+    }
+    if(swap){ const char *t = a; a = b; b = t; u32 tl = al; al = bl; bl = tl; }
+    pos_component(st, a, al, &st->bg_x, &st->bg_xp);
+    pos_component(st, b, bl, &st->bg_y, &st->bg_yp);
+}
+static void bg_set_size(wstyle_t *st, const char **w, u32 *wl, int n){
+    if(n < 1) return;
+    if(eq_n(w[0], wl[0], "cover")){ st->bg_size_mode = 1; return; }
+    if(eq_n(w[0], wl[0], "contain")){ st->bg_size_mode = 2; return; }
+    st->bg_size_mode = 0;
+    st->bg_w = st->bg_h = -1; st->bg_wp = st->bg_hp = 0;
+    for(int k = 0; k < n && k < 2; k++){
+        int *dst = k == 0 ? &st->bg_w : &st->bg_h; short *dp = k == 0 ? &st->bg_wp : &st->bg_hp;
+        if(eq_n(w[k], wl[k], "auto")) continue;
+        len_t l;
+        if(!eval_len(w[k], wl[k], st->size, &l)) continue;
+        *dst = l.px + view_width * l.vw / 1000; *dp = (short)l.pct;
+        st->bg_size_mode = 3;
+    }
+}
+static int bg_set_repeat(wstyle_t *st, const char *w, u32 wl){
+    if(eq_n(w, wl, "no-repeat")){ st->bg_repeat = 0; return 1; }
+    if(eq_n(w, wl, "repeat") || eq_n(w, wl, "round") || eq_n(w, wl, "space")){ st->bg_repeat = 3; return 1; }
+    if(eq_n(w, wl, "repeat-x")){ st->bg_repeat = 1; return 1; }
+    if(eq_n(w, wl, "repeat-y")){ st->bg_repeat = 2; return 1; }
+    return 0;
+}
+
+/* The first layer of a background (shorthand or one of its parts). raw is the original text
+ * (url() is case sensitive), v the lower case copy; same length. */
+static void bg_layer(wstyle_t *st, const char *raw, const char *v, u32 vl, int shorthand){
+    u32 end = vl; int d = 0;
+    for(u32 i = 0; i < vl; i++){
+        if(v[i] == '(') d++; else if(v[i] == ')') d--;
+        else if(v[i] == ',' && d == 0){ end = i; break; }
+    }
+    const char *w[14]; u32 wl[14];
+    int cnt = words(v, end, w, wl, 14);
+    const char *pos[4]; u32 posl[4]; int np = 0;
+    const char *sz[2]; u32 szl[2]; int ns = 0;
+    int after = 0;
+    for(int k = 0; k < cnt; k++){
+        const char *t = w[k]; u32 tl = wl[k];
+        if(starts_n(t, tl, "url(")){
+            if(shorthand || 1){ if(!st->bg_idx) st->bg_idx = bg_register_url(raw + (t - v), tl); }
+            continue;
+        }
+        if(tl && t[tl - 1] == ')' && (starts_n(t, tl, "linear-") || starts_n(t, tl, "radial-") || starts_n(t, tl, "conic-") ||
+           starts_n(t, tl, "repeating-") || starts_n(t, tl, "-webkit-") || starts_n(t, tl, "image-set(") || starts_n(t, tl, "rgb") || starts_n(t, tl, "hsl"))) continue;
+        if(!shorthand) {
+            /* a lone background-position / -size / -repeat value list */
+        }
+        if(bg_set_repeat(st, t, tl)) continue;
+        if(eq_n(t, tl, "/")){ after = 1; continue; }
+        /* "center/auto" or "0 0/36px": a slash inside a word */
+        u32 sl = 0; while(sl < tl && t[sl] != '/') sl++;
+        if(sl < tl && shorthand){
+            if(sl && np < 4 && (is_pos_kw(t, sl) || is_lenish(t, sl))){ pos[np] = t; posl[np] = sl; np++; }
+            after = 1;
+            if(sl + 1 < tl && ns < 2){ sz[ns] = t + sl + 1; szl[ns] = tl - sl - 1; ns++; }
+            continue;
+        }
+        if(eq_n(t, tl, "auto") || eq_n(t, tl, "cover") || eq_n(t, tl, "contain")){ if(ns < 2){ sz[ns] = t; szl[ns] = tl; ns++; } continue; }
+        if(is_pos_kw(t, tl) || is_lenish(t, tl)){
+            if(after){ if(ns < 2){ sz[ns] = t; szl[ns] = tl; ns++; } }
+            else if(np < 4){ pos[np] = t; posl[np] = tl; np++; }
+        }
+    }
+    (void)shorthand;
+    if(np) bg_set_pos(st, pos, posl, np > 2 ? 2 : np);
+    if(ns) bg_set_size(st, sz, szl, ns);
+}
+
 #define VBUF 1024
 
 /* Applies one declaration. ps is the parent's style (for inherit), psize its font size. */
@@ -1693,8 +1831,8 @@ static void apply_decl(wstyle_t *st, const wstyle_t *ps, int psize, const decl_t
         if(initial){ st->color = ps ? ps->color : 0; break; }
         if(parse_color(v, vl, &c, st->bg_set ? st->bg : st->under)){
             if(c == COL_INHERIT || c == COL_CURRENT){ if(ps) st->color = ps->color; }
-            else if(c != COL_TRANSPARENT) st->color = c;
-            else st->color = st->bg_set ? st->bg : st->under;          /* invisible text */
+            else if(c != COL_TRANSPARENT){ st->color = c; st->color_clear = 0; }
+            else { st->color = st->bg_set ? st->bg : st->under; st->color_clear = 1; }          /* invisible text */
         }
         break;
     case PR_BGCOLOR:
@@ -1707,7 +1845,10 @@ static void apply_decl(wstyle_t *st, const wstyle_t *ps, int psize, const decl_t
         }
         break;
     case PR_BG: case PR_BGIMAGE: {
-        if(word_eq(v, "none") || initial){ if(d->id == PR_BG) st->bg_set = 0; st->bg_img = 0; break; }
+        if(word_eq(v, "none") || initial){ if(d->id == PR_BG){ st->bg_set = 0; bg_defaults(st); } st->bg_img = 0; st->bg_idx = 0; break; }
+        if(d->id == PR_BG) bg_defaults(st);
+        st->bg_idx = 0;
+        bg_layer(st, raw, v, vl, d->id == PR_BG);
         const char *w[12]; u32 wl[12];
         int cnt = words(v, vl, w, wl, 12);
         int got = 0;
@@ -1737,6 +1878,28 @@ static void apply_decl(wstyle_t *st, const wstyle_t *ps, int psize, const decl_t
             }
         }
         if(d->id == PR_BG && !got && !st->bg_img) st->bg_set = 0;   /* "background: 0 0" and the like reset it */
+        break; }
+    case PR_BGPOS: {
+        const char *w[4]; u32 wl[4];
+        u32 end = vl; int dd = 0;
+        for(u32 i = 0; i < vl; i++){ if(v[i] == '(') dd++; else if(v[i] == ')') dd--; else if(v[i] == ',' && dd == 0){ end = i; break; } }
+        int cnt = words(v, end, w, wl, 4);
+        if(cnt > 2) cnt = 2;
+        bg_set_pos(st, w, wl, cnt);
+        break; }
+    case PR_BGSIZE: {
+        const char *w[4]; u32 wl[4];
+        u32 end = vl; int dd = 0;
+        for(u32 i = 0; i < vl; i++){ if(v[i] == '(') dd++; else if(v[i] == ')') dd--; else if(v[i] == ',' && dd == 0){ end = i; break; } }
+        int cnt = words(v, end, w, wl, 4);
+        bg_set_size(st, w, wl, cnt);
+        break; }
+    case PR_BGREPEAT: {
+        const char *w[4]; u32 wl[4];
+        int cnt = words(v, vl, w, wl, 4);
+        if(cnt >= 2 && eq_n(w[0], wl[0], "repeat") && eq_n(w[1], wl[1], "no-repeat")) st->bg_repeat = 1;
+        else if(cnt >= 2 && eq_n(w[0], wl[0], "no-repeat") && eq_n(w[1], wl[1], "repeat")) st->bg_repeat = 2;
+        else if(cnt >= 1) bg_set_repeat(st, w[0], wl[0]);
         break; }
     case PR_FONTSIZE: {
         int px;
@@ -2408,7 +2571,7 @@ void css_apply(wnode_t *n, wnode_t *parent){
         /* the colour behind this box: the parent's background, or what is behind the parent */
         st->under = ps->bg_set ? ps->bg : ps->under;
         /* properties that are not inherited */
-        st->bg_set = 0; st->bg_img = 0;
+        st->bg_set = 0; st->bg_img = 0; st->bg_idx = 0; st->bg_stand = 0; bg_defaults(st);
         memset(st->m, 0, sizeof st->m);
         memset(st->p, 0, sizeof st->p);
         st->underline = 0; st->strike = 0;
@@ -2428,6 +2591,7 @@ void css_apply(wnode_t *n, wnode_t *parent){
         st->border_color = st->color;
     } else {
         memset(st, 0, sizeof *st);
+        bg_defaults(st);
         st->color = 0x000000;
         st->under = 0xFFFFFF;
         st->size = CSSPX(16);
@@ -2511,13 +2675,14 @@ void css_apply(wnode_t *n, wnode_t *parent){
     if(st->hide_text && st->width > 0 && st->width <= CSSPX(2)) st->display = W_NONE;
     if(n->hidden) st->display = W_NONE;
     if(n->force_show && st->display == W_NONE) st->display = W_BLOCK;
-    if(st->masked){ st->bg_set = 0; st->bg_img = 0; }         /* a masked icon: its shape cannot be drawn */
-    /* a background picture we cannot draw: keep light text readable on a dark stand-in */
-    if(st->bg_img && !st->bg_set){
+    if(st->masked){ st->bg_set = 0; st->bg_img = 0; st->bg_idx = 0; }         /* a masked icon: its shape cannot be drawn */
+    /* a background picture not (yet) drawn: keep light text readable on a dark stand-in. Not for
+     * boxes whose text is invisible anyway (logos, icons hide their words). */
+    if(st->bg_img && !st->bg_set && !st->hide_text && !st->color_clear){
         u32 c = st->color;
         int lum = (int)(((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) / 10;
         int ulum = (int)(((st->under >> 16) & 255) * 3 + ((st->under >> 8) & 255) * 6 + (st->under & 255)) / 10;
-        if(lum > 170 && ulum > 170){ st->bg_set = 1; st->bg = 0x3A4048; }
+        if(lum > 170 && ulum > 170){ st->bg_set = 1; st->bg = 0x3A4048; st->bg_stand = 1; }
     }
     if(st->size < 1) st->size = 1;
 }

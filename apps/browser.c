@@ -1062,7 +1062,7 @@ static void fetch_connect(fetch_t *f){
     cat_n(req, u.https ? host : u.host, sizeof req);
     /* images: only formats the engine decodes (no WebP/AVIF), so servers pick one of those */
     cat_n(req, f->kind == 1 ? "\r\nUser-Agent: BRO-weser\r\nAccept: text/css,*/*;q=0.1\r\nConnection: close\r\n\r\n"
-             : f->kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/png,image/jpeg,image/gif,image/bmp;q=0.9,*/*;q=0.1\r\nConnection: close\r\n\r\n"
+             : f->kind == 2 ? "\r\nUser-Agent: BRO-weser\r\nAccept: image/svg+xml,image/png,image/jpeg,image/gif,image/bmp;q=0.9,*/*;q=0.1\r\nConnection: close\r\n\r\n"
                             : "\r\nUser-Agent: BRO-weser\r\nAccept: */*\r\nConnection: close\r\n\r\n", sizeof req);
     if(tcp_send(f->sock, req, ui_len(req)) != 0){ fetch_done(f, 0, NULL, 0); return; }
     f->cap = 64 * 1024;
@@ -1485,8 +1485,13 @@ static void media_step(void){
 /* What the window showed when it was last drawn: a change means it is drawn again. */
 static struct { u32 frame, title, console, error, state; int alive, ld; u64 phase; } seen;
 
+/* a voice command's address or search words, opened on the next tick (the window may be new) */
+static char voice_go[URL_MAX];
+void browser_open_text(const char *s){ ui_copy(voice_go, s, sizeof voice_go); }
+
 static void b_tick(void){
     if(!last_body.w) return;                                    /* not drawn yet: the page size is not known */
+    if(voice_go[0]){ char u[URL_MAX]; ui_copy(u, voice_go, sizeof u); voice_go[0] = 0; go(u, 1, 0); return; }
     if(!have_page && ld == LD_IDLE) go("about:start", 0, -1);
     ld_step();                                                  /* loading goes on while minimized */
     husser_pump();

@@ -19,6 +19,7 @@ typedef struct {
     u32 w, h;
     int state;              /* 0 pending, 1 ready, 2 failed */
     int wanted;             /* the layout reached it (images in hidden menus are never fetched) */
+    int ss;                 /* pixels per page px: an SVG is drawn larger than its size, for sharpness */
 } image_t;
 static image_t images[IMAGES_MAX];
 static int nimages = 0;
@@ -50,6 +51,14 @@ int img_register(const char *url){
     images[nimages].state = 0;
     nimages++;
     return nimages - 1;
+}
+
+int web_image_natural(int i, u32 *w, u32 *h){
+    if(i < 0 || i >= nimages || images[i].state != 1) return 0;
+    int ss = images[i].ss > 0 ? images[i].ss : 1;
+    if(w) *w = (images[i].w + (u32)ss / 2) / (u32)ss;
+    if(h) *h = (images[i].h + (u32)ss / 2) / (u32)ss;
+    return 1;
 }
 
 int web_image_count(void){ return nimages; }
@@ -1083,15 +1092,24 @@ int web_add_image(int idx, const char *data, u32 len){
     if(im->state == 1) return 0;                        /* already decoded */
     u32 *px = NULL; u32 w = 0, h = 0;
     const u8 *d = (const u8 *)data;
-    int ok = -1;
-    if(len >= 8 && d[0] == 0x89 && d[1] == 'P') ok = png_decode(d, len, &px, &w, &h);
+    int ok = -1, ss = 1;
+    int is_svg = 0;
+    if(len >= 5){
+        /* "<svg" or an XML header with an <svg> tag soon after it (after a BOM or spaces) */
+        u32 lim = len < 1024 ? len : 1024;
+        for(u32 k = 0; k + 4 <= lim && !is_svg; k++)
+            if(d[k] == '<' && (d[k + 1] | 32) == 's' && (d[k + 2] | 32) == 'v' && (d[k + 3] | 32) == 'g' && (d[k + 4] == ' ' || d[k + 4] == '>' || d[k + 4] == '\n' || d[k + 4] == '\t' || d[k + 4] == '\r')) is_svg = 1;
+        if(is_svg && d[0] == 0x89) is_svg = 0;
+    }
+    if(is_svg) ok = svg_decode(d, len, &px, &w, &h, &ss);
+    else if(len >= 8 && d[0] == 0x89 && d[1] == 'P') ok = png_decode(d, len, &px, &w, &h);
     else if(len >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) ok = jpeg_decode(d, len, &px, &w, &h);
     else if(len >= 2 && d[0] == 'B' && d[1] == 'M') ok = bmp_decode(d, len, &px, &w, &h);
     else if(len >= 6 && !memcmp(d, "GIF8", 4)) ok = gif_decode(d, len, &px, &w, &h);
     if(ok != 0){ im->state = 2; return -1; }
     if(img_bytes + w * h * 4 > IMG_BUDGET){ kfree(px); im->state = 2; return -1; }   /* the page has enough pictures */
     if(im->pixels) kfree(im->pixels);
-    im->pixels = px; im->w = w; im->h = h; im->state = 1;
+    im->pixels = px; im->w = w; im->h = h; im->state = 1; im->ss = ss;
     img_bytes += w * h * 4;
     return 0;
 }

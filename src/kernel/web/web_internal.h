@@ -61,7 +61,16 @@ typedef struct wstyle {
     u8 upper;                 /* text-transform: 1 uppercase, 2 lowercase (inherited) */
     u8 trow, tcell;           /* display: table-row / table-cell */
     u8 opacity0, clipped, offscreen, scale0;   /* ways a page hides an element */
-    u8 bg_img;                /* a background image (url) that is not drawn */
+    u8 bg_img;                /* a background image (url, gradient...) was given */
+    u8 bg_stand;              /* bg_set is only a dark stand-in for a picture (light text on a hero image) */
+    u8 color_clear;           /* the text colour is transparent: the text is only there for screen readers */
+    u8 bg_repeat;             /* background-repeat: bit 0 across, bit 1 down (default both) */
+    u8 bg_size_mode;          /* 0 auto, 1 cover, 2 contain, 3 lengths */
+    int bg_idx;               /* the image table entry of background-image: url(...), plus one (0 = none) */
+    int bg_w, bg_h;           /* background-size lengths (px; -1 = auto) */
+    short bg_wp, bg_hp;       /* ... and tenths of a percent of the box */
+    int bg_x, bg_y;           /* background-position (px) */
+    short bg_xp, bg_yp;       /* ... and tenths of a percent (of the room left around the picture) */
     u8 no_shrink;             /* flex-shrink: 0 */
     u8 max_h0;                /* max-height: 0 */
     u8 strike;                /* text-decoration: line-through */
@@ -122,6 +131,8 @@ void web_pool_roots(void);            /* registers the node pool with the script
 wnode_t *web_new_node(void);
 /* Images: registered at parse time (index+1 stored in the node), decoded as they arrive. */
 int img_register(const char *url);
+int css_parse_color(const char *lower, u32 n, u32 *rgb);   /* 1 colour, 2 none, 3 currentColor, 0 not a colour */
+int svg_decode(const u8 *data, u32 len, u32 **out_px, u32 *out_w, u32 *out_h, int *ss);
 void web_images_reset(void);
 /* Generic attribute store for names without a dedicated field. */
 void wnode_attr_set(wnode_t *n, const char *name, const char *val, u32 vlen);

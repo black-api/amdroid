@@ -134,6 +134,63 @@ static void draw_text(int x, int y, const char *s, u32 color, u32 s4, int italic
     }
 }
 
+/* The picture over the source box [sx0, sx1) x [sy0, sy1) (pixels), averaged when it covers more
+ * than one: up to 4 x 4 samples, weighted by how opaque they are. Result: top byte = transparency. */
+static u32 sample_box(const u32 *px, u32 iw, u32 ih, u32 sx0, u32 sx1, u32 sy0, u32 sy1){
+    if(sx1 <= sx0) sx1 = sx0 + 1;
+    if(sy1 <= sy0) sy1 = sy0 + 1;
+    u32 nx = sx1 - sx0 > 4 ? 4 : sx1 - sx0, ny = sy1 - sy0 > 4 ? 4 : sy1 - sy0;
+    u32 sa = 0, sr = 0, sg = 0, sb = 0;
+    for(u32 j = 0; j < ny; j++){
+        u32 y = sy0 + (sy1 - sy0) * (2 * j + 1) / (2 * ny);
+        if(y >= ih) y = ih - 1;
+        for(u32 i = 0; i < nx; i++){
+            u32 x = sx0 + (sx1 - sx0) * (2 * i + 1) / (2 * nx);
+            if(x >= iw) x = iw - 1;
+            u32 p = px[(u64)y * iw + x];
+            u32 a = 255 - (p >> 24);
+            sa += a; sr += (p >> 16 & 255) * a; sg += (p >> 8 & 255) * a; sb += (p & 255) * a;
+        }
+    }
+    u32 n = nx * ny;
+    if(sa == 0) return 0xFF000000u;
+    u32 r = sr / sa, g = sg / sa, b = sb / sa, a = sa / n;
+    return ((255 - a) << 24) | (r << 16) | (g << 8) | b;
+}
+
+static void put_px(int dx, int dy, u32 p){
+    u32 t = p >> 24;
+    u32 *dst = (u32 *)((u8 *)vram + (u64)dy * VP_PITCH * 4);
+    if(t == 0) dst[dx] = p;
+    else if(t < 255) blendpx((u32)dx, (u32)dy, p & 0xFFFFFF, 256 - t);
+}
+
+/* A CSS background picture: clipped to (x, y, w, h), drawn dw x dh big with its corner at
+ * (x + ox, y + oy), repeated across and/or down. */
+static void blit_bgimg(const web_cmd_t *c, int y, const u32 *px, u32 iw, u32 ih){
+    int dw = c->scale, dh = c->bold;
+    if(dw <= 0 || dh <= 0 || c->w <= 0 || c->h <= 0 || !px) return;
+    int x0 = c->x < 0 ? 0 : c->x, y0 = y < 0 ? 0 : y;
+    int x1 = c->x + c->w, y1 = y + c->h;
+    if(x1 > (int)vp_w) x1 = (int)vp_w;
+    if(y1 > (int)vp_h) y1 = (int)vp_h;
+    if(x1 <= x0 || y1 <= y0) return;
+    int rep_x = c->italic & 1, rep_y = c->italic & 2;
+    int small = (u32)dw >= iw && (u32)dh >= ih;                    /* not shrunk: one sample a pixel */
+    for(int dy = y0; dy < y1; dy++){
+        int v = dy - (y + c->oy);
+        if(rep_y){ v %= dh; if(v < 0) v += dh; } else if(v < 0 || v >= dh) continue;
+        u32 sy0 = (u32)((i64)v * ih / dh), sy1 = (u32)((i64)(v + 1) * ih / dh);
+        for(int dx = x0; dx < x1; dx++){
+            int u = dx - (c->x + c->ox);
+            if(rep_x){ u %= dw; if(u < 0) u += dw; } else if(u < 0 || u >= dw) continue;
+            u32 sx0 = (u32)((i64)u * iw / dw), sx1 = (u32)((i64)(u + 1) * iw / dw);
+            u32 p = small ? px[(u64)(sy0 >= ih ? ih - 1 : sy0) * iw + (sx0 >= iw ? iw - 1 : sx0)] : sample_box(px, iw, ih, sx0, sx1, sy0, sy1);
+            put_px(dx, dy, p);
+        }
+    }
+}
+
 static void blit_image(const web_cmd_t *c, const u32 *px, u32 iw, u32 ih){
     /* nearest neighbour, scaled to c->w x c->h, clipped to the viewport. The top byte of a
        pixel is its transparency: 0 opaque, 255 clear, in between blended over the page. */
@@ -146,6 +203,16 @@ static void blit_image(const web_cmd_t *c, const u32 *px, u32 iw, u32 ih){
     if(x1 > (int)vp_w) x1 = (int)vp_w;
     if(y1 > (int)vp_h) y1 = (int)vp_h;
     if(x1 <= x0) return;
+    if(iw > (u32)dw * 3 / 2 || ih > (u32)dh * 3 / 2){          /* shrunk a lot: average, do not skip pixels */
+        for(int dy = y0; dy < y1; dy++){
+            u32 sy0 = (u32)((i64)(dy - c->y) * ih / dh), sy1 = (u32)((i64)(dy - c->y + 1) * ih / dh);
+            for(int dx = x0; dx < x1; dx++){
+                u32 sx0 = (u32)((i64)(dx - c->x) * iw / dw), sx1 = (u32)((i64)(dx - c->x + 1) * iw / dw);
+                put_px(dx, dy, sample_box(px, iw, ih, sx0, sx1, sy0, sy1));
+            }
+        }
+        return;
+    }
     static u32 sxs[HUSSER_MAX_W];            /* the source column of each target column */
     for(int dx = x0; dx < x1; dx++){
         u32 sx = (u32)(((i64)(dx - c->x) * (i64)iw) / (i64)dw);
@@ -177,6 +244,12 @@ void painter_cmds(const web_cmd_t *cmds, int n, int scroll, const void *hover_no
             if(x1 > (int)vp_w) x1 = (int)vp_w;
             if(y1 > (int)vp_h) y1 = (int)vp_h;
             if(x1 > x0 && y1 > y0) pxfill((u32)x0, (u32)y0, (u32)(x1 - x0), (u32)(y1 - y0), c->color);
+            continue;
+        }
+        if(c->kind == WEB_CMD_BGIMG){
+            u32 iw = 0, ih = 0;
+            const u32 *px = web_image_pixels(c->img, &iw, &ih);
+            if(px && y + c->h > 0 && y < (int)vp_h) blit_bgimg(c, y, px, iw, ih);
             continue;
         }
         if(c->kind == WEB_CMD_IMAGE){

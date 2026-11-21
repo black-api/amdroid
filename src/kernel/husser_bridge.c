@@ -169,12 +169,10 @@ int husser_open(u32 vw, u32 vh){
     /* the heap (its size was chosen with the shared header above) */
     {
         volatile husser_shm_t *hm = (volatile husser_shm_t *)(unsigned long)shm_pages[0];
-        for(u64 hv = HUSSER_HEAP_VA; hv < HUSSER_HEAP_VA + hm->heap_bytes; hv += 4096)
-            if(!vm_alloc_user_page(cr3, hv)){ vm_free_space(cr3); return -1; }
+        vm_lazy_range(cr3, HUSSER_HEAP_VA, HUSSER_HEAP_VA + hm->heap_bytes);   /* backed as it is used */
     }
     /* the stack, far above the image */
-    for(u32 i = 0; i < STACK_PAGES; i++)
-        if(!vm_alloc_user_page(cr3, STACK_TOP - (u64)(i + 1) * 4096)){ vm_free_space(cr3); return -1; }
+    vm_lazy_range(cr3, STACK_TOP - (u64)STACK_PAGES * 4096, STACK_TOP);
     /* the shared region at HUSSER_SHM_VA, marked borrowed so the process's
      * address space dies without touching it */
     u64 sva = HUSSER_SHM_VA;

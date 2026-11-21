@@ -75,6 +75,39 @@ static int bg_slot(void){
     web_cmd_t r = { .kind = WEB_CMD_RECT, .w = 0, .h = 0, .link = -1, .img = -1 };
     return emit(&r);
 }
+/* A slot for a box's background picture (drawn over its colour, under its content). */
+static int bgimg_slot(void){
+    web_cmd_t r = { .kind = WEB_CMD_BGIMG, .w = 0, .h = 0, .link = -1, .img = -1 };
+    return emit(&r);
+}
+
+/* Works out where the picture goes in the box (x, y, w, h: the padding box) and what is drawn. */
+static void bgimg_fill(int slot, const wstyle_t *st, int idx, int x, int y, int w, int h){
+    if(slot < 0 || slot >= ncmds) return;
+    u32 nw = 0, nh = 0;
+    if(!web_image_natural(idx, &nw, &nh) || !nw || !nh || w <= 0 || h <= 0){ cmds[slot].w = 0; cmds[slot].h = 0; return; }
+    int iw = CSSPX((int)nw), ih = CSSPX((int)nh);
+    int dw = iw, dh = ih;
+    if(st->bg_size_mode == 1 || st->bg_size_mode == 2){
+        long long sw = (long long)w * 1000 / iw, sh = (long long)h * 1000 / ih;
+        long long k = st->bg_size_mode == 1 ? (sw > sh ? sw : sh) : (sw < sh ? sw : sh);
+        dw = (int)((long long)iw * k / 1000); dh = (int)((long long)ih * k / 1000);
+    } else if(st->bg_size_mode == 3){
+        int ew = st->bg_w >= 0 ? st->bg_w + (int)((long long)w * st->bg_wp / 1000) : -1;
+        int eh = st->bg_h >= 0 ? st->bg_h + (int)((long long)h * st->bg_hp / 1000) : -1;
+        if(ew >= 0 && eh >= 0){ dw = ew; dh = eh; }
+        else if(ew >= 0){ dw = ew; dh = (int)((long long)ih * ew / iw); }
+        else if(eh >= 0){ dh = eh; dw = (int)((long long)iw * eh / ih); }
+    }
+    if(dw < 1) dw = 1;
+    if(dh < 1) dh = 1;
+    int ox = (int)((long long)(w - dw) * st->bg_xp / 1000) + st->bg_x;
+    int oy = (int)((long long)(h - dh) * st->bg_yp / 1000) + st->bg_y;
+    cmds[slot].x = x; cmds[slot].y = y; cmds[slot].w = w; cmds[slot].h = h;
+    cmds[slot].img = idx; cmds[slot].scale = dw; cmds[slot].bold = dh; cmds[slot].italic = st->bg_repeat;
+    cmds[slot].ox = ox; cmds[slot].oy = oy;
+}
+
 static void bg_fill(int slot, int x, int y, int w, int h, u32 color){
     if(slot < 0 || slot >= ncmds) return;
     cmds[slot].x = x; cmds[slot].y = y; cmds[slot].w = w; cmds[slot].h = h; cmds[slot].color = color;
@@ -449,6 +482,7 @@ static int img_size(wnode_t *n, int w, int *dw, int *dh){
     int idx = n->img ? n->img - 1 : -1;
     u32 iw = 0, ih = 0;
     const u32 *px = idx >= 0 ? web_image_pixels(idx, &iw, &ih) : NULL;
+    if(px) web_image_natural(idx, &iw, &ih);                      /* an SVG's own size, not its sharper raster's */
     int cw_ = st->width + (int)((long long)w * st->width_pct / 1000) + view_w * st->width_vw / 1000;
     int ch_ = st->height;
     if(cw_ > 0 && st->border_box) cw_ -= st->p[1] + st->p[3] + st->bl + st->br;
@@ -1461,7 +1495,11 @@ static void layout_node(wnode_t *n){
         else if(st->auto_lr == 1 && st->float_ != 1) { }
         else if(st->auto_lr == 2) box_x += avail - box_w;
     }
-    int slot = st->bg_set ? bg_slot() : -1;
+    int bgi = st->bg_idx ? st->bg_idx - 1 : -1;
+    int bg_ready = 0;
+    if(bgi >= 0){ img_mark_wanted(bgi); bg_ready = web_image_state(bgi) == 1; }
+    int slot = st->bg_set && !(st->bg_stand && bg_ready) ? bg_slot() : -1;
+    int img_slot = bg_ready ? bgimg_slot() : -1;           /* over the colour, under the content */
     box_slot_last = slot; box_top_last = box_top;
     int my_slot = slot;
     int abs_mark = nabs;
@@ -1514,6 +1552,7 @@ static void layout_node(wnode_t *n){
     cy += st->p[2] + bb;
     int box_h = cy - box_top;
     if(my_slot >= 0){ bg_fill(my_slot, box_x, box_top, box_w, box_h, st->bg); cmds[my_slot].dom = n; cmds[my_slot].link = cur_link; }
+    if(img_slot >= 0) bgimg_fill(img_slot, st, bgi, box_x + bl, box_top + bt, box_w - bl - br, box_h - bt - bb);
     if(st->pos && nabs > abs_mark){
         int save_cy = cy;
         process_abs(abs_mark, box_x + bl, box_top + bt, box_w - bl - br, box_h - bt - bb);

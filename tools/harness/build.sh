@@ -12,6 +12,7 @@ SRCS=(
   "$ROOT/src/kernel/web/layout.c"
   "$ROOT/src/kernel/web/jsdom.c"
   "$ROOT/src/kernel/web/image.c"
+  "$ROOT/src/kernel/web/svg.c"
   "$ROOT/src/kernel/js/js.c"
   "$ROOT/src/kernel/js/regex.c"
   "$ROOT/src/user/husser/painter.c"
