@@ -612,6 +612,8 @@ static void content_size(wnode_t *n, int *maxw, int *minw){
         if(!c->text && (c->st.display == W_NONE || c->st.pos == 2)) continue;
         content_size(c, &cm, &cn);
         if(cn > mn) mn = cn;
+        /* a <figure>'s caption wraps at the width of the picture (a table caption, in effect) */
+        if(!c->text && strcmp(c->tag, "figcaption") == 0 && strcmp(n->tag, "figure") == 0) cm = cn;
         int block = !c->text && c->st.display != W_INLINE && !c->st.float_;
         if(row){ run += cm + (k++ ? st->gap : 0); continue; }
         if(block){ if(run > best) best = run; run = 0; if(cm > best) best = cm; }
@@ -1026,7 +1028,8 @@ static void row_group(wnode_t **pc){
         if(w > W) w = W;
         if(w < 8) w = 8;
         int right = it->st.float_ == 2;
-        if((right ? rx - w < lx : lx + w > rx) && (lx > x0 || rx < x0 + W)){
+        int cleared = it->st.float_ && (((it->st.clear & 1) && lx > x0) || ((it->st.clear & 2) && rx < x0 + W));
+        if(cleared || ((right ? rx - w < lx : lx + w > rx) && (lx > x0 || rx < x0 + W))){
             nlines++; lx = x0; rx = x0 + W; line_start = i;
         }
         (void)line_start;
@@ -1051,34 +1054,45 @@ static void row_group(wnode_t **pc){
     }
     /* what is left beside the floats of the last line: the next block, or the inline run */
     int left_used = 0, right_used = 0;
-    for(int i = 0; i < k; i++) if(line_of[i] == nlines - 1 && items[i]->st.float_){
+    int all_floats = 1;
+    for(int i = 0; i < k; i++) if(!items[i]->st.float_) all_floats = 0;
+    if(all_floats && nlines > 1) line_top = top;          /* stacked floats: the text runs beside all of them */
+    for(int i = 0; i < k; i++) if((line_of[i] == nlines - 1 || all_floats) && items[i]->st.float_){
         if(items[i]->st.float_ == 1 && pos[i] + wid[i] - x0 > left_used) left_used = pos[i] + wid[i] - x0;
         if(items[i]->st.float_ == 2 && x0 + W - pos[i] > right_used) right_used = x0 + W - pos[i];
     }
     int room = W - left_used - right_used;
     if(any_float && c && (left_used || right_used) && room >= W / 4 && room >= CSSPX(120)){
+        /* what follows sits beside the floats: each block, or run of inline content, that starts
+           above their bottom is laid out in the room left (a block that starts below goes back
+           to the full width). clear, or another float, ends it. */
         int fx = x0 + left_used;
-        cx = fx; cw = room; cy = line_top;
-        nfrag = 0; used = 0; pending_space = 0;
-        if(!c->text && (c->st.display == W_BLOCK || c->st.display == W_FLEX || c->st.display == W_LISTITEM) && !rowish(c)){
-            /* the block beside the float: a margin that only made room for the float goes */
-            wstyle_t *s = &c->st;
-            int ml = s->m[3], mr = s->m[1];
-            if(left_used && ml >= left_used / 2) s->m[3] = 0;
-            if(right_used && mr >= right_used / 2) s->m[1] = 0;
-            int sw = s->width, sp = s->width_pct;
-            if(sp >= 500 || s->width > room){ s->width = 0; s->width_pct = 0; }
-            layout_node(c);
-            flush_line();
-            s->m[3] = ml; s->m[1] = mr; s->width = sw; s->width_pct = sp;
-            c = c->next;
-        } else {
-            /* inline content: up to the next block */
-            while(c && (c->text || (c->st.display == W_INLINE && !rowish(c)) || c->st.display == W_NONE)){
+        int float_bottom = line_bottom;
+        cy = line_top;
+        while(c && cy < float_bottom){
+            if(!c->text && c->st.display != W_NONE && (rowish(c) || c->st.clear)) break;
+            cx = fx; cw = room;
+            nfrag = 0; used = 0; pending_space = 0;
+            if(!c->text && (c->st.display == W_BLOCK || c->st.display == W_FLEX || c->st.display == W_LISTITEM)){
+                /* the block beside the float: a margin that only made room for the float goes */
+                wstyle_t *s = &c->st;
+                int ml = s->m[3], mr = s->m[1];
+                if(left_used && ml >= left_used / 2) s->m[3] = 0;
+                if(right_used && mr >= right_used / 2) s->m[1] = 0;
+                int sw = s->width, sp = s->width_pct;
+                if(sp >= 500 || s->width > room){ s->width = 0; s->width_pct = 0; }
                 layout_node(c);
+                flush_line();
+                s->m[3] = ml; s->m[1] = mr; s->width = sw; s->width_pct = sp;
                 c = c->next;
+            } else {
+                /* inline content: up to the next block */
+                while(c && (c->text || (c->st.display == W_INLINE && !rowish(c)) || c->st.display == W_NONE)){
+                    layout_node(c);
+                    c = c->next;
+                }
+                flush_line();
             }
-            flush_line();
         }
         if(cy > line_bottom) line_bottom = cy;
     }
@@ -1583,12 +1597,46 @@ static void layout_node(wnode_t *n){
 
 /* Computes every element's style, top-down. A hidden element's subtree is never laid out,
  * so it is not styled either. */
+static wnode_t **spliced;              /* elements whose ::before/::after are in the child list */
+static int nspliced, spliced_cap;
+
+static void pe_splice(wnode_t *n){
+    if(nspliced == spliced_cap){
+        int nc = spliced_cap ? spliced_cap * 2 : 256;
+        wnode_t **g = kmalloc(sizeof(wnode_t *) * (u32)nc);
+        if(!g) return;
+        if(spliced){ memcpy(g, spliced, sizeof(wnode_t *) * (u32)nspliced); kfree(spliced); }
+        spliced = g; spliced_cap = nc;
+    }
+    spliced[nspliced++] = n;
+    wnode_t *a = n->pe[0], *b = n->pe[1];
+    if(a && a->st.display != W_NONE){ a->next = n->first; n->first = a; if(!n->last) n->last = a; }
+    if(b && b->st.display != W_NONE){ b->next = NULL; if(n->last) n->last->next = b; else n->first = b; n->last = b; }
+}
+
+/* After the layout: the generated boxes leave the tree again (scripts see the real children). */
+static void pe_unsplice(void){
+    for(int i = nspliced - 1; i >= 0; i--){
+        wnode_t *n = spliced[i], *a = n->pe[0], *b = n->pe[1];
+        if(a && n->first == a){ n->first = a->next; if(n->last == a) n->last = NULL; a->next = NULL; }
+        if(b && n->last == b){
+            wnode_t *prev = NULL;
+            for(wnode_t *c = n->first; c && c != b; c = c->next) prev = c;
+            if(prev) prev->next = NULL; else n->first = NULL;
+            n->last = prev;
+        }
+    }
+    nspliced = 0;
+}
+
 static void style_tree(wnode_t *n, wnode_t *parent){
     int mark = css_var_mark();
     css_apply(n, parent);
     if(!n->text && n->st.display != W_NONE){
+        int pe = n->pseudo ? 0 : css_pseudo(n);
         css_number_children(n);
         for(wnode_t *c = n->first; c; c = c->next) style_tree(c, n);
+        if(pe) pe_splice(n);
     }
     css_var_pop(mark);
 }
@@ -1621,6 +1669,7 @@ int web_layout(int width){
     flush_line();
     int page_h = cy;
     if(nabs) process_abs(0, 0, 0, width, page_h);
+    pe_unsplice();
     /* positioned boxes paint over the normal flow: their commands move to the end (in order) */
     int ntop = 0;
     for(int i = 0; i < ncmds; i++) ntop += cmd_top[i];

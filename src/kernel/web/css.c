@@ -119,13 +119,14 @@ typedef struct compound {
     nth_t nth[2]; u8 nnth;
     u16 pseudo;
     u8 never;
+    u8 pe;                         /* ::before (1) or ::after (2): the rule styles that generated box */
     char comb;                     /* how it relates to the compound on its left: ' ', '>', '+', '~' */
     struct sel *nots; u8 nnots;    /* :not(a, b): none of them may match */
     struct sel *is[4]; u8 nis[4];  /* :is(a, b) :where(c): one of each list must match */
     u8 nisl;
     u64 need;                      /* signature bits an element must have to match (a quick test) */
 } compound_t;
-typedef struct sel { compound_t *c; u8 n; int spec; } sel_t;
+typedef struct sel { compound_t *c; u8 n; u8 pe; int spec; } sel_t;
 
 static int sel_stop(char ch){
     return ch == '#' || ch == '.' || ch == ':' || ch == '[' || c_ws(ch) || ch == '>' || ch == '+' ||
@@ -279,8 +280,13 @@ static int parse_selector(const char *s, u32 n, sel_t *r){
                     if(i < n) i++;
                 }
                 #define PIS(lit) eq_n(pn, pl, lit)
-                if(element || PIS("before") || PIS("after") || PIS("first-line") || PIS("first-letter")){
-                    c->never = 1;                          /* no boxes for pseudo-elements */
+                if((PIS("before") || PIS("after")) && !c->pe){
+                    c->pe = PIS("before") ? 1 : 2;         /* a generated box (see css_pseudo) */
+                    spec += 1;
+                    continue;
+                }
+                if(element || PIS("first-line") || PIS("first-letter")){
+                    c->never = 1;                          /* no boxes for the other pseudo-elements */
                     spec += 1;
                     continue;
                 }
@@ -350,6 +356,8 @@ static int parse_selector(const char *s, u32 n, sel_t *r){
         np++;
     }
     if(np == 0) return -1;
+    for(int k = 0; k < np - 1; k++) if(parts[k].pe) parts[k].never = 1;   /* "a::before b" means nothing */
+    r->pe = parts[np - 1].pe;
     r->c = ar_alloc(cur_arena, sizeof(compound_t) * (u32)np);
     if(!r->c) return -1;
     memcpy(r->c, parts, sizeof(compound_t) * (u32)np);
@@ -537,7 +545,9 @@ static int match_from(const wnode_t *n, const sel_t *r, int k){
     for(const wnode_t *a = n->parent; a; a = a->parent) if(match_from(a, r, k - 1)) return 1;
     return 0;
 }
+static int allow_pe;                    /* the cascade asks about ::before/::after rules too */
 static int sel_match(const wnode_t *n, const sel_t *r){
+    if(r->pe && !allow_pe) return 0;
     return r->n > 0 && match_from(n, r, r->n - 1);
 }
 
@@ -581,7 +591,7 @@ enum {
     PR_MARGIN_INLINE, PR_MARGIN_BLOCK, PR_PADDING_INLINE, PR_PADDING_BLOCK,
     PR_POSITION, PR_FLOAT, PR_OPACITY, PR_CLIP, PR_CLIPPATH, PR_TOP, PR_RIGHT, PR_BOTTOM, PR_LEFT, PR_INSET,
     PR_TRANSFORM, PR_CONTENT_VIS, PR_MASK, PR_GRIDROW, PR_GRIDAREAS, PR_GRIDCOLSTART, PR_GRIDCOLEND,
-    PR_BGPOS, PR_BGSIZE, PR_BGREPEAT
+    PR_BGPOS, PR_BGSIZE, PR_BGREPEAT, PR_CONTENT, PR_CLEAR
 };
 static const struct { const char *name; u8 id; } props[] = {
     { "color", PR_COLOR }, { "background", PR_BG }, { "background-color", PR_BGCOLOR },
@@ -627,7 +637,7 @@ static const struct { const char *name; u8 id; } props[] = {
     { "clip-path", PR_CLIPPATH }, { "left", PR_LEFT }, { "top", PR_TOP }, { "right", PR_RIGHT }, { "bottom", PR_BOTTOM },
     { "inset", PR_INSET }, { "inset-inline-start", PR_LEFT }, { "inset-inline-end", PR_RIGHT },
     { "inset-block-start", PR_TOP }, { "inset-block-end", PR_BOTTOM }, { "transform", PR_TRANSFORM },
-    { "content-visibility", PR_CONTENT_VIS }, { "mask", PR_MASK }, { "mask-image", PR_MASK },
+    { "content-visibility", PR_CONTENT_VIS }, { "content", PR_CONTENT }, { "clear", PR_CLEAR }, { "mask", PR_MASK }, { "mask-image", PR_MASK },
 };
 static u8 prop_id(const char *s, u32 n){
     char b[40];
@@ -690,7 +700,7 @@ static int split_decls(const char *d, u32 n, decl_t *out, int max){
 
 /* ================= rules, @media ================= */
 
-typedef struct { sel_t s; int order; u16 media; decl_t *d; u16 nd; } rule_t;
+typedef struct { sel_t s; int order; u16 media; decl_t *d; u16 nd; } rule_t;   /* s.pe: a ::before/::after rule */
 typedef struct { const char *q; u32 qn; u16 parent; u8 ok; } media_t;
 
 static rule_t *rules; static int nrules, rcap;
@@ -2140,6 +2150,10 @@ static void apply_decl(wstyle_t *st, const wstyle_t *ps, int psize, const decl_t
     case PR_FLOAT:
         st->float_ = (word_eq(v, "left") || word_eq(v, "inline-start")) ? 1 : (word_eq(v, "right") || word_eq(v, "inline-end")) ? 2 : 0;
         break;
+    case PR_CLEAR:
+        st->clear = (word_eq(v, "left") || word_eq(v, "inline-start")) ? 1 : (word_eq(v, "right") || word_eq(v, "inline-end")) ? 2 :
+                    word_eq(v, "both") ? 3 : 0;
+        break;
     case PR_OPACITY: {
         u32 i = 0; int m;
         st->opacity0 = num_milli(v, vl, &i, &m) && m <= 10 && !(i < vl && v[i] == '%' && m > 1000);
@@ -2561,6 +2575,80 @@ int css_viewport_h(void){ return view_height * DPR_DEN / DPR_NUM; }
 int css_media_matches(const char *q){ return mq_eval(q, (u32)strlen(q)); }
 
 /* Computes n->st from its parent's style, the defaults and the page's rules. */
+#define PE_MAX 256
+static int pe_list[2][PE_MAX], pe_n[2];  /* the ::before/::after rules that matched the last element */
+static const wnode_t *pe_owner;
+
+static u32 put_utf8(char *o, u32 k, u32 cap, u32 cp){
+    if(cp >= 0xE000 && cp <= 0xF8FF) return k;            /* private use: an icon font's glyph, not text */
+    if(cp == 0 || cp > 0x10FFFF) return k;
+    char b[4]; u32 n;
+    if(cp < 0x80){ b[0] = (char)cp; n = 1; }
+    else if(cp < 0x800){ b[0] = (char)(0xC0 | (cp >> 6)); b[1] = (char)(0x80 | (cp & 63)); n = 2; }
+    else if(cp < 0x10000){ b[0] = (char)(0xE0 | (cp >> 12)); b[1] = (char)(0x80 | ((cp >> 6) & 63)); b[2] = (char)(0x80 | (cp & 63)); n = 3; }
+    else { b[0] = (char)(0xF0 | (cp >> 18)); b[1] = (char)(0x80 | ((cp >> 12) & 63)); b[2] = (char)(0x80 | ((cp >> 6) & 63)); b[3] = (char)(0x80 | (cp & 63)); n = 4; }
+    if(k + n >= cap) return k;
+    memcpy(o + k, b, n);
+    return k + n;
+}
+
+/* The text of a content value: strings (with CSS escapes), attr(), quotes. counter() and url()
+ * give nothing. -1 for none / normal (no box at all). */
+static int content_text(const wnode_t *el, const char *v, u32 n, char *out, u32 cap){
+    u32 k = 0, i = 0;
+    if(eq_n(v, n, "none") || eq_n(v, n, "normal") || n == 0) return -1;
+    while(i < n){
+        char c = v[i];
+        if(c_ws(c) || c == ','){ i++; continue; }
+        if(c == '/') break;                                  /* "text" / "alt text": the alt is for readers */
+        if(c == '"' || c == '\''){
+            char q = c; i++;
+            while(i < n && v[i] != q){
+                if(v[i] == '\\' && i + 1 < n){
+                    i++;
+                    u32 cp = 0, d = 0;
+                    while(i < n && d < 6 && hexv(v[i]) >= 0){ cp = cp * 16 + (u32)hexv(v[i]); i++; d++; }
+                    if(d){ if(i < n && c_ws(v[i])) i++; k = put_utf8(out, k, cap, cp); }
+                    else if(v[i] == '\n'){ i++; }               /* an escaped newline continues the string */
+                    else { if(k + 1 < cap) out[k++] = v[i]; i++; }
+                    continue;
+                }
+                if(k + 1 < cap) out[k++] = v[i];
+                i++;
+            }
+            if(i < n) i++;
+            continue;
+        }
+        u32 b = i;
+        while(i < n && !c_ws(v[i]) && v[i] != '(' && v[i] != '"' && v[i] != '\'') i++;
+        const char *w = v + b; u32 wl = i - b;
+        u32 as = i, ae = i;
+        if(i < n && v[i] == '('){
+            int d = 0;
+            as = i + 1;
+            while(i < n){ if(v[i] == '(') d++; if(v[i] == ')'){ d--; if(!d) break; } i++; }
+            ae = i;
+            if(i < n) i++;
+        }
+        if(eq_n(w, wl, "attr") && el){
+            const char *an = v + as; u32 al = ae - as;
+            trim(&an, &al);
+            char nm[48];
+            if(al && al < sizeof nm){
+                for(u32 j = 0; j < al; j++) nm[j] = (char)c_lower(an[j]);
+                nm[al] = 0;
+                const char *av = node_attr(el, nm);
+                for(; av && *av && k + 1 < cap; av++) out[k++] = *av;
+            }
+        } else if(eq_n(w, wl, "open-quote")) k = put_utf8(out, k, cap, 0x201C);
+        else if(eq_n(w, wl, "close-quote")) k = put_utf8(out, k, cap, 0x201D);
+        else if(!wl) i++;                                    /* a stray character */
+        /* counter(), counters(), url(), image-set(), no-open-quote...: nothing to show */
+    }
+    out[k < cap ? k : cap - 1] = 0;
+    return (int)k;
+}
+
 void css_apply(wnode_t *n, wnode_t *parent){
     wstyle_t *st = &n->st;
     const wstyle_t *ps = parent ? &parent->st : NULL;
@@ -2584,7 +2672,7 @@ void css_apply(wnode_t *n, wnode_t *parent){
         st->basis = st->basis_pct = 0; st->no_shrink = 0; st->basis_set = 0;
         st->grid = 0; st->grid_cols = 0; st->grid_min = 0;
         st->gareas = NULL; st->garea = NULL; st->gcs = st->gce = st->grs = st->gre = 0; st->gcspan = st->grspan = 0;
-        st->inline_block = 0; st->float_ = 0; st->pos = 0; st->trow = 0; st->tcell = 0; st->contents = 0;
+        st->inline_block = 0; st->float_ = 0; st->clear = 0; st->pos = 0; st->trow = 0; st->tcell = 0; st->contents = 0;
         st->opacity0 = st->clipped = st->offscreen = st->scale0 = 0;
         st->masked = 0; st->off_set = 0;
         st->zero_h = st->ovf_hidden = 0; st->max_h0 = 0;
@@ -2603,10 +2691,16 @@ void css_apply(wnode_t *n, wnode_t *parent){
     if(st->display == W_NONE) return;
 
     int nm = 0;
-    n->sig = node_sig(n);
-    use_sig = 1;
-    if(nrules && bucket_start) collect(n, &nm);
-    use_sig = 0;
+    if(n->pseudo){
+        /* a ::before/::after box: the rules css_apply(parent) set aside for it */
+        int w = n->pseudo - 1;
+        for(int i = 0; i < pe_n[w]; i++) mbuf[nm++] = pe_list[w][i];
+    } else {
+        n->sig = node_sig(n);
+        use_sig = 1; allow_pe = 1;
+        if(nrules && bucket_start) collect(n, &nm);
+        use_sig = 0; allow_pe = 0;
+    }
     /* sort by (specificity, order) */
     for(int i = 1; i < nm; i++){
         int v = mbuf[i], j = i - 1;
@@ -2617,6 +2711,18 @@ void css_apply(wnode_t *n, wnode_t *parent){
             j--;
         }
         mbuf[j + 1] = v;
+    }
+    if(!n->pseudo){
+        /* the ::before and ::after rules wait for css_pseudo(n); the element gets the rest */
+        int k = 0;
+        pe_n[0] = pe_n[1] = 0;
+        pe_owner = n;
+        for(int i = 0; i < nm; i++){
+            int w = rules[mbuf[i]].s.pe;
+            if(!w) mbuf[k++] = mbuf[i];
+            else if(pe_n[w - 1] < PE_MAX) pe_list[w - 1][pe_n[w - 1]++] = mbuf[i];
+        }
+        nm = k;
     }
 #ifdef WEB_HOST_DEBUG
     {   /* CSS_TRACE=tag or #id or .class: the rules that matched, in cascade order */
@@ -2685,6 +2791,66 @@ void css_apply(wnode_t *n, wnode_t *parent){
         if(lum > 170 && ulum > 170){ st->bg_set = 1; st->bg = 0x3A4048; st->bg_stand = 1; }
     }
     if(st->size < 1) st->size = 1;
+    if(n->pseudo && st->display != W_NONE){
+        /* the winning content value (custom properties of the box are in scope here) */
+        const decl_t *cd = NULL;
+        for(int imp = 0; imp < 2; imp++)
+            for(int i = 0; i < nm; i++){
+                const rule_t *r = &rules[mbuf[i]];
+                for(int k = 0; k < r->nd; k++) if(r->d[k].id == PR_CONTENT && r->d[k].imp == imp) cd = &r->d[k];
+            }
+        int len = -1;
+        static char ctext[1024];
+        if(cd){
+            const char *v = cd->v; u32 vl = cd->vl;
+            static char vbuf[1024];
+            if(cd->var){ int r = subst(v, vl, vbuf, sizeof vbuf, 0); if(r >= 0){ v = vbuf; vl = (u32)r; } }
+            len = content_text(n->parent, v, vl, ctext, sizeof ctext);
+        }
+        wnode_t *t = n->first;
+        if(len < 0 || !t) st->display = W_NONE;
+        else {
+            if(t->txt && (t->tlen != (u32)len || memcmp(t->txt, ctext, (u32)len) != 0)){ kfree(t->txt); t->txt = NULL; }
+            if(!t->txt){
+                t->txt = kmalloc((u32)len + 1);
+                if(t->txt){ memcpy(t->txt, ctext, (u32)len); t->txt[len] = 0; }
+            }
+            t->tlen = t->txt ? (u32)len : 0;
+        }
+    }
+}
+
+/* ::before and ::after. css_apply(n) sets their rules aside; this makes (once) or refreshes the
+ * generated boxes of n: an element whose one child is a text node holding the content. They are
+ * kept in n->pe and are not in the child list: the layout splices them in for its pass only, so
+ * scripts never see them. Returns 1 if n shows one of them. */
+int css_pseudo(wnode_t *n){
+    static const char *const replaced[] = { "img", "input", "br", "hr", "select", "textarea", "video",
+        "iframe", "option", "html", 0 };
+    int have = 0;
+    int skip = pe_owner != n || n->text || is_tag(n->tag, replaced);
+    for(int w = 0; w < 2; w++){
+        wnode_t *p = n->pe[w];
+        if(skip || !pe_n[w]){ if(p) p->st.display = W_NONE; continue; }
+        if(!p){
+            p = web_new_node();
+            wnode_t *t = p ? web_new_node() : NULL;
+            if(!t) continue;
+            memcpy(p->tag, w ? "::after" : "::before", w ? 8 : 9);
+            p->pseudo = (u8)(w + 1);
+            t->text = 1; t->parent = p;
+            p->first = p->last = t;
+            n->pe[w] = p;
+        }
+        p->parent = n; p->next = NULL;
+        int mark = css_var_mark();
+        css_apply(p, n);
+        if(p->st.display != W_NONE && p->first) css_apply(p->first, p);
+        css_var_pop(mark);
+        if(p->st.display != W_NONE) have = 1;
+    }
+    pe_owner = NULL;
+    return have;
 }
 
 int css_tag_is_hidden(const char *tag){
