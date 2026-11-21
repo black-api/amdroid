@@ -22,6 +22,11 @@ void fb_blend(u32 x, u32 y, u32 color, u32 a);
 /* Blend 'color' through a w x h coverage mask (a byte per pixel, 255 = opaque). */
 void fb_blend_mask(i32 x, i32 y, u32 w, u32 h, const u8 *mask, u32 color);
 void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color);
+/* Glass: the rectangle shows 'bd' (a blurred picture of the desktop, bp pixels a row, laid out
+ * like the screen) mixed with 'tint' by ta (0..256); mask (w x h bytes, or NULL) is its coverage. */
+void fb_glass_rect(i32 x, i32 y, u32 w, u32 h, const u8 *mask, const u32 *bd, u32 bp, u32 tint, u32 ta,
+                   i32 panel_y, u32 sheen_h, u32 sheen_a);   /* plus a white sheen fading from sheen_a (0..256) at panel_y over sheen_h rows */
+void fb_blend_rect(u32 x, u32 y, u32 w, u32 h, u32 color, u32 a);   /* a: 0..256 */
 /* Lay a w x h picture over what is drawn: each pixel is a colour weighted by its coverage,
  * with the share of the background that shows through in the top byte (255 = all). */
 void fb_blit_over(i32 x, i32 y, u32 w, u32 h, const u32 *src);

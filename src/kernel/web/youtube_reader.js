@@ -53,8 +53,9 @@ function list(vs, w, h){
 }
 function playerHtml(id, alt){
   /* as on YouTube: the video, and under it one control row (play/pause, the seek bar, the time) */
-  return '<table id="player"><tr><td valign="top" width="540"><video id="vid" width="540" height="304"></video>' +
-    '<table width="540" style="margin-top:4px"><tr><td id="play" width="28" style="color:' + C.fg + ';font-size:18px;text-align:center">&#9654;</td>' +
+  /* the player fills its column (the video is 16:9 of the column's width) */
+  return '<table id="player" width="100%"><tr><td valign="top"><video id="vid" style="width:100%"></video>' +
+    '<table width="100%" style="margin-top:4px"><tr><td id="play" width="28" style="color:' + C.fg + ';font-size:18px;text-align:center">&#9654;</td>' +
     '<td><table width="100%"><tr id="vbar">' + bar() + '</tr></table></td>' +
     '<td width="150" id="vtime" style="color:' + C.fg + ';text-align:right">0:00</td></tr></table>' +
     '<div id="vst" style="color:' + C.dim + ';margin-top:2px;font-size:12px">Loading the video...</div></td></tr></table>';
@@ -76,13 +77,13 @@ if(vd){
     if(o.videoPrimaryInfoRenderer){ date = txt(o.videoPrimaryInfoRenderer.dateText); return; } for(var k in o) find(o[k], depth + 1); })(data, 0);
   walk(data, 0);
   /* two columns, as on YouTube: the video and its details, and the videos up next */
-  html += '<table width="100%"><tr><td valign="top">' +
+  html += '<table width="100%"><tr><td valign="top" width="64%">' +
     playerHtml(vid, vd.title) +
     '<h2 style="color:' + C.fg + '">' + esc(vd.title) + '</h2>' +
     '<p style="color:' + C.fg + '"><b>' + esc(vd.author) + '</b></p>' +
     '<p style="color:' + C.dim + '">' + num(vd.viewCount) + ' views' + (date ? ' - ' + esc(date) : '') + '</p>' +
     '<p style="color:' + C.fg + ';background:' + C.box + ';padding:8px">' + esc(vd.shortDescription || '').replace(/\n/g, '<br>') + '</p>' +
-    '</td><td width="560" valign="top" style="padding-left:24px">' +
+    '</td><td width="36%" valign="top" style="padding-left:24px">' +
     '<h3 style="color:' + C.fg + ';margin-top:0">Up next</h3>' + list(vids.slice(0, 15), 168, 94) + '</td></tr></table>';
 } else if(path === '/watch' || shortId){
   walk(data, 0);

@@ -106,10 +106,8 @@ static int spawn(void){
     }
     u64 bss_end = (u64)(unsigned long)reel_bss_end;
     while(va < bss_end){ if(!vm_alloc_user_page(cr3, va)){ vm_free_space(cr3); return -1; } va += 4096; }
-    for(u64 hv = REEL_HEAP_VA; hv < REEL_HEAP_VA + heap; hv += 4096)
-        if(!vm_alloc_user_page(cr3, hv)){ vm_free_space(cr3); return -1; }
-    for(u32 i = 0; i < STACK_PAGES; i++)
-        if(!vm_alloc_user_page(cr3, STACK_TOP - (u64)(i + 1) * 4096)){ vm_free_space(cr3); return -1; }
+    vm_lazy_range(cr3, REEL_HEAP_VA, REEL_HEAP_VA + heap);                    /* backed as they are used */
+    vm_lazy_range(cr3, STACK_TOP - (u64)STACK_PAGES * 4096, STACK_TOP);
     u64 sva = REEL_SHM_VA;
     for(u64 i = 0; i < SHM_PAGES; i++, sva += 4096)
         if(vm_map_user(cr3, sva, shm_pages[i], PTE_W | PTE_U | PTE_KEEP) != 0){ vm_free_space(cr3); return -1; }
