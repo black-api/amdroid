@@ -995,6 +995,108 @@ static u32 skip_block(const char *t, u32 len, u32 i){
     return len;
 }
 
+/* The comma-separated parts of a selector list, outside brackets and strings. */
+static int split_commas(const char *s, u32 n, const char **part, u32 *pl, int max){
+    int k = 0, depth = 0; char q = 0; u32 start = 0;
+    for(u32 i = 0; i <= n && k < max; i++){
+        if(i < n){
+            char c = s[i];
+            if(q){ if(c == q) q = 0; continue; }
+            if(c == '"' || c == '\''){ q = c; continue; }
+            if(c == '(' || c == '[') depth++;
+            if(c == ')' || c == ']') depth--;
+            if(c != ',' || depth > 0) continue;
+        }
+        const char *p = s + start; u32 l = i - start;
+        trim(&p, &l);
+        if(l){ part[k] = p; pl[k] = l; k++; }
+        start = i + 1;
+    }
+    return k;
+}
+
+/* A nested rule's selector: each of its parts with '&' replaced by each part of the parent
+ * ("a, b { & > c }" is "a > c, b > c"); a part without '&' is a descendant of the parent. */
+static u32 nest_selector(const char *par, u32 pn, const char *sel, u32 sn, char *out, u32 cap){
+    const char *pp[32], *sp[32]; u32 ppl[32], spl[32];
+    int np = split_commas(par, pn, pp, ppl, 32), ns = split_commas(sel, sn, sp, spl, 32);
+    u32 k = 0;
+    for(int a = 0; a < ns; a++){
+        int amp = 0;
+        for(u32 j = 0; j < spl[a]; j++) if(sp[a][j] == '&') amp = 1;
+        for(int b = 0; b < np; b++){
+            u32 need = ppl[b] * 4 + spl[a] + 4;
+            if(k + need >= cap) return k;
+            if(k) out[k++] = ',';
+            if(!amp){
+                memcpy(out + k, pp[b], ppl[b]); k += ppl[b];
+                out[k++] = ' ';
+                memcpy(out + k, sp[a], spl[a]); k += spl[a];
+            } else {
+                for(u32 j = 0; j < spl[a]; j++){
+                    if(sp[a][j] == '&'){ if(k + ppl[b] >= cap) return k; memcpy(out + k, pp[b], ppl[b]); k += ppl[b]; }
+                    else out[k++] = sp[a][j];
+                }
+            }
+        }
+    }
+    return k;
+}
+
+/* A style rule whose block holds nested rules (CSS nesting): its own declarations make one
+ * rule, each nested rule is read with the combined selector, and nested @media / @supports /
+ * @layer / @container blocks hold more of the same. */
+static void add_nested(const char *sel, u32 sn, const char *body, u32 bn, int depth){
+    if(depth > 8) return;
+    char *decls = kmalloc(bn + 1);
+    if(!decls) return;
+    u32 dk = 0, i = 0;
+    while(i < bn){
+        while(i < bn && (c_ws(body[i]) || body[i] == ';')) i++;
+        if(i >= bn) break;
+        u32 st = i; int d = 0; char q = 0;
+        while(i < bn){
+            char c = body[i];
+            if(q){ if(c == '\\') i++; else if(c == q) q = 0; i++; continue; }
+            if(c == '"' || c == '\''){ q = c; i++; continue; }
+            if(c == '(' || c == '[') d++;
+            else if(c == ')' || c == ']') d--;
+            else if(d <= 0 && (c == ';' || c == '{')) break;
+            i++;
+        }
+        if(i < bn && body[i] == '{'){
+            u32 close = skip_block(body, bn, i);
+            const char *pre = body + st; u32 pl = i - st;
+            trim(&pre, &pl);
+            const char *in = body + i + 1; u32 il = close > i + 2 ? close - i - 2 : 0;
+            if(starts_n(pre, pl, "@media")){
+                u16 saved = cur_media;
+                cur_media = add_media(pre + 6, pl - 6);
+                add_nested(sel, sn, in, il, depth + 1);
+                cur_media = saved;
+            } else if(starts_n(pre, pl, "@supports")){
+                const char *c = pre + 9; u32 cl = pl - 9;
+                trim(&c, &cl);
+                if(!(cl >= 3 && starts_n(c, cl, "not"))) add_nested(sel, sn, in, il, depth + 1);
+            } else if(starts_n(pre, pl, "@layer") || starts_n(pre, pl, "@container") || starts_n(pre, pl, "@scope")){
+                add_nested(sel, sn, in, il, depth + 1);
+            } else if(pl && pre[0] != '@'){
+                static char comb[8][4096];
+                char *cs = comb[depth & 7];
+                u32 cl = nest_selector(sel, sn, pre, pl, cs, sizeof comb[0]);
+                if(cl) add_nested(cs, cl, in, il, depth + 1);
+            }
+            i = close;
+            continue;
+        }
+        memcpy(decls + dk, body + st, i - st); dk += i - st;
+        decls[dk++] = ';';
+        if(i < bn) i++;
+    }
+    if(dk) add_rule(sel, sn, decls, dk);
+    kfree(decls);
+}
+
 void css_add_sheet(const char *t, u32 len){
     u32 i = 0;
     while(i < len){
@@ -1049,12 +1151,13 @@ void css_add_sheet(const char *t, u32 len){
         u32 se = i;
         u32 close = skip_block(t, len, i);
         u32 ds = i + 1, de = close > ds ? close - 1 : ds;
-        /* nested rules (CSS nesting) are not supported: a block with '{' inside is cut there */
-        for(u32 k = ds; k < de; k++) if(t[k] == '{'){ while(k > ds && t[k] != ';' && t[k] != '}') k--; de = k; break; }
         i = close;
         const char *sp = t + ss; u32 sn = se - ss;
         trim(&sp, &sn);
-        if(sn) add_rule(sp, sn, t + ds, de - ds);
+        int nested = 0;
+        for(u32 k = ds; k < de; k++) if(t[k] == '{'){ nested = 1; break; }
+        if(sn && nested) add_nested(sp, sn, t + ds, de - ds, 0);
+        else if(sn) add_rule(sp, sn, t + ds, de - ds);
     }
 }
 

@@ -1,0 +1,18 @@
+<!DOCTYPE html><html><head><style>
+.card{background:#eef;padding:10px;margin:8px 0;
+  .title{color:#c00;font-weight:bold}
+  & p{color:#060}
+  &.wide{background:#fe9}
+  > .direct{color:#00c}
+  a, b{color:#909}
+  @media (min-width:500px){ .mq{color:#f60} }
+  .deep{ .deeper{ color:#0aa } }
+}
+.list{ li{ &:first-child{color:red} } }
+.after{color:#555}
+</style></head><body>
+<div class="card"><div class="title">Red bold title</div><p>Green paragraph</p><div class="direct">Blue direct child</div><a>purple a</a> <b>purple b</b><div class="mq">orange at min-width 500</div><div class="deep"><span class="deeper">teal deeper</span></div></div>
+<div class="card wide">Yellow wide card</div>
+<ul class="list"><li>first red</li><li>second normal</li></ul>
+<p class="after">Grey after (rules after the nested block still apply)</p>
+</body></html>
